@@ -1,0 +1,161 @@
+version: '3'
+
+# Miyoo Mini Flip port tasks. Upstream's own taskfile (upstream/slot/taskfile.yml)
+# builds aarch64 for the Anbernic H700 and asserts it; these are the armv7
+# counterparts. Everything cross-builds inside toolchain/Dockerfile, which carries
+# both the Miyoo Mini gcc (glibc 2.28, the device's own libc) and a pinned Rust.
+
+vars:
+  IMAGE: slot-miyoo-toolchain:latest
+  TARGET: armv7-unknown-linux-gnueabihf
+  UPSTREAM: upstream/slot
+  # Kept in step with upstream/slot/taskfile.yml. Bump both together.
+  MGBA_COMMIT: e31759b24e7a4e3899285ff720d7b573ac328ae7
+  GPSP_COMMIT: 7b2dd37394e2822110cacef321e9bb291a305b77
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds: [task --list]
+
+  image:
+    desc: Build the cross toolchain image (Miyoo gcc + pinned Rust + armv7 target)
+    sources: [toolchain/Dockerfile]
+    cmds:
+      - docker build -t {{.IMAGE}} toolchain/
+      - docker run --rm {{.IMAGE}} bash -c 'cargo --version && arm-linux-gnueabihf-gcc -dumpmachine'
+
+  sh:
+    desc: Run CMD in the toolchain container as the calling user
+    internal: true
+    requires:
+      vars: [CMD]
+    cmds:
+      - >-
+        docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/src -w /src
+        -e HOME=/tmp -e CARGO_HOME=/src/.cargo-home {{.IMAGE}}
+        bash -c '{{.CMD}}'
+
+  shell:
+    desc: Interactive shell in the toolchain container
+    cmds:
+      - >-
+        docker run --rm -it -u "$(id -u):$(id -g)" -v "$PWD":/src -w /src
+        -e HOME=/tmp -e CARGO_HOME=/src/.cargo-home {{.IMAGE}} bash
+
+  patch:
+    desc: Apply this port's patches to the upstream submodule working tree
+    cmds:
+      # Absolute paths: git -C changes directory, so a repo-relative patch path
+      # would not resolve. Idempotent via --reverse --check, and a patch that
+      # neither applies nor is already applied is a hard error, not a skip.
+      - |
+        set -eu
+        for p in "$PWD"/patches/*.patch; do
+          if git -C {{.UPSTREAM}} apply --reverse --check "$p" 2>/dev/null; then
+            echo "already applied $(basename "$p")"
+          elif git -C {{.UPSTREAM}} apply "$p"; then
+            echo "applied $(basename "$p")"
+          else
+            echo "STALE: $(basename "$p") does not apply to $(git -C {{.UPSTREAM}} rev-parse --short HEAD)" >&2
+            exit 1
+          fi
+        done
+
+  unpatch:
+    desc: Discard all local changes in the upstream submodule, back to the pinned commit
+    cmds:
+      - git -C {{.UPSTREAM}} checkout -- .
+      - 'echo "{{.UPSTREAM}} is back at $(git -C {{.UPSTREAM}} rev-parse --short HEAD)"'
+
+  core:gpsp:
+    desc: Build gpsp_libretro.so for armv7 (ARM JIT — the GBA core that stands a chance)
+    deps: [image]
+    status:
+      - test -f vendor-miyoo/gpsp_libretro.so
+      - test "$(cat vendor-miyoo/gpsp_libretro.so.meta 2>/dev/null)" = "$(sh cores/gpsp/build-miyoo.sh stamp {{.GPSP_COMMIT}})"
+    cmds:
+      - mkdir -p third-party vendor-miyoo
+      - test -f third-party/gpsp-src.tar.gz || curl -fsSL -o third-party/gpsp-src.tar.gz "https://github.com/libretro/gpsp/archive/{{.GPSP_COMMIT}}.tar.gz"
+      - task: sh
+        vars:
+          CMD: sh cores/gpsp/build-miyoo.sh build {{.GPSP_COMMIT}} third-party/gpsp-src.tar.gz target-miyoo/gpsp vendor-miyoo/gpsp_libretro.so
+      - task: verify:arm
+        vars: {FILE: vendor-miyoo/gpsp_libretro.so}
+      # See the note in cores/gpsp/build-miyoo.sh: gpSP's Makefile silently skips
+      # -static-libgcc/-static-libstdc++ on this toolchain. Harmless only as long
+      # as the core really needs nothing beyond libc and libm, so assert that.
+      - task: sh
+        vars:
+          CMD: >-
+            ! arm-linux-gnueabihf-readelf -d vendor-miyoo/gpsp_libretro.so
+            | grep -E "NEEDED.*(libstdc\+\+|libgcc_s)"
+
+  core:mgba:
+    desc: Build mgba_libretro.so for armv7
+    deps: [image]
+    status:
+      - test -f vendor-miyoo/mgba_libretro.so
+      - test "$(cat vendor-miyoo/mgba_libretro.so.meta 2>/dev/null)" = "$(sh cores/mgba/build-miyoo.sh stamp {{.MGBA_COMMIT}})"
+    cmds:
+      - mkdir -p vendor-miyoo
+      - task: sh
+        vars:
+          CMD: sh cores/mgba/build-miyoo.sh build {{.MGBA_COMMIT}} target-miyoo/mgba vendor-miyoo/mgba_libretro.so
+      - task: verify:arm
+        vars: {FILE: vendor-miyoo/mgba_libretro.so}
+
+  cores:
+    desc: Build both libretro cores for armv7
+    cmds:
+      - task: core:gpsp
+      - task: core:mgba
+
+  build:
+    desc: Build the slot binary for armv7
+    deps: [image, patch]
+    cmds:
+      - task: sh
+        vars:
+          CMD: >-
+            cd {{.UPSTREAM}} && cargo build --target {{.TARGET}} --profile device
+            --target-dir /src/target-miyoo/rust -p slot --no-default-features --features device
+      - task: verify:arm
+        vars: {FILE: 'target-miyoo/rust/{{.TARGET}}/device/slot'}
+
+  verify:arm:
+    desc: Assert FILE is a 32-bit ARM object the device can load
+    internal: true
+    requires:
+      vars: [FILE]
+    cmds:
+      # Upstream greps for aarch64 at the same points; this is the armv7 guard.
+      - file {{.FILE}} | grep -q "ELF 32-bit LSB .*ARM"
+      - task: sh
+        vars:
+          CMD: >-
+            arm-linux-gnueabihf-readelf -A {{.FILE}} | grep -q "Tag_CPU_arch: v7" &&
+            arm-linux-gnueabihf-readelf -A {{.FILE}} | grep -q "Tag_ABI_VFP_args: VFP registers"
+      - 'echo "{{.FILE}}: armv7-a hard-float, ok"'
+
+  glibc:
+    desc: Print the highest glibc version the built binary needs (device must be >= this)
+    cmds:
+      - task: sh
+        vars:
+          CMD: >-
+            arm-linux-gnueabihf-readelf -V target-miyoo/rust/{{.TARGET}}/device/slot
+            | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
+
+  all:
+    desc: Build the cores and the frontend for armv7
+    cmds:
+      - task: cores
+      - task: build
+
+  clean:
+    desc: Remove this port's build output (leaves the cargo cache)
+    cmds:
+      - docker run --rm -v "$PWD":/src -w /src {{.IMAGE}} rm -rf /src/target-miyoo /src/vendor-miyoo
+      - task: unpatch

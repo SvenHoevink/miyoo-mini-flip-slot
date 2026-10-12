@@ -44,6 +44,25 @@ Files that matter, in order: `surface.rs` (the trait, plus `OUT_W`/`OUT_H`),
 `shaders.rs`, `lcd3x.rs` and `grade.rs` (per-pixel effects; the first things
 to make no-ops).
 
+## The toolchain is settled; don't relitigate it
+
+`toolchain/Dockerfile` + `taskfile.yml` cross-build all three artifacts for
+armv7 from a clean tree. The decisions are made and the reasoning is in the
+scripts: glibc/dynamic (not musl-static, because slot `dlopen`s its cores),
+`armv7-unknown-linux-gnueabihf`, `platform=classic_armv7_a7` for gpSP,
+`cores/miyoo-toolchain.cmake` for mGBA. Build with `task`, not by hand.
+
+Two traps already paid for, both found by rebuilding from clean rather than
+incrementally — so **run `task clean && task all` before trusting a build
+change**:
+
+- The base image exports `CROSS_COMPILE` and its PATH only from root's
+  bashrc/profile, so non-login shells and non-root uids lose both. Everything
+  the build needs is set as `ENV` in the Dockerfile; keep it that way.
+- Never pass `CFLAGS` as a make *argument* to a libretro core. A command-line
+  variable overrides the Makefile's own `CFLAGS +=`, dropping include paths and
+  `-DHAVE_DYNAREC`. It goes in the environment.
+
 ## Upstream assumes aarch64 in places that will bite
 
 `upstream/slot/taskfile.yml` asserts `file ... | grep -q aarch64` after every
@@ -59,6 +78,13 @@ Rust toolchain is pinned to 1.96 by `upstream/slot/rust-toolchain.toml`.
 
 ```sh
 git submodule update --init          # after cloning
+
+# This port (needs Docker + go-task), from the repo root:
+task              # list tasks
+task all          # cores + frontend for armv7
+task clean        # drop build output, revert the submodule
+task shell        # shell inside the cross toolchain
+task glibc        # glibc floor of the built binary
 
 # Upstream, run from upstream/slot (needs go-task):
 task --list                          # all upstream tasks

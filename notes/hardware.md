@@ -17,6 +17,7 @@ device itself; see "Probing the device" in `README.md` for the commands.
 | MI_GFX (2D blit) present | expected present | — | — |
 | battery sysfs path | — | — | — |
 | firmware version | — | — | — |
+| glibc version | must be >= 2.28 (what we link against) | — | — |
 
 ## Button map
 

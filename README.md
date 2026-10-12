@@ -14,8 +14,27 @@ git submodule update --init
 
 ## Status
 
-**Nothing works yet.** This repo currently holds the port notes and the plan.
-Read "Why this is a port and not a config change" before expecting a build.
+**It cross-compiles for the device. Nothing has run on the device yet.**
+
+`task all` produces, from a clean tree, three armv7 artifacts that the handheld
+could load — verified as 32-bit ARMv7-A, VFPv4 hard-float, needing nothing
+beyond glibc 2.28:
+
+| artifact | size | notes |
+|---|---|---|
+| `target-miyoo/rust/armv7-unknown-linux-gnueabihf/device/slot` | 4.0 MB | the frontend |
+| `vendor-miyoo/gpsp_libretro.so` | 756 KB | ARM dynarec, all upstream patches |
+| `vendor-miyoo/mgba_libretro.so` | 2.1 MB | all 7 upstream patches |
+
+The whole of slot needed **exactly one** source change to compile for armv7
+(`patches/0001-crash-registers-on-armv7.patch`, 6 lines: the crash handler's
+register read). Everything else, the GLES pipeline included, compiles as-is —
+because the `gl` crate resolves entry points at runtime, so **the GPU problem
+is a runtime problem, not a compile-time one.** The binary will build, ship,
+start, fail to find `libEGL.so`, and die. The software rasteriser is still the
+work; see the plan.
+
+Nothing here is confirmed against hardware. `notes/hardware.md` is empty.
 
 ## The problem in one table
 
@@ -74,16 +93,49 @@ without touching a line of UI code.
 
 So: a `software` feature alongside upstream's `host` and `device`.
 
+## Building
+
+Needs Docker and [go-task](https://taskfile.dev). Everything cross-builds in
+`toolchain/Dockerfile`, which carries the Miyoo Mini gcc (8.3,
+`arm-linux-gnueabihf`, **glibc 2.28 — the device's own libc**) alongside a
+pinned Rust 1.96 with the armv7 target, so one image builds the C cores and the
+Rust frontend.
+
+```sh
+task            # list tasks
+task all        # cores + frontend for armv7, from scratch
+task cores      # just the two libretro cores
+task build      # just the frontend
+task glibc      # highest glibc version the binary needs (device must be >= this)
+task shell      # poke around inside the toolchain container
+task clean      # drop build output and un-patch the submodule
+```
+
+Choices worth knowing, with the reasoning in the scripts themselves:
+
+- **`arm-linux-gnueabihf`, glibc, dynamic** — not musl-static. slot `dlopen`s
+  its libretro cores, and a fully static binary has no dynamic loader. The
+  toolchain and triple are the ones the Miyoo Mini community settled on
+  (Allium, a Rust launcher for this same SoC, uses the same image).
+- **`armv7-unknown-linux-gnueabihf`** for Rust and `platform=classic_armv7_a7`
+  for gpSP, both with `-mtune=cortex-a7 -mfpu=neon-vfpv4`, so frontend and
+  cores target one ISA. Allium uses the lower `arm-unknown-linux-gnueabihf`
+  baseline; this device is a Cortex-A7, so there is no reason to give up armv7.
+- **Patches, not edits.** `upstream/slot` is a pinned submodule and stays
+  pristine; `task patch` applies `patches/*.patch` to its working tree and
+  `task unpatch` reverts. A patch that no longer applies is a hard error, not a
+  warning, so an upstream bump cannot silently drop a change.
+
 ## Plan
 
+- [x] **armv7 toolchain.** `toolchain/Dockerfile`; `task build`.
+- [x] **Cores for armv7.** Both built with upstream's patches; `task cores`.
+      gpSP has `HAVE_DYNAREC=1` (ARM JIT) and is expected to be the GBA core —
+      mGBA has no GBA dynarec and interprets, which at 1.2 GHz probably will not
+      hold 60fps. Unmeasured.
 - [ ] **Probe the hardware.** Confirm panel geometry, pixel format, rotation,
-      evdev button map, battery sysfs paths, free RAM. See below.
-- [ ] **armv7 toolchain.** `rustup target add armv7-unknown-linux-gnueabihf`,
-      pick a working sysroot/linker, get a hello-world running on-device.
-- [ ] **Cores for armv7.** Build `mgba_libretro.so` and `gpsp_libretro.so` for
-      armv7 with upstream's patches from `upstream/slot/cores/`. gpSP's ARM JIT
-      is a real asset on a Cortex-A7; mGBA interpreting GBA at 1.2 GHz may not
-      hold 60fps, so expect gpSP to be the default for GBA.
+      evdev button map, battery sysfs paths, free RAM, and that the device's
+      glibc is >= 2.28. See below.
 - [ ] **Software `Surface`.** `/dev/fb0` mmap + double buffer via `FBIOPAN_DISPLAY`.
 - [ ] **Software rasteriser.** The five `Draw` variants: filled rect with alpha,
       textured blit with alpha, rotated blit (`Turned`, used by the cart
@@ -100,6 +152,19 @@ So: a `software` feature alongside upstream's `host` and `device`.
 - [ ] **Measure.** RAM headroom and sustained frame time, on-device, before
       calling anything done.
 
+## Layout
+
+```
+cores/                   armv7 build scripts for the two libretro cores,
+                         counterparts to upstream's aarch64 ones
+  miyoo-toolchain.cmake  cross settings for mGBA's cmake build
+patches/                 changes to upstream files, applied to the submodule
+toolchain/Dockerfile     the cross build box
+notes/hardware.md        measured device facts (empty until probed)
+upstream/slot            pinned submodule, read-only
+taskfile.yml             the armv7 build tasks
+```
+
 ## Probing the device
 
 Nothing above is settled until the handheld confirms it. Get a shell (ADB over
@@ -107,6 +172,7 @@ USB, or telnet/SSH depending on firmware) and capture:
 
 ```sh
 uname -a                              # kernel, confirm armv7l
+ldd --version                         # must be >= 2.28, what we link against
 cat /proc/cpuinfo /proc/meminfo
 cat /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/bits_per_pixel
 cat /sys/class/graphics/fb0/modes /sys/class/graphics/fb0/stride

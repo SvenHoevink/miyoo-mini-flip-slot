@@ -10,3 +10,7 @@
 # stock firmware images). Keep these out of git; they are large and may carry
 # serials. Summarise findings in notes/ instead.
 /device-dump/
+/.cargo-home
+/target-miyoo
+/vendor-miyoo
+/third-party
