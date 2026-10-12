@@ -1,0 +1,5 @@
+{
+	"label": "slot",
+	"launch": "launch.sh",
+	"description": "Game Boy frontend (port in progress)"
+}

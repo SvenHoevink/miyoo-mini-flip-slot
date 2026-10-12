@@ -162,8 +162,9 @@ Choices worth knowing, with the reasoning in the scripts themselves:
 
 ```
 card/                    what ships on the SD card
-  App/Slot/              launcher entry for slot
-  App/SlotProbe/         launcher entry that collects hardware facts
+  App/                   launcher entries, stock and Onion layout
+  Apps/                  launcher entries, Allium layout (*.pak)
+  System/probe.sh        the hardware probe, one copy for every layout
   System/                armv7 launch script
 cores/                   armv7 build scripts for the two libretro cores,
                          counterparts to upstream's aarch64 ones
@@ -251,11 +252,15 @@ evidence. ROMs, if you want them in place for later, go unzipped in
 - **Card format:** whatever the device already boots from — don't reformat.
   FAT32 and exFAT are both routinely mounted `noexec`, which is why both launch
   scripts hand the binary to `ld.so` rather than executing it.
-- **`/mnt/SDCARD` is an assumption.** It is the Miyoo Mini path and the Mini
-  Flip is the same SoC family, but the scripts don't rely on it: each derives
-  the root from its own location. The probe prints the real path.
-- **App icons** point at `../../Icons/Default/app/`, which is an Onion path. On
-  stock firmware the entry should still appear, just without an icon.
+- **`/mnt/SDCARD` is the card root**, confirmed against a live Allium install.
+  The scripts still derive it from their own location rather than hardcoding it,
+  so a differently-mounted card works too.
+- **Three launcher layouts ship, and the unused ones are ignored.** Stock and
+  Onion read `App/<Name>/config.json`; Allium reads `Apps/<Name>.pak/`. Both are
+  in the tree with the same `config.json` schema, and the probe itself lives once
+  at `System/probe.sh` with a thin entry per layout. No `icon` key is set — it is
+  optional, and the path conventions differ per launcher, so an icon that works
+  on one shows up broken on another.
 - **If the app doesn't show up**, the launcher has cached its list — reboot the
   device. On Onion, a Package-Manager visit also refreshes it.
 

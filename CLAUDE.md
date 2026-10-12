@@ -126,6 +126,17 @@ name — `/sys/class/graphics/fb0`, `/sys/class/input`, `/sys/class/power_supply
 is the port's friend: much of it may just work. Check each path exists on the
 Miyoo before assuming which.
 
+## The target card runs Allium
+
+Dean's card is an **Allium** install (`Apps/<Name>.pak/`, `allium.log` at the
+root), not stock or Onion (`App/<Name>/config.json`). `card/` ships both layouts
+because they coexist harmlessly, but Allium is the one that has to work.
+
+Allium is itself a Rust launcher for this same SoC, and it draws without a GPU —
+so it is the closest working reference for the software rasteriser, as well as
+for the audio path (it uses SigmaStar `MI_AO` via FFI rather than ALSA). Worth
+reading before inventing anything.
+
 ## Anything that ships on the card is busybox sh
 
 `card/` holds the launcher entries and launch scripts. The device's shell is

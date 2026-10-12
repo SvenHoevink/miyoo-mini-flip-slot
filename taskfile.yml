@@ -172,11 +172,14 @@ tasks:
         [ "$n" = 20 ] || { echo "expected 20 dirs from root.rs, got $n" >&2; exit 1; }
         for d in $dirs; do mkdir -p "{{.OUT}}/$d"; done
         echo "content root: $n directories"
+      # Both launcher layouts: App/<Name>/ for stock and Onion, Apps/<Name>.pak/
+      # for Allium. The launcher that isn't in use simply ignores the other.
       - cp -R card/App {{.OUT}}/App
-      - cp card/System/launch_frontend.sh {{.OUT}}/System/
+      - cp -R card/Apps {{.OUT}}/Apps
+      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh {{.OUT}}/System/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
-      - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/launch_frontend.sh {{.OUT}}/App/*/launch.sh
+      - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/*.sh {{.OUT}}/App/*/launch.sh {{.OUT}}/Apps/*/launch.sh
       # GPL-3.0: ship the licence texts and the cores' corresponding source refs.
       - cp -R {{.UPSTREAM}}/licenses {{.OUT}}/System/licenses
       - cp vendor-miyoo/gpsp_libretro.so.meta vendor-miyoo/mgba_libretro.so.meta {{.OUT}}/System/licenses/
@@ -189,9 +192,11 @@ tasks:
       OUT: '{{.OUT | default "dist-probe"}}'
     cmds:
       - rm -rf {{.OUT}}
-      - mkdir -p {{.OUT}}/App
+      - mkdir -p {{.OUT}}/App {{.OUT}}/Apps {{.OUT}}/System
       - cp -R card/App/SlotProbe {{.OUT}}/App/
-      - chmod +x {{.OUT}}/App/SlotProbe/launch.sh {{.OUT}}/App/SlotProbe/probe.sh
+      - cp -R "card/Apps/slot probe.pak" {{.OUT}}/Apps/
+      - cp card/System/probe.sh card/System/probe-run.sh {{.OUT}}/System/
+      - chmod +x {{.OUT}}/System/*.sh {{.OUT}}/App/SlotProbe/launch.sh {{.OUT}}/Apps/*/launch.sh
       - 'echo "probe ready at {{.OUT}} — copy its contents to the card root, run \"slot probe\" on the device, then read slot-probe.txt off the card"'
 
   binfmt:

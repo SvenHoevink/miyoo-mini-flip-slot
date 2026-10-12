@@ -1,6 +1,5 @@
 {
 	"label": "slot probe",
-	"icon": "../../Icons/Default/app/terminal.png",
 	"launch": "launch.sh",
 	"description": "Collect hardware facts the slot port needs"
 }
