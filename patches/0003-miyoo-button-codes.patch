@@ -1,8 +1,49 @@
 diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
-index 02cc4bb..d6ce9e9 100644
+index 02cc4bb..c4de188 100644
 --- a/crates/slot/src/input/evdev.rs
 +++ b/crates/slot/src/input/evdev.rs
-@@ -72,6 +72,38 @@ pub fn to_raw(ev: Ev) -> Option<RawEvent> {
+@@ -2,7 +2,15 @@ use std::path::{Path, PathBuf};
+ 
+ use slot_input::{Btn, RawEvent};
+ 
+-pub const EVENT_BYTES: usize = 24;
++/// `struct input_event` opens with a `timeval`, which is two C longs wide, so
++/// the struct is 24 bytes on a 64-bit kernel and **16 on a 32-bit one** such as
++/// the Miyoo Mini Flip's armv7. Reading 24-byte records out of a 16-byte stream
++/// slides every field: the timestamp lands where type/code/value are read from,
++/// so every press decodes as garbage and is dropped. Derive it instead of
++/// assuming the aarch64 layout.
++const TIME_BYTES: usize = 2 * std::mem::size_of::<libc::c_long>();
++
++pub const EVENT_BYTES: usize = TIME_BYTES + 8;
+ 
+ pub const EV_SYN: u16 = 0x00;
+ pub const EV_KEY: u16 = 0x01;
+@@ -51,11 +59,19 @@ pub struct Ev {
+ }
+ 
+ pub fn decode(bytes: &[u8]) -> Option<Ev> {
+-    let packet: &[u8; EVENT_BYTES] = bytes.get(..EVENT_BYTES)?.try_into().ok()?;
++    decode_after_time(bytes, TIME_BYTES)
++}
++
++/// The width of the leading `timeval` is a parameter so both layouts can be
++/// tested from either host; on a 64-bit build machine the 32-bit case is
++/// otherwise unreachable, which is how it went unnoticed.
++fn decode_after_time(bytes: &[u8], time_bytes: usize) -> Option<Ev> {
++    let packet = bytes.get(..time_bytes + 8)?;
++    let at = |i: usize| packet[time_bytes + i];
+     Some(Ev {
+-        kind: u16::from_le_bytes([packet[16], packet[17]]),
+-        code: u16::from_le_bytes([packet[18], packet[19]]),
+-        value: i32::from_le_bytes([packet[20], packet[21], packet[22], packet[23]]),
++        kind: u16::from_le_bytes([at(0), at(1)]),
++        code: u16::from_le_bytes([at(2), at(3)]),
++        value: i32::from_le_bytes([at(4), at(5), at(6), at(7)]),
+     })
+ }
+ 
+@@ -72,6 +88,38 @@ pub fn to_raw(ev: Ev) -> Option<RawEvent> {
      }
  }
  
@@ -41,7 +82,7 @@ index 02cc4bb..d6ce9e9 100644
  pub fn code_to_btn(code: u16) -> Option<Btn> {
      Some(match code {
          0x130 => Btn::A,
-@@ -92,6 +124,15 @@ pub fn code_to_btn(code: u16) -> Option<Btn> {
+@@ -92,6 +140,15 @@ pub fn code_to_btn(code: u16) -> Option<Btn> {
      })
  }
  
@@ -57,3 +98,48 @@ index 02cc4bb..d6ce9e9 100644
  const WANTED: [u16; 15] = [
      0x130, 0x131, 0x132, 0x133, 0x134, 0x135, 0x136, 0x137, 0x138, 0x13a, 0x13b, 0x162, 115, 114,
      116,
+@@ -134,3 +191,44 @@ pub fn device_name(sys: &Path, node: &Path) -> String {
+         .map(|n| n.trim().to_string())
+         .unwrap_or_else(|| node.display().to_string())
+ }
++
++#[cfg(test)]
++mod input_event_layout_tests {
++    use super::{code_to_btn, decode_after_time, Ev, EV_KEY};
++
++    /// One `struct input_event` as a 32-bit kernel writes it: 8 bytes of
++    /// timeval, then type, code, value. This is KEY_SPACE (the Miyoo A button)
++    /// going down, with a plausible timestamp.
++    fn press_32bit() -> Vec<u8> {
++        let mut b = Vec::new();
++        b.extend_from_slice(&47657u32.to_le_bytes()); // tv_sec
++        b.extend_from_slice(&565800u32.to_le_bytes()); // tv_usec
++        b.extend_from_slice(&EV_KEY.to_le_bytes());
++        b.extend_from_slice(&57u16.to_le_bytes()); // KEY_SPACE
++        b.extend_from_slice(&1i32.to_le_bytes()); // down
++        b
++    }
++
++    #[test]
++    fn decodes_a_32_bit_record() {
++        let ev = decode_after_time(&press_32bit(), 8).expect("short packet");
++        assert_eq!(
++            (ev.kind, ev.code, ev.value),
++            (EV_KEY, 57, 1),
++            "32-bit input_event decoded wrong"
++        );
++        #[cfg(feature = "miyoo")]
++        assert!(code_to_btn(ev.code).is_some(), "KEY_SPACE should map");
++    }
++
++    #[test]
++    fn the_old_64_bit_assumption_turns_a_press_into_noise() {
++        // What the device actually logged: type=0xba29 code=0x3a36, which is
++        // the timestamp read through the wrong offsets. Needs 24 bytes, so feed
++        // it two records' worth and read the first as 64-bit.
++        let mut stream = press_32bit();
++        stream.extend_from_slice(&press_32bit());
++        let ev: Ev = decode_after_time(&stream, 16).expect("short packet");
++        assert_ne!(ev.kind, EV_KEY, "the bug should not decode as a key event");
++    }
++}
