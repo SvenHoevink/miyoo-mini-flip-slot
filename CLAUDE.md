@@ -11,6 +11,12 @@ project's whole difficulty is that the target has no GPU and 128 MB of RAM.
 A host build that compiles, or a unit test that passes, proves nothing about
 the device. Say "builds for armv7" or "compiles" — not "works".
 
+`task run:qemu` runs the real device binary here and is the right loop for
+writing the rasteriser, but it is **not** evidence about the device. It cannot
+speak to frame times on a 1.2 GHz Cortex-A7 or to a 128 MB ceiling, and its
+`fb0` is the host's. "Draws correctly under qemu" is a true and useful claim;
+"works on the Mini Flip" is not the same claim.
+
 **Don't invent hardware facts.** Panel stride, pixel format, rotation, evdev
 codes and battery paths are device-specific and the public spec sheets
 disagree with each other (even on whether the SSD202D's CPU is an A7 or an
@@ -91,6 +97,8 @@ task shell        # shell inside the cross toolchain
 task glibc        # glibc floor of the built binary
 task dist         # SD card tree
 task probe        # the on-device probe app alone
+task run:qemu     # run the device build here, under qemu
+task verify:root  # prove dist's content root matches slot --init-root
 
 # Upstream, run from upstream/slot (needs go-task):
 task --list                          # all upstream tasks

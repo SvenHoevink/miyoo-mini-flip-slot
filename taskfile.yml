@@ -9,6 +9,12 @@ vars:
   IMAGE: slot-miyoo-toolchain:latest
   TARGET: armv7-unknown-linux-gnueabihf
   UPSTREAM: upstream/slot
+  # A plain armv7 glibc userland to run the device build under qemu. Its glibc is
+  # newer than the device's 2.28, which is fine for running what we linked.
+  ARMBOX: arm32v7/debian:bullseye-slim
+  LD: /lib/ld-linux-armhf.so.3
+  TIMEOUT: '20'
+
   # Kept in step with upstream/slot/taskfile.yml. Bump both together.
   MGBA_COMMIT: e31759b24e7a4e3899285ff720d7b573ac328ae7
   GPSP_COMMIT: 7b2dd37394e2822110cacef321e9bb291a305b77
@@ -187,6 +193,61 @@ tasks:
       - cp -R card/App/SlotProbe {{.OUT}}/App/
       - chmod +x {{.OUT}}/App/SlotProbe/launch.sh {{.OUT}}/App/SlotProbe/probe.sh
       - 'echo "probe ready at {{.OUT}} — copy its contents to the card root, run \"slot probe\" on the device, then read slot-probe.txt off the card"'
+
+  binfmt:
+    desc: Register the qemu armv7 handler so the device binary runs on this machine
+    status:
+      - docker run --rm --platform linux/arm/v7 {{.ARMBOX}} true
+    cmds:
+      # Needs Docker, not root: the registration happens inside a privileged
+      # container writing /proc/sys/fs/binfmt_misc. It is host-wide and survives
+      # until reboot. To undo: docker run --privileged --rm tonistiigi/binfmt --uninstall arm
+      - docker run --privileged --rm tonistiigi/binfmt:qemu-v8.1.5 --install arm
+      - docker run --rm --platform linux/arm/v7 {{.ARMBOX}} uname -m
+
+  run:qemu:
+    desc: >-
+      Run the armv7 device build on this machine under qemu. It gets as far as
+      needing EGL and stops there, which is the point: it is the rasteriser's
+      dev loop, no handheld required
+    deps: [binfmt, build, cores]
+    cmds:
+      - mkdir -p target-miyoo/qemu-root
+      - >-
+        docker run --rm --platform linux/arm/v7 -v "$PWD":/src -w /src {{.ARMBOX}}
+        bash -c '
+        set -e;
+        root=/src/target-miyoo/qemu-root;
+        bin=/src/target-miyoo/rust/{{.TARGET}}/device/slot;
+        {{.LD}} $bin --init-root $root >/dev/null;
+        cp /src/vendor-miyoo/*.so $root/System/;
+        echo "glibc here: $(ldd --version | head -1)";
+        SLOT_ROOT=$root timeout {{.TIMEOUT}} {{.LD}} $bin 2>&1 | tail -30'
+
+  verify:root:
+    desc: >-
+      Prove the content root `task dist` derives from root.rs matches what slot
+      itself creates with --init-root. Needs qemu; dist deliberately does not
+    deps: [binfmt, build]
+    cmds:
+      - rm -rf target-miyoo/root-check
+      - >-
+        docker run --rm --platform linux/arm/v7 -v "$PWD":/src -w /src {{.ARMBOX}}
+        {{.LD}} /src/target-miyoo/rust/{{.TARGET}}/device/slot
+        --init-root /src/target-miyoo/root-check
+      - task: dist
+        vars: {OUT: target-miyoo/root-dist}
+      - |
+        set -eu
+        a=$(cd target-miyoo/root-check && find . -type d | sort)
+        b=$(cd target-miyoo/root-dist && find . -type d -not -path './App*' -not -path './System/licenses*' | sort)
+        if [ "$a" = "$b" ]; then
+          echo "content root matches slot --init-root exactly"
+        else
+          echo "MISMATCH between dist and slot --init-root:" >&2
+          diff <(echo "$a") <(echo "$b") >&2 || true
+          exit 1
+        fi
 
   all:
     desc: Build the cores and the frontend for armv7

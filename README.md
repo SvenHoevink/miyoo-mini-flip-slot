@@ -108,6 +108,7 @@ task cores      # just the two libretro cores
 task build      # just the frontend
 task dist       # assemble the SD card tree -> ./dist
 task probe      # assemble just the probe app -> ./dist-probe
+task run:qemu   # run the device build here, under qemu
 task glibc      # highest glibc version the binary needs (device must be >= this)
 task shell      # poke around inside the toolchain container
 task clean      # drop build output and un-patch the submodule
@@ -138,6 +139,8 @@ Choices worth knowing, with the reasoning in the scripts themselves:
 - [ ] **Probe the hardware.** Confirm panel geometry, pixel format, rotation,
       evdev button map, battery sysfs paths, free RAM, and that the device's
       glibc is >= 2.28. See below.
+- [x] **A dev loop.** `task run:qemu` runs the device build here and stops at
+      EGL, so the rasteriser can be written and iterated without the handheld.
 - [ ] **Software `Surface`.** `/dev/fb0` mmap + double buffer via `FBIOPAN_DISPLAY`.
 - [ ] **Software rasteriser.** The five `Draw` variants: filled rect with alpha,
       textured blit with alpha, rotated blit (`Turned`, used by the cart
@@ -171,6 +174,37 @@ notes/hardware.md        measured device facts (empty until probed)
 upstream/slot            pinned submodule, read-only
 taskfile.yml             the armv7 build tasks
 ```
+
+## Running it without the handheld
+
+The device build runs on an ordinary x86 machine under qemu, which is the
+rasteriser's dev loop:
+
+```sh
+task binfmt      # once per boot; needs Docker, not root
+task run:qemu
+```
+
+```
+glibc here: ldd (Debian GLIBC 2.31-13+deb11u14) 2.31
+slot: boot: start at 0.2 ms
+slot: fb0 hint 3840x2160
+slot: gl context: libEGL.so: cannot open shared object file: No such file or directory
+```
+
+That is the whole port in four lines. The armv7 binary **runs** — it boots,
+reads the framebuffer geometry, and stops at exactly one thing: EGL. Which is
+the predicted failure, now reproducible on demand without touching hardware.
+`task verify:root` leans on the same trick to prove the content root `task dist`
+builds is byte-for-byte what `slot --init-root` makes.
+
+Two caveats. qemu says nothing about **speed** — it cannot tell you whether a
+Cortex-A7 holds 60fps, and that question is settled only on the device. And the
+`fb0` it reports is the host's, not a 750x560 panel.
+
+`task binfmt` registers a host-wide qemu handler from a privileged container
+(Docker is enough, no root). It lasts until reboot; undo it with
+`docker run --privileged --rm tonistiigi/binfmt --uninstall arm`.
 
 ## Getting it onto the card
 
