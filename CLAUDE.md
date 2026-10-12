@@ -17,6 +17,10 @@ disagree with each other (even on whether the SSD202D's CPU is an A7 or an
 A72). Anything not confirmed by `notes/hardware.md` is a hypothesis; mark it
 as one.
 
+`.gitmodules` sets `ignore = dirty` for the submodule, because `task patch`
+leaves its working tree modified by design; the *pinned commit* is still
+tracked, so a deliberate upstream bump shows up in `git status` as it should.
+
 **`upstream/slot` is read-only.** It is a submodule pinned to a specific
 upstream commit. Never commit changes inside it. Port work lives in this
 repo's own tree. If a change must land in upstream files, write it as a patch
