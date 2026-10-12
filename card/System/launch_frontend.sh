@@ -16,6 +16,10 @@ SD="${SLOT_ROOT:-/mnt/SDCARD}"
 SYS="$SD/System"
 export SLOT_ROOT="$SD"
 
+# The Mini Flip's LCD is fitted upside down: a frame written top-down to
+# /dev/fb0 appears inverted on the panel, confirmed on the device.
+export SLOT_FB_ROTATE=180
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 exec /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1

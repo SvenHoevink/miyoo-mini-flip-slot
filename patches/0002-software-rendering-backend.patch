@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..bfb2243
+index 0000000..f444b6b
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,461 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -672,8 +672,29 @@ index 0000000..bfb2243
 +    }
 +}
 +
++/// How the panel is mounted relative to the framebuffer's scan order.
++#[derive(Copy, Clone, PartialEq, Eq)]
++enum Mount {
++    Normal,
++    /// The LCD is fitted upside down, so both axes reverse on the way out.
++    /// The Mini Flip is like this: a frame written top-down appears inverted.
++    Half,
++}
++
++impl Mount {
++    /// `SLOT_FB_ROTATE=180` selects the upside-down panel. Set per device in the
++    /// card's launch script rather than guessed at here.
++    fn from_env() -> Self {
++        match std::env::var("SLOT_FB_ROTATE").as_deref() {
++            Ok("180") => Mount::Half,
++            _ => Mount::Normal,
++        }
++    }
++}
++
 +pub struct Compositor {
 +    canvas: Image,
++    mount: Mount,
 +    textures: Vec<Option<Tex>>,
 +    white: TexId,
 +    game: Game,
@@ -693,6 +714,7 @@ index 0000000..bfb2243
 +        // signature matches the GL compositor.
 +        let mut me = Compositor {
 +            canvas: Image::new(OUT_W, OUT_H),
++            mount: Mount::from_env(),
 +            textures: Vec::new(),
 +            white: TexId::from_raw(0),
 +            game: Game::new(),
@@ -913,11 +935,15 @@ index 0000000..bfb2243
 +        let pw = target.w as i32;
 +        let ph = target.h as i32;
 +
++        let half = self.mount == Mount::Half;
 +        for py in 0..ph {
++            // On an upside-down panel the last canvas row goes to the first
++            // scanline, and each row is also reversed below.
++            let sy = if half { ph - 1 - py } else { py };
 +            // SAFETY: one row inside the mapping, `stride` bytes wide.
 +            let row = unsafe {
 +                std::slice::from_raw_parts_mut(
-+                    target.ptr.add(py as usize * target.stride),
++                    target.ptr.add(sy as usize * target.stride),
 +                    target.stride,
 +                )
 +            };
@@ -928,7 +954,7 @@ index 0000000..bfb2243
 +                0.0
 +            };
 +            for px in 0..pw {
-+                let o = px as usize * 4;
++                let o = if half { pw - 1 - px } else { px } as usize * 4;
 +                if o + 4 > row.len() {
 +                    break;
 +                }
@@ -1159,15 +1185,17 @@ index 0000000..fe96d3c
 +    }
 +}
 diff --git a/crates/slot/Cargo.toml b/crates/slot/Cargo.toml
-index b3ee812..d97216c 100644
+index b3ee812..99480a7 100644
 --- a/crates/slot/Cargo.toml
 +++ b/crates/slot/Cargo.toml
-@@ -9,6 +9,8 @@ license.workspace = true
+@@ -9,6 +9,10 @@ license.workspace = true
  default = ["host"]
  host = ["dep:winit", "dep:cpal", "dep:gilrs", "slot-gfx/host"]
  device = ["slot-gfx/device"]
 +# The Miyoo Mini Flip and anything else with a framebuffer and no GL.
 +software = ["slot-gfx/software"]
++# Miyoo button codes: gpio_keys reports keyboard keys, not BTN_* gamepad codes.
++miyoo = []
  
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }

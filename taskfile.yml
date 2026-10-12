@@ -138,7 +138,7 @@ tasks:
           CMD: >-
             cd {{.UPSTREAM}} && cargo build --target {{.TARGET}} --profile device
             --target-dir /src/target-miyoo/rust -p slot --no-default-features
-            --features device,{{.GFX}}
+            --features device,{{.GFX}},miyoo
       - task: verify:arm
         vars: {FILE: 'target-miyoo/rust/{{.TARGET}}/device/slot'}
 

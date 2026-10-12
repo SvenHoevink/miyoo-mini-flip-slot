@@ -76,10 +76,46 @@ libmi_venc.so   libmi_wlan.so
 
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
-- `libmi_ao.so` — audio out. **There is no ALSA**: qemu already showed slot
-  `dlopen`s `libasound.so`, and nothing here provides it, so audio needs an
-  `MI_AO` sink behind slot's existing `Sink` trait. Allium's `ffi` crate binds
-  `mi_ao.h` and is the reference.
+- `libmi_ao.so` — audio out, used by Allium via FFI.
+- **ALSA does exist**, contrary to what I first concluded. The qemu container had
+  no `libasound.so`, and I wrongly generalised that to the device. On hardware
+  slot's ALSA sink loads and gets as far as `hw:0,0: Device or resource busy`,
+  so the library and the PCM are both there and something else was holding the
+  device. An `MI_AO` sink may still be wanted, but it is not forced.
+
+## Panel orientation
+
+**The LCD is fitted upside down.** A frame written top-down to `/dev/fb0`
+appears inverted on the panel — confirmed on the device, and the reason
+`card/System/launch_frontend.sh` exports `SLOT_FB_ROTATE=180`. `fb0/rotate`
+reads `0`, so nothing in sysfs advertises this.
+
+## Buttons — keyboard codes, not gamepad codes
+
+This is why the first on-device run ignored every press: slot's `code_to_btn`
+maps `BTN_*` gamepad codes (`0x130`+) as the Anbernic handhelds report, but
+`soc:gpio_keys` here reports **keyboard** codes, so every lookup missed and
+`pick_devices` rejected the node outright.
+
+Decoded from the `B: KEY=` bitmap the probe captured, and cross-checked against
+Allium's own Miyoo map — the two agree exactly on all 18:
+
+| code | key | slot button |
+|---|---|---|
+| 103 / 108 / 105 / 106 | UP / DOWN / LEFT / RIGHT | d-pad |
+| 57 | KEY_SPACE | A |
+| 29 | KEY_LEFTCTRL | B |
+| 42 | KEY_LEFTSHIFT | X |
+| 56 | KEY_LEFTALT | Y |
+| 18 / 20 | KEY_E / KEY_T | L1 / R1 |
+| 15 / 14 | KEY_TAB / KEY_BACKSPACE | L2 / R2 |
+| 28 | KEY_ENTER | Start |
+| 97 | KEY_RIGHTCTRL | Select |
+| 1 | KEY_ESC | Menu |
+| 115 / 114 / 116 | VOLUMEUP / VOLUMEDOWN / POWER | as named |
+
+The d-pad arrives as keys, not as `ABS_HAT0X/Y`, so upstream's `Hat` decoding
+never fires here either.
 
 ## Input
 
@@ -94,6 +130,17 @@ The lid sensor is a gift: slot already handles `SW_LID` in
 `crates/slot/src/input/evdev.rs`, so closing the Flip can suspend as upstream
 intends. Per-button codes still need an `evtest`-style capture — the probe lists
 the devices but not the individual keycodes.
+
+## What the device says about itself at boot
+
+```
+slot: panel 752x560, canvas 752x560, turned false, ccw false
+slot: backlight no backlight (0 to 255), battery no battery, rtc0, no motor
+slot: boot: first frame at 511.6 ms
+```
+
+So: no backlight control found, no battery (below), no rumble motor, but `rtc0`
+is present. First frame in ~0.5 s on real hardware.
 
 ## Open problem: no battery sysfs
 

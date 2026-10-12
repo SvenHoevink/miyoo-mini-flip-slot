@@ -1,0 +1,59 @@
+diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
+index 02cc4bb..d6ce9e9 100644
+--- a/crates/slot/src/input/evdev.rs
++++ b/crates/slot/src/input/evdev.rs
+@@ -72,6 +72,38 @@ pub fn to_raw(ev: Ev) -> Option<RawEvent> {
+     }
+ }
+ 
++/// The Miyoo Mini family wires its buttons to `gpio_keys` with *keyboard*
++/// codes, not the `BTN_*` gamepad codes the Anbernic handhelds report, so none
++/// of the mapping below matches and every press is dropped. These are the 18
++/// keys the Mini Flip's `soc:gpio_keys` advertises, cross-checked against
++/// Allium's own Miyoo map. The codes cannot collide with the gamepad ones
++/// (0x130+), but this stays behind a feature so other devices are unaffected.
++#[cfg(feature = "miyoo")]
++pub fn code_to_btn(code: u16) -> Option<Btn> {
++    Some(match code {
++        103 => Btn::Up,
++        108 => Btn::Down,
++        105 => Btn::Left,
++        106 => Btn::Right,
++        57 => Btn::A,      // KEY_SPACE
++        29 => Btn::B,      // KEY_LEFTCTRL
++        42 => Btn::X,      // KEY_LEFTSHIFT
++        56 => Btn::Y,      // KEY_LEFTALT
++        18 => Btn::L1,     // KEY_E
++        20 => Btn::R1,     // KEY_T
++        15 => Btn::L2,     // KEY_TAB
++        14 => Btn::R2,     // KEY_BACKSPACE
++        28 => Btn::Start,  // KEY_ENTER
++        97 => Btn::Select, // KEY_RIGHTCTRL
++        1 => Btn::Menu,    // KEY_ESC
++        115 => Btn::VolUp,
++        114 => Btn::VolDown,
++        116 => Btn::Power,
++        _ => return None,
++    })
++}
++
++#[cfg(not(feature = "miyoo"))]
+ pub fn code_to_btn(code: u16) -> Option<Btn> {
+     Some(match code {
+         0x130 => Btn::A,
+@@ -92,6 +124,15 @@ pub fn code_to_btn(code: u16) -> Option<Btn> {
+     })
+ }
+ 
++/// `pick_devices` keeps only nodes advertising one of these, so the Miyoo list
++/// has to match the keymap above or `soc:gpio_keys` is rejected outright and
++/// the frontend sees no input at all.
++#[cfg(feature = "miyoo")]
++const WANTED: [u16; 18] = [
++    103, 108, 105, 106, 57, 29, 42, 56, 18, 20, 15, 14, 28, 97, 1, 115, 114, 116,
++];
++
++#[cfg(not(feature = "miyoo"))]
+ const WANTED: [u16; 15] = [
+     0x130, 0x131, 0x132, 0x133, 0x134, 0x135, 0x136, 0x137, 0x138, 0x13a, 0x13b, 0x162, 115, 114,
+     116,
