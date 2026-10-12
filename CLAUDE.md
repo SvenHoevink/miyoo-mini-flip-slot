@@ -89,6 +89,8 @@ task all          # cores + frontend for armv7
 task clean        # drop build output, revert the submodule
 task shell        # shell inside the cross toolchain
 task glibc        # glibc floor of the built binary
+task dist         # SD card tree
+task probe        # the on-device probe app alone
 
 # Upstream, run from upstream/slot (needs go-task):
 task --list                          # all upstream tasks
@@ -115,6 +117,17 @@ name — `/sys/class/graphics/fb0`, `/sys/class/input`, `/sys/class/power_supply
 `/sys/class/block`, `/proc/mounts`, `/proc/uptime`, `/proc/interrupts`. That
 is the port's friend: much of it may just work. Check each path exists on the
 Miyoo before assuming which.
+
+## Anything that ships on the card is busybox sh
+
+`card/` holds the launcher entries and launch scripts. The device's shell is
+busybox, so no bashisms, no `local`, no arrays, and assume any given tool may
+be missing. Test with `docker run --rm -v "$PWD":/src busybox:1.36 sh <script>`
+rather than the host shell, which is fish with GNU coreutils behind it.
+
+Start slot through `/lib/ld-linux-armhf.so.3` rather than executing it, as both
+launch scripts do: FAT32 and exFAT cards are routinely mounted `noexec`.
+Upstream does the same with the aarch64 loader.
 
 ## Conventions
 

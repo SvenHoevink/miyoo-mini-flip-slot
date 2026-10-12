@@ -106,6 +106,8 @@ task            # list tasks
 task all        # cores + frontend for armv7, from scratch
 task cores      # just the two libretro cores
 task build      # just the frontend
+task dist       # assemble the SD card tree -> ./dist
+task probe      # assemble just the probe app -> ./dist-probe
 task glibc      # highest glibc version the binary needs (device must be >= this)
 task shell      # poke around inside the toolchain container
 task clean      # drop build output and un-patch the submodule
@@ -147,14 +149,19 @@ Choices worth knowing, with the reasoning in the scripts themselves:
       `SCALE = 3` (a 240x160 source). 750x560 is neither 4:3 nor an integer
       multiple of 240x160 — decide between 2x integer (480x320, letterboxed)
       and a non-integer fit, and author a bezel for it.
-- [ ] **Boot integration.** Hook slot into the Miyoo launcher, in place of
-      upstream's Anbernic `card/System/launch_frontend.sh`.
+- [x] **Boot integration.** `card/App/Slot` plus an armv7
+      `card/System/launch_frontend.sh`; `task dist` assembles the card tree.
+      Untested on hardware.
 - [ ] **Measure.** RAM headroom and sustained frame time, on-device, before
       calling anything done.
 
 ## Layout
 
 ```
+card/                    what ships on the SD card
+  App/Slot/              launcher entry for slot
+  App/SlotProbe/         launcher entry that collects hardware facts
+  System/                armv7 launch script
 cores/                   armv7 build scripts for the two libretro cores,
                          counterparts to upstream's aarch64 ones
   miyoo-toolchain.cmake  cross settings for mGBA's cmake build
@@ -165,10 +172,64 @@ upstream/slot            pinned submodule, read-only
 taskfile.yml             the armv7 build tasks
 ```
 
+## Getting it onto the card
+
+Both trees are built to be copied **into the card root** — the directory the
+device sees as `/mnt/SDCARD`, where `App/`, `Roms/` and friends already live.
+Nothing is reflashed and nothing existing is deleted; the copy merges into
+`App/` and adds `System/` beside it.
+
+### The probe — do this one first
+
+This is the useful one today, and it needs no build, no ADB and no shell:
+
+```sh
+task probe                      # writes ./dist-probe
+cp -R dist-probe/. /media/<you>/<card>/
+sync
+```
+
+Then on the handheld: **Apps → "slot probe"**. The screen may not change — it
+writes a file and exits, taking a second or two. Put the card back in your
+machine and read `slot-probe.txt` at its root. That file answers everything
+`notes/hardware.md` is waiting on, including the two questions that decide the
+next move: whether the device's glibc is >= 2.28, and whether any `libEGL`
+exists.
+
+### slot itself — expect it to fail, informatively
+
+```sh
+task dist                       # cores + frontend + content root -> ./dist
+cp -R dist/. /media/<you>/<card>/
+sync
+```
+
+Adds **Apps → "slot"**. It will start and die, because the device has no
+`libEGL.so`; `slot.log` at the card root will say so. That is the expected
+outcome at this stage, and worth doing only because the failure message is
+evidence. ROMs, if you want them in place for later, go unzipped in
+`Games/GBA`, `Games/GB` and `Games/GBC`, and GBA needs `BIOS/gba_bios.bin`.
+
+### Caveats worth reading before you copy
+
+- **Keep a backup of the card.** Nothing here deletes, but the stock firmware
+  is particular and a known-good copy costs nothing.
+- **Card format:** whatever the device already boots from — don't reformat.
+  FAT32 and exFAT are both routinely mounted `noexec`, which is why both launch
+  scripts hand the binary to `ld.so` rather than executing it.
+- **`/mnt/SDCARD` is an assumption.** It is the Miyoo Mini path and the Mini
+  Flip is the same SoC family, but the scripts don't rely on it: each derives
+  the root from its own location. The probe prints the real path.
+- **App icons** point at `../../Icons/Default/app/`, which is an Onion path. On
+  stock firmware the entry should still appear, just without an icon.
+- **If the app doesn't show up**, the launcher has cached its list — reboot the
+  device. On Onion, a Package-Manager visit also refreshes it.
+
 ## Probing the device
 
-Nothing above is settled until the handheld confirms it. Get a shell (ADB over
-USB, or telnet/SSH depending on firmware) and capture:
+The app above is the no-shell route and collects all of this. If you do have a
+shell (ADB over USB, or telnet/SSH depending on firmware), the same ground by
+hand:
 
 ```sh
 uname -a                              # kernel, confirm armv7l

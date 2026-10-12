@@ -15,3 +15,5 @@
 /vendor-miyoo
 /third-party
 /.task
+/dist
+/dist-probe

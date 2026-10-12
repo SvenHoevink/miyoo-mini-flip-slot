@@ -148,6 +148,46 @@ tasks:
             arm-linux-gnueabihf-readelf -V target-miyoo/rust/{{.TARGET}}/device/slot
             | grep -oE "GLIBC_[0-9.]+" | sort -uV | tail -1
 
+  dist:
+    desc: Assemble the copy-to-SD-card tree, OUT defaults to ./dist
+    deps: [cores, build]
+    vars:
+      OUT: '{{.OUT | default "dist"}}'
+    cmds:
+      - rm -rf {{.OUT}}
+      # The content root, taken from upstream's own DIRS list rather than a copy
+      # of it, so an upstream change cannot silently go stale here. Upstream makes
+      # these with `slot --init-root`, which we cannot run: the binary is armv7 and
+      # the build host is not.
+      - |
+        set -eu
+        dirs=$(sed -n '/^pub const DIRS/,/^];/p' {{.UPSTREAM}}/crates/slot/src/root.rs                | grep -oE '"[^"]+"' | tr -d '"')
+        n=$(echo "$dirs" | grep -c .)
+        [ "$n" = 20 ] || { echo "expected 20 dirs from root.rs, got $n" >&2; exit 1; }
+        for d in $dirs; do mkdir -p "{{.OUT}}/$d"; done
+        echo "content root: $n directories"
+      - cp -R card/App {{.OUT}}/App
+      - cp card/System/launch_frontend.sh {{.OUT}}/System/
+      - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
+      - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
+      - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/launch_frontend.sh {{.OUT}}/App/*/launch.sh
+      # GPL-3.0: ship the licence texts and the cores' corresponding source refs.
+      - cp -R {{.UPSTREAM}}/licenses {{.OUT}}/System/licenses
+      - cp vendor-miyoo/gpsp_libretro.so.meta vendor-miyoo/mgba_libretro.so.meta {{.OUT}}/System/licenses/
+      - cp third-party/gpsp-src.tar.gz {{.OUT}}/System/licenses/
+      - 'echo "tree ready at {{.OUT}} — copy its *contents* to the card root"'
+
+  probe:
+    desc: Assemble just the probe app, OUT defaults to ./dist-probe (no build needed)
+    vars:
+      OUT: '{{.OUT | default "dist-probe"}}'
+    cmds:
+      - rm -rf {{.OUT}}
+      - mkdir -p {{.OUT}}/App
+      - cp -R card/App/SlotProbe {{.OUT}}/App/
+      - chmod +x {{.OUT}}/App/SlotProbe/launch.sh {{.OUT}}/App/SlotProbe/probe.sh
+      - 'echo "probe ready at {{.OUT}} — copy its contents to the card root, run \"slot probe\" on the device, then read slot-probe.txt off the card"'
+
   all:
     desc: Build the cores and the frontend for armv7
     cmds:
