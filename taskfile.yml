@@ -13,6 +13,9 @@ vars:
   # newer than the device's 2.28, which is fine for running what we linked.
   ARMBOX: arm32v7/debian:bullseye-slim
   LD: /lib/ld-linux-armhf.so.3
+  # The renderer to build. "software" is the framebuffer rasteriser this device
+  # needs; pass GFX= to build the GL path instead, which the Mini Flip cannot run.
+  GFX: software
   TIMEOUT: '20'
 
   # Kept in step with upstream/slot/taskfile.yml. Bump both together.
@@ -72,8 +75,16 @@ tasks:
   unpatch:
     desc: Discard all local changes in the upstream submodule, back to the pinned commit
     cmds:
+      # reset first: generating a patch for added files needs `git add -N`, which
+      # leaves them staged, and a staged file is not untracked so clean skips it.
+      - git -C {{.UPSTREAM}} reset -q
       - git -C {{.UPSTREAM}} checkout -- .
-      - 'echo "{{.UPSTREAM}} is back at $(git -C {{.UPSTREAM}} rev-parse --short HEAD)"'
+      # checkout only reverts tracked files; a patch that adds new ones (the
+      # software backend adds crates/slot-gfx/src/soft/) would leave them behind
+      # and then fail to re-apply. The submodule is pinned and pristine, so
+      # anything untracked in it came from patches/ and should go.
+      - git -C {{.UPSTREAM}} clean -qfd
+      - 'echo "{{.UPSTREAM}} is back at $(git -C {{.UPSTREAM}} rev-parse --short HEAD), clean"'
 
   core:gpsp:
     desc: Build gpsp_libretro.so for armv7 (ARM JIT — the GBA core that stands a chance)
@@ -126,7 +137,8 @@ tasks:
         vars:
           CMD: >-
             cd {{.UPSTREAM}} && cargo build --target {{.TARGET}} --profile device
-            --target-dir /src/target-miyoo/rust -p slot --no-default-features --features device
+            --target-dir /src/target-miyoo/rust -p slot --no-default-features
+            --features device,{{.GFX}}
       - task: verify:arm
         vars: {FILE: 'target-miyoo/rust/{{.TARGET}}/device/slot'}
 
@@ -253,6 +265,29 @@ tasks:
           diff <(echo "$a") <(echo "$b") >&2 || true
           exit 1
         fi
+
+  shot:
+    desc: >-
+      Render a frame under qemu into a file-backed panel and save it as a PNG.
+      The only way to see what the software rasteriser draws without the handheld
+    deps: [binfmt, build]
+    vars:
+      SIZE: '{{.SIZE | default "752x560"}}'
+      OUT: '{{.OUT | default "target-miyoo/frame.png"}}'
+    cmds:
+      - >-
+        docker run --rm --platform linux/arm/v7 -v "$PWD":/src -w /src {{.ARMBOX}}
+        bash -c '
+        set -e;
+        root=/src/target-miyoo/shot-root;
+        bin=/src/target-miyoo/rust/{{.TARGET}}/device/slot;
+        rm -rf $root;
+        {{.LD}} $bin --init-root $root >/dev/null;
+        cp /src/vendor-miyoo/*.so $root/System/ 2>/dev/null || true;
+        : > /src/target-miyoo/fb.raw;
+        SLOT_ROOT=$root SLOT_FB=/src/target-miyoo/fb.raw SLOT_FB_SIZE={{.SIZE}}
+        timeout {{.TIMEOUT}} {{.LD}} $bin 2>&1 | tail -5'
+      - python3 -I tools/fb2png.py target-miyoo/fb.raw {{.SIZE}} 0 {{.OUT}}
 
   all:
     desc: Build the cores and the frontend for armv7

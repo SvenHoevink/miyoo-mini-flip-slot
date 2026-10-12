@@ -155,20 +155,24 @@ Choices worth knowing, with the reasoning in the scripts themselves:
       use), but not the individual keycodes. Needs an `evtest`-style capture.
 - [x] **A dev loop.** `task run:qemu` runs the device build here and stops at
       EGL, so the rasteriser can be written and iterated without the handheld.
-- [ ] **Software `Surface`.** `/dev/fb0` mmap and page-flip via
-      `FBIOPAN_DISPLAY` — the framebuffer is already triple-buffered
-      (`virtual_size 752,1680`), so no shadow buffer and no tearing.
-- [ ] **Software rasteriser.** The five `Draw` variants: filled rect with alpha,
-      textured blit with alpha, rotated blit (`Turned`, used by the cart
-      animation), and the game blit with nearest-neighbour scaling.
+- [x] **Software `Surface`.** `soft/fb.rs`: mmap `/dev/fb0` and page-flip via
+      `FBIOPAN_DISPLAY` across the panel's three buffers. Not yet run on the
+      device.
+- [x] **Software rasteriser.** `soft/raster.rs` and `soft/mod.rs`: all five
+      `Draw` variants, the game plane, and the Lcd3x mask computed from the same
+      `lcd3x_factors` the shader uses. It renders slot's UI correctly under
+      qemu — see below. Not yet run on the device.
 - [ ] **An MI_AO audio sink.** There is no ALSA on the device, and slot
       `dlopen`s `libasound`. `/config/lib/libmi_ao.so` is the replacement, behind
       slot's existing `Sink` trait. Allium's `ffi` crate binds it already.
 - [ ] **A battery source.** `/sys/class/power_supply` does not exist on this
       device, so `slot-power` has nothing to read. Find how Allium does it.
-- [ ] **Drop or cheapen the shader passes.** `lcd3x` masks, blue-light `grade`
-      and the bezel compositing are per-pixel shader work. On this CPU they
-      start as no-ops behind a config flag.
+- [x] **Decide the shader passes.** Lcd3x and the blue-light gain are
+      implemented exactly; the bezel, split and lift paths are no-ops because
+      `bezel::framed()` needs a 4:3 panel and 752x560 is not one, so the device
+      never reaches them. Grid, Dot and Simpletex fall back to no effect.
+- [ ] **Measure, then reconsider those fallbacks.** Nothing above has a frame
+      time attached to it yet.
 - [x] **Fit the panel.** Resolved by measurement rather than choice: the panel
       is **752x560**, not the 750x560 on the spec sheets, so upstream's own
       720x480 (`SCALE = 3` over 240x160) drops in with a 16px side and 40px
@@ -197,6 +201,19 @@ notes/hardware.md        measured device facts (empty until probed)
 upstream/slot            pinned submodule, read-only
 taskfile.yml             the armv7 build tasks
 ```
+
+## Seeing what it draws
+
+```sh
+task shot        # renders a frame under qemu into target-miyoo/frame.png
+```
+
+![slot's clock screen, rendered by the software rasteriser](docs/frame.png)
+
+That is slot drawn entirely on the CPU at 752x560 — no GPU, no EGL — with the
+720x480 canvas centred and the panel's border around it. Text, filled rects and
+alpha blending all land where the GL path puts them. It boots to "first frame"
+in about 500 ms under emulation, which says nothing about the device.
 
 ## Running it without the handheld
 
