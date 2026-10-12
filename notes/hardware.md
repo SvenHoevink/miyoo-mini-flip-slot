@@ -117,6 +117,18 @@ Allium's own Miyoo map — the two agree exactly on all 18:
 The d-pad arrives as keys, not as `ABS_HAT0X/Y`, so upstream's `Hat` decoding
 never fires here either.
 
+### And the capability bitmaps are 32-bit here
+
+`slot_power::has_bit` read these masks as 64-bit words. The kernel prints them
+as `unsigned long`, which is **32 bits** on this device, so every bit above 31
+was looked up in the wrong word — losing most of the keyboard range, including
+`KEY_SPACE` (the A button). `pick_devices` only kept working by accident:
+`KEY_ESC` is bit 1, low enough to land in the right word either way.
+
+Fixed in `patches/0004`, with tests that pin the device's real bitmap and the
+32-bit word maths explicitly, since `usize::BITS` on a 64-bit build host would
+otherwise hide the whole case.
+
 ## Input
 
 Two evdev nodes, which slot discovers by walking `/sys/class/input` already:

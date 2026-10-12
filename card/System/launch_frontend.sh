@@ -20,6 +20,11 @@ export SLOT_ROOT="$SD"
 # /dev/fb0 appears inverted on the panel, confirmed on the device.
 export SLOT_FB_ROTATE=180
 
+# Temporary, while input is being brought up: slot surveys every /dev/input
+# node (opened or skipped, with its capability bitmap) and logs each event and
+# whether it mapped, to $SD/input-trace.log. Drop this once buttons work.
+export SLOT_TRACE_INPUT=1
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 exec /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
