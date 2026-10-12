@@ -1,0 +1,3 @@
+[submodule "upstream/slot"]
+	path = upstream/slot
+	url = https://github.com/BrandonKowalski/slot.git

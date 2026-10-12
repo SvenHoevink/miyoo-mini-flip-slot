@@ -1,0 +1,98 @@
+# CLAUDE.md
+
+Porting [slot](https://slot-cfw.fyi/) to the **Miyoo Mini Flip**. Read
+`README.md` first for the target hardware, the blockers and the plan; this file
+is about how to work in the repo.
+
+## Ground rules
+
+**Never report a port step as working until it ran on the handheld.** This
+project's whole difficulty is that the target has no GPU and 128 MB of RAM.
+A host build that compiles, or a unit test that passes, proves nothing about
+the device. Say "builds for armv7" or "compiles" — not "works".
+
+**Don't invent hardware facts.** Panel stride, pixel format, rotation, evdev
+codes and battery paths are device-specific and the public spec sheets
+disagree with each other (even on whether the SSD202D's CPU is an A7 or an
+A72). Anything not confirmed by `notes/hardware.md` is a hypothesis; mark it
+as one.
+
+**`upstream/slot` is read-only.** It is a submodule pinned to a specific
+upstream commit. Never commit changes inside it. Port work lives in this
+repo's own tree. If a change must land in upstream files, write it as a patch
+under `patches/` so a rebase onto a newer upstream stays possible, and record
+which upstream commit it applies to.
+
+## Where the port goes
+
+The architectural seam, and the reason this is feasible at all:
+
+- `slot-ui` has **no** graphics calls. It emits `Vec<Draw>` — five variants,
+  defined in `upstream/slot/crates/slot-gfx/src/draw.rs`.
+- All GL lives in `slot-gfx`, behind the `Surface` trait
+  (`crates/slot-gfx/src/surface.rs`) and selected by cargo feature:
+  `host` (winit + glutin, for a desktop window) or `device`
+  (`fbdev.rs`: dlopen `libEGL.so`, GLES2 on `/dev/fb0`).
+
+The port adds a third backend — a CPU rasteriser over mmapped `/dev/fb0` —
+and changes nothing above the seam. **If a port change requires editing
+`slot-ui`, stop and reconsider; it almost certainly belongs in the backend.**
+
+Files that matter, in order: `surface.rs` (the trait, plus `OUT_W`/`OUT_H`),
+`draw.rs` (the display list), `pipeline.rs` (the game pass, `SCALE`/`SRC_W`/
+`SRC_H`), `fbo.rs` (offscreen compositing — the big RAM consumer),
+`shaders.rs`, `lcd3x.rs` and `grade.rs` (per-pixel effects; the first things
+to make no-ops).
+
+## Upstream assumes aarch64 in places that will bite
+
+`upstream/slot/taskfile.yml` asserts `file ... | grep -q aarch64` after every
+device build and core build, and `device:sh` runs builds in a
+`rust:1-bullseye` container that is only fetched when the host isn't
+`Linux-aarch64`. An armv7 path needs its own tasks rather than edits to those
+— keep them in a top-level `taskfile.yml` in this repo that delegates to
+upstream's where it can.
+
+Rust toolchain is pinned to 1.96 by `upstream/slot/rust-toolchain.toml`.
+
+## Commands
+
+```sh
+git submodule update --init          # after cloning
+
+# Upstream, run from upstream/slot (needs go-task):
+task --list                          # all upstream tasks
+task run                             # slot in a desktop window, SLOT_ROOT=./sdcard
+task sdcard                          # create an empty content root
+task check                           # fmt + clippy (host and device) + tests
+```
+
+Useful env vars upstream honours: `SLOT_ROOT` (content root), `SLOT_WINDOW`
+(window size, e.g. `1280x960`), `SLOT_BARE` (no chrome), `SLOT_ROTATE=ccw`
+(portrait panels — relevant to us).
+
+Run the desktop build at the target's geometry to eyeball layout before
+touching the device:
+
+```sh
+SLOT_WINDOW=750x560 task run
+```
+
+## Dependencies on the device, for `slot-power` and input
+
+slot discovers hardware by walking sysfs rather than matching on a device
+name — `/sys/class/graphics/fb0`, `/sys/class/input`, `/sys/class/power_supply`,
+`/sys/class/block`, `/proc/mounts`, `/proc/uptime`, `/proc/interrupts`. That
+is the port's friend: much of it may just work. Check each path exists on the
+Miyoo before assuming which.
+
+## Conventions
+
+- Match upstream's style in any code that mirrors it — it is terse, comments
+  are sparse and explain *why*, and prose in docs/commits is lowercase-plain
+  rather than marketing. `cargo fmt` and clippy-clean (`-D warnings`).
+- Record device measurements (frame times, RAM) as numbers in `notes/`, with
+  the date and the firmware version they came from.
+- GPL-3.0-or-later, inherited from slot. Keep upstream's `licenses/` tree in
+  anything shipped to a card.
+- No Claude/Anthropic attribution in commits or PR bodies.

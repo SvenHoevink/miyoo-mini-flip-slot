@@ -1,0 +1,12 @@
+/target
+/target-device
+/dist
+/dist-device
+/vendor
+/sdcard
+*.log
+
+# Device dumps pulled off the handheld (probe output, /proc & /sys captures,
+# stock firmware images). Keep these out of git; they are large and may carry
+# serials. Summarise findings in notes/ instead.
+/device-dump/
