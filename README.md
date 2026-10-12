@@ -14,7 +14,7 @@ git submodule update --init
 
 ## Status
 
-**It cross-compiles for the device. Nothing has run on the device yet.**
+**It runs on the device, and stops at the renderer — exactly as predicted.**
 
 `task all` produces, from a clean tree, three armv7 artifacts that the handheld
 could load — verified as 32-bit ARMv7-A, VFPv4 hard-float, needing nothing
@@ -34,7 +34,17 @@ is a runtime problem, not a compile-time one.** The binary will build, ship,
 start, fail to find `libEGL.so`, and die. The software rasteriser is still the
 work; see the plan.
 
-Nothing here is confirmed against hardware. `notes/hardware.md` is empty.
+Confirmed on hardware on 2026-10-12 (`notes/hardware.md`). `slot --init-root`
+completed with exit 0 on the device, and a normal start gets this far:
+
+```
+slot: boot: start at 0.0 ms
+slot: fb0 hint 752x560
+slot: gl context: libEGL.so: cannot open shared object file: No such file or directory
+```
+
+Toolchain, libc, loader and binary are all correct — the device's glibc is
+**2.28**, the exact version we link against. Only the renderer is missing.
 
 ## The problem in one table
 
@@ -46,9 +56,9 @@ every way that matters to a renderer:
 |---|---|---|
 | SoC | Allwinner H700 | SigmaStar SSD202D |
 | CPU | 4x Cortex-A53, **aarch64** | 2x Cortex-A7 @1.2GHz, **armv7 (32-bit)** |
-| RAM | 1 GB | **128 MB** |
+| RAM | 1 GB | **128 MB, ~101 MB usable** |
 | 3D GPU | Mali-G31, **libEGL + GLES2** | **none** — 2D blitter only (SigmaStar MI_GFX) |
-| Panel | 640x480 / 720x480 | 2.8" **750x560** |
+| Panel | 640x480 / 720x480 | 2.8" **752x560**, 32bpp, triple-buffered |
 | OS | Anbernic BaseOS (Linux) | Miyoo stock / OnionOS (Linux) |
 
 Three of those are load-bearing:
@@ -61,9 +71,10 @@ Three of those are load-bearing:
    `file ... | grep -q aarch64` assertions throughout `taskfile.yml`). Both
    the Rust binary and the mGBA/gpSP libretro cores need an
    `armv7-unknown-linux-gnueabihf` toolchain.
-3. **128 MB RAM.** slot composites through offscreen framebuffers at 720x480
-   and keeps wallpaper, label art and font atlases resident, on top of a
-   libretro core. The budget needs measuring, not guessing.
+3. **101 MB of usable RAM.** `MemTotal` is 103352 kB — the 128 MB on the spec
+   sheet minus what the SoC reserves — with no swap and about 81 MB free at
+   idle. slot composites through offscreen framebuffers and keeps wallpaper,
+   label art and font atlases resident, on top of a libretro core.
 
 ## Why this is tractable anyway
 
@@ -136,22 +147,33 @@ Choices worth knowing, with the reasoning in the scripts themselves:
       gpSP has `HAVE_DYNAREC=1` (ARM JIT) and is expected to be the GBA core —
       mGBA has no GBA dynarec and interprets, which at 1.2 GHz probably will not
       hold 60fps. Unmeasured.
-- [ ] **Probe the hardware.** Confirm panel geometry, pixel format, rotation,
-      evdev button map, battery sysfs paths, free RAM, and that the device's
-      glibc is >= 2.28. See below.
+- [x] **Probe the hardware.** Done; see `notes/hardware.md`. glibc is 2.28
+      exactly, the panel is 752x560x32 and already triple-buffered, and the card
+      is not mounted `noexec`.
+- [ ] **Per-button evdev codes.** The probe found `event0` (`soc:gpio_keys`) and
+      `event1` (the clamshell hall sensor, which slot's `SW_LID` handling can
+      use), but not the individual keycodes. Needs an `evtest`-style capture.
 - [x] **A dev loop.** `task run:qemu` runs the device build here and stops at
       EGL, so the rasteriser can be written and iterated without the handheld.
-- [ ] **Software `Surface`.** `/dev/fb0` mmap + double buffer via `FBIOPAN_DISPLAY`.
+- [ ] **Software `Surface`.** `/dev/fb0` mmap and page-flip via
+      `FBIOPAN_DISPLAY` — the framebuffer is already triple-buffered
+      (`virtual_size 752,1680`), so no shadow buffer and no tearing.
 - [ ] **Software rasteriser.** The five `Draw` variants: filled rect with alpha,
       textured blit with alpha, rotated blit (`Turned`, used by the cart
       animation), and the game blit with nearest-neighbour scaling.
+- [ ] **An MI_AO audio sink.** There is no ALSA on the device, and slot
+      `dlopen`s `libasound`. `/config/lib/libmi_ao.so` is the replacement, behind
+      slot's existing `Sink` trait. Allium's `ffi` crate binds it already.
+- [ ] **A battery source.** `/sys/class/power_supply` does not exist on this
+      device, so `slot-power` has nothing to read. Find how Allium does it.
 - [ ] **Drop or cheapen the shader passes.** `lcd3x` masks, blue-light `grade`
       and the bezel compositing are per-pixel shader work. On this CPU they
       start as no-ops behind a config flag.
-- [ ] **Fit 750x560.** Upstream hardcodes `OUT_W = 720`, `OUT_H = 480` with
-      `SCALE = 3` (a 240x160 source). 750x560 is neither 4:3 nor an integer
-      multiple of 240x160 — decide between 2x integer (480x320, letterboxed)
-      and a non-integer fit, and author a bezel for it.
+- [x] **Fit the panel.** Resolved by measurement rather than choice: the panel
+      is **752x560**, not the 750x560 on the spec sheets, so upstream's own
+      720x480 (`SCALE = 3` over 240x160) drops in with a 16px side and 40px
+      top/bottom border. No non-integer scaling, no compromise. A bezel for that
+      border is still to draw.
 - [x] **Boot integration.** `card/App/Slot` plus an armv7
       `card/System/launch_frontend.sh`; `task dist` assembles the card tree.
       Untested on hardware.
