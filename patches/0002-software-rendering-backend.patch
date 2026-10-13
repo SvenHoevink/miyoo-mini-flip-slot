@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..704b26d
+index 0000000..f9f19f9
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,766 @@
+@@ -0,0 +1,852 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -632,11 +632,12 @@ index 0000000..704b26d
 +        }
 +    }
 +
-+    fn draw(&self, dst: &mut Image, tex: Option<&Image>) {
++    /// Returns 1 if the 3x lookup ran, 2 for the separable fallback.
++    fn draw(&self, dst: &mut Image, tex: Option<&Image>) -> u8 {
 +        let img = tex.unwrap_or(&self.frame);
 +        let (rx, ry, rw, rh) = screen_rect(self.power);
 +        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
-+            return;
++            return 0;
 +        }
 +        let src = if tex.is_some() { WHOLE_TEXTURE } else { self.src };
 +        let (sw, sh) = (img.w as f32, img.h as f32);
@@ -646,7 +647,7 @@ index 0000000..704b26d
 +        let x1 = ((rx + rw).round() as i32).min(dst.w as i32);
 +        let y1 = ((ry + rh).round() as i32).min(dst.h as i32);
 +        if x0 >= x1 || y0 >= y1 {
-+            return;
++            return 0;
 +        }
 +
 +        // The whole inner loop is integer. Everything that varies only with the
@@ -729,7 +730,7 @@ index 0000000..704b26d
 +                    sx += 1;
 +                }
 +            }
-+            return;
++            return 1;
 +        }
 +
 +        for py in y0..y1 {
@@ -762,6 +763,7 @@ index 0000000..704b26d
 +                di += 4;
 +            }
 +        }
++        2
 +    }
 +}
 +
@@ -785,8 +787,59 @@ index 0000000..704b26d
 +    }
 +}
 +
++/// Where the backend's frame time goes, printed every `REPORT_EVERY` frames
++/// when `SLOT_TRACE_LATENCY` is set. The frame breakdown slot already prints
++/// only says this backend took N ms; this says which part, and which path the
++/// game pass picked, which is the thing worth knowing before optimising it
++/// again.
++#[derive(Default)]
++struct Profile {
++    frames: u32,
++    clear_us: u64,
++    game_us: u64,
++    sprite_us: u64,
++    out_us: u64,
++    /// 0 none, 1 the 3x lookup, 2 the separable fallback.
++    path: u8,
++}
++
++const REPORT_EVERY: u32 = 60;
++
++impl Profile {
++    fn on() -> bool {
++        std::env::var_os("SLOT_TRACE_LATENCY").is_some_and(|v| v != "0")
++    }
++
++    fn tick(&mut self) {
++        self.frames += 1;
++        if self.frames < REPORT_EVERY {
++            return;
++        }
++        let n = self.frames as u64;
++        let ms = |v: u64| v as f64 / 1000.0 / n as f64;
++        eprintln!(
++            "slot: soft: clear {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, game path {}",
++            ms(self.clear_us),
++            ms(self.game_us),
++            ms(self.sprite_us),
++            ms(self.out_us),
++            match self.path {
++                1 => "3x-lut",
++                2 => "separable",
++                _ => "none",
++            }
++        );
++        *self = Profile {
++            path: self.path,
++            ..Default::default()
++        };
++    }
++}
++
 +pub struct Compositor {
 +    canvas: Image,
++    profile: Profile,
++    profiling: bool,
 +    mount: Mount,
 +    /// The last rect written to the panel, and how many more frames must
 +    /// repaint the surround. The shake offset moves the rect, and skipping the
@@ -814,6 +867,8 @@ index 0000000..704b26d
 +        // signature matches the GL compositor.
 +        let mut me = Compositor {
 +            canvas: Image::new(OUT_W, OUT_H),
++            profile: Profile::default(),
++            profiling: Profile::on(),
 +            mount: Mount::from_env(),
 +            last_out: None,
 +            clear_left: 0,
@@ -842,7 +897,12 @@ index 0000000..704b26d
 +    }
 +
 +    pub fn draw_game(&mut self) {
-+        self.game.draw(&mut self.canvas, None);
++        let t = std::time::Instant::now();
++        let path = self.game.draw(&mut self.canvas, None);
++        if self.profiling {
++            self.profile.game_us += t.elapsed().as_micros() as u64;
++            self.profile.path = path;
++        }
 +    }
 +
 +    /// Same splitting as the GL compositor: sprites batch up to a `Game` or
@@ -853,14 +913,19 @@ index 0000000..704b26d
 +            match *item {
 +                Draw::Game => {
 +                    self.draw_sprites(&items[from..i]);
-+                    self.game.draw(&mut self.canvas, None);
++                    let t = std::time::Instant::now();
++                    let path = self.game.draw(&mut self.canvas, None);
++                    if self.profiling {
++                        self.profile.game_us += t.elapsed().as_micros() as u64;
++                        self.profile.path = path;
++                    }
 +                }
 +                Draw::Shot { tex } => {
 +                    self.draw_sprites(&items[from..i]);
 +                    // Borrow the still out of the store so `game` can read it
 +                    // while `canvas` is mutably borrowed.
 +                    if let Some(img) = self.take_image(tex) {
-+                        self.game.draw(&mut self.canvas, Some(&img));
++                        let _ = self.game.draw(&mut self.canvas, Some(&img));
 +                        self.put_image(tex, img);
 +                    }
 +                }
@@ -885,6 +950,14 @@ index 0000000..704b26d
 +    }
 +
 +    fn draw_sprites(&mut self, items: &[Draw]) {
++        let t = std::time::Instant::now();
++        self.draw_sprites_inner(items);
++        if self.profiling {
++            self.profile.sprite_us += t.elapsed().as_micros() as u64;
++        }
++    }
++
++    fn draw_sprites_inner(&mut self, items: &[Draw]) {
 +        for item in items {
 +            match *item {
 +                Draw::Rect { x, y, w, h, colour } => {
@@ -1017,9 +1090,13 @@ index 0000000..704b26d
 +            self.canvas.w as f32 / OUT_W as f32,
 +            self.canvas.h as f32 / OUT_H as f32,
 +        ];
++        let t = std::time::Instant::now();
 +        let b = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
 +        self.canvas
 +            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 255]);
++        if self.profiling {
++            self.profile.clear_us += t.elapsed().as_micros() as u64;
++        }
 +    }
 +
 +    pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
@@ -1034,6 +1111,15 @@ index 0000000..704b26d
 +    /// `FbdevSurface::new` clears every page once, so repainting it each frame
 +    /// would be ~75k pixels of wasted work per frame on this panel.
 +    pub fn end_frame(&mut self, window: (u32, u32)) {
++        let t = std::time::Instant::now();
++        self.output_frame(window);
++        if self.profiling {
++            self.profile.out_us += t.elapsed().as_micros() as u64;
++            self.profile.tick();
++        }
++    }
++
++    fn output_frame(&mut self, window: (u32, u32)) {
 +        let Some(target) = fb::current() else {
 +            return;
 +        };

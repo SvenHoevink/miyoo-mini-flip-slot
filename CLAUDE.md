@@ -148,6 +148,25 @@ Start slot through `/lib/ld-linux-armhf.so.3` rather than executing it, as both
 launch scripts do: FAT32 and exFAT cards are routinely mounted `noexec`.
 Upstream does the same with the aarch64 loader.
 
+## NEON is not available to us the easy way
+
+Rust's armv7 NEON intrinsics (`std::arch::arm`) are **unstable** —
+`stdarch_arm_neon_intrinsics`, rust-lang/rust#111800 — and upstream pins stable
+1.96. `-C target-feature=+neon` is likewise rejected as unstable on this target
+and changes nothing; `-C target-cpu=cortex-a7` already implies it. aarch64 NEON
+is stable, which is why slot never had to care.
+
+Verified by disassembly: **LLVM autovectorises none of the backend's hot
+loops** — zero NEON instructions in `Game::draw`, `raster::blit`,
+`draw_sprites` or `Image::from_rgba`. Bounds checks and the byte-strided,
+branchy access patterns are the likely reason, so shaping loops around
+`chunks_exact` and iterators is the first thing to try and costs nothing.
+
+If hand-written NEON is really needed, the options on stable are inline
+`core::arch::asm!` or a C shim built with the cross gcc (8.3 supports
+`arm_neon.h` with `-mfpu=neon-vfpv4`). Do not reach for either until the
+per-stage profile says which loop deserves it.
+
 ## Conventions
 
 - Match upstream's style in any code that mirrors it — it is terse, comments

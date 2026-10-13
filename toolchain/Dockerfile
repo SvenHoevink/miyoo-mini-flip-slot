@@ -37,6 +37,8 @@ ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
     CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
     CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++ \
     AR_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-ar \
+    # cortex-a7 already implies neon and vfp4. Naming them with -C target-feature
+    # is rejected as unstable on armv7 and changes nothing, so do not.
     CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS="-C target-cpu=cortex-a7"
 
 # /etc/profile rewrites PATH wholesale, and differently for root than for other
