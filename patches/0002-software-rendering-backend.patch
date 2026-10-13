@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..f9f19f9
+index 0000000..ab368a2
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,852 @@
+@@ -0,0 +1,897 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -662,84 +662,41 @@ index 0000000..f9f19f9
 +        let bright = screen_brightness(self.power);
 +        let width = (x1 - x0) as usize;
 +
-+        // Per column: the source texel to read, whether the pic rect includes
-+        // it, and the three x factors in 8.8 fixed point.
-+        let mut col_texel = vec![0u32; width];
-+        let mut col_inside = vec![false; width];
-+        let mut col_k = vec![[256u16; 3]; width];
-+        for (i, slot) in col_texel.iter_mut().enumerate() {
++        // Per column, flattened into one table: the byte offset of the source
++        // texel within its row, and the three x factors in 8.8 fixed point
++        // (256 where the picture rect does not cover this column, so the inner
++        // loop has no branch and no second lookup).
++        struct Col {
++            off: u32,
++            k: [u16; 3],
++        }
++        let mut col = Vec::with_capacity(width);
++        for i in 0..width {
 +            let px = x0 + i as i32;
 +            let u = src[0] + (px as f32 + 0.5 - rx) / rw * src[2];
-+            *slot = ((u * sw) as i32).clamp(0, img.w as i32 - 1) as u32;
-+            col_inside[i] = u >= self.pic[0] && u < self.pic[2];
-+            if lcd {
-+                // The x half of lcd3x_factors, with yfactor factored out.
++            let texel = ((u * sw) as i32).clamp(0, img.w as i32 - 1) as u32;
++            let inside = u >= self.pic[0] && u < self.pic[2];
++            let mut k = [256u16; 3];
++            if lcd && inside {
 +                let fx = (u * sw).fract();
-+                for (c, k) in col_k[i].iter_mut().enumerate() {
-+                    let o = LCD_OFFSETS[c];
++                for (c, k) in k.iter_mut().enumerate() {
++                    // The canvas is in panel order, so byte 0 is blue.
++                    let o = LCD_OFFSETS[2 - c];
 +                    let v = (BRIGHTEN_LCD + (2.0 * PI * fx + o).sin()) / (BRIGHTEN_LCD + 1.0);
 +                    *k = (v * 256.0).round().clamp(0.0, 65535.0) as u16;
 +                }
 +            }
++            col.push(Col { off: texel * 4, k });
 +        }
 +
 +        let dw = dst.w as usize;
-+
-+        // The case this device actually runs: a 240x160 frame scaled to exactly
-+        // 3x, whole source, whole picture. The mask then has only 3x3 phases, so
-+        // every output byte is one table lookup rather than two multiplies and a
-+        // shift -- 27 tables of 256 bytes, about 7 KB, which stays in L1.
-+        //
-+        // The phases line up with lcd3x_mask() by construction: at 3x the
-+        // sub-texel centres are (o + 0.5) / 3, which is what it tabulates.
-+        let whole = src == WHOLE_TEXTURE && self.pic == WHOLE_TEXTURE;
-+        let aligned = rx.fract() == 0.0
-+            && ry.fract() == 0.0
-+            && rw == sw * SCALE as f32
-+            && rh == sh * SCALE as f32;
-+        if lcd && whole && aligned {
-+            let mask = crate::lcd3x::lcd3x_mask();
-+            let mut lut = [[[0u8; 256]; 3]; 9];
-+            for oy in 0..3 {
-+                for ox in 0..3 {
-+                    for c in 0..3 {
-+                        // The canvas is in panel order, so byte 0 is blue.
-+                        let k = mask[oy][ox][2 - c] * bright;
-+                        for (v, out) in lut[oy * 3 + ox][c].iter_mut().enumerate() {
-+                            *out = (v as f32 * k).clamp(0.0, 255.0) as u8;
-+                        }
-+                    }
-+                }
-+            }
-+            let sx0 = (x0 - rx as i32) as usize;
-+            for py in y0..y1 {
-+                let dy = (py - ry as i32) as usize;
-+                let sy = dy / SCALE as usize;
-+                let oy = dy % SCALE as usize;
-+                let src_row = sy * img.w as usize * 4;
-+                let mut di = (py as usize * dw + x0 as usize) * 4;
-+                let mut sx = sx0;
-+                for _ in 0..(x1 - x0) {
-+                    let si = src_row + (sx / SCALE as usize) * 4;
-+                    let table = &lut[oy * 3 + sx % SCALE as usize];
-+                    for c in 0..3 {
-+                        dst.px[di + c] = table[c][img.px[si + c] as usize];
-+                    }
-+                    dst.px[di + 3] = 255;
-+                    di += 4;
-+                    sx += 1;
-+                }
-+            }
-+            return 1;
-+        }
-+
++        let row_bytes = img.w as usize * 4;
 +        for py in y0..y1 {
 +            let v = src[1] + (py as f32 + 0.5 - ry) / rh * src[3];
 +            let sy = ((v * sh) as i32).clamp(0, img.h as i32 - 1) as usize;
 +            let row_inside = v >= self.pic[1] && v < self.pic[3];
 +
-+            // The y half of the mask, with brightness folded in so the inner
-+            // loop multiplies once per channel and shifts.
++            // The y half of the mask, with brightness folded in.
 +            let yk = if lcd && row_inside {
 +                let fy = (v * sh).fract();
 +                (BRIGHTEN_SCANLINES + (2.0 * PI * fy).sin()) / (BRIGHTEN_SCANLINES + 1.0) * bright
@@ -748,21 +705,37 @@ index 0000000..f9f19f9
 +            };
 +            let yk = (yk * 256.0).round().clamp(0.0, 65535.0) as u32;
 +
-+            let src_row = sy * img.w as usize * 4;
-+            let mut di = (py as usize * dw + x0 as usize) * 4;
-+            for i in 0..width {
-+                let si = src_row + col_texel[i] as usize * 4;
-+                let mask = lcd && row_inside && col_inside[i];
-+                for c in 0..3 {
-+                    let k = if mask { col_k[i][c] as u32 } else { 256 };
-+                    // 8.8 x 8.8 over a u8, so shift 16 back down.
-+                    let v = (img.px[si + c] as u32 * k * yk) >> 16;
-+                    dst.px[di + c] = v.min(255) as u8;
++            let srow = &img.px[sy * row_bytes..(sy + 1) * row_bytes];
++            let dstart = (py as usize * dw + x0 as usize) * 4;
++            let drow = &mut dst.px[dstart..dstart + width * 4];
++
++            if row_inside {
++                for (d, c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++                    // SAFETY: `off` is a texel index clamped to img.w - 1 times
++                    // four, and `srow` is a whole source row, so off + 4 is in
++                    // bounds. Reading it as a fixed-size array is what lets the
++                    // three channel accesses below drop their bounds checks.
++                    let s = unsafe { &*(srow.as_ptr().add(c.off as usize) as *const [u8; 4]) };
++                    for ch in 0..3 {
++                        // 8.8 x 8.8 over a u8, so shift the 16 back off.
++                        d[ch] = (((s[ch] as u32 * c.k[ch] as u32 * yk) >> 16).min(255)) as u8;
++                    }
++                    d[3] = 255;
 +                }
-+                dst.px[di + 3] = 255;
-+                di += 4;
++            } else {
++                // Outside the picture rect every factor is 1, so this is the
++                // brightness scale alone and the mask drops out entirely.
++                for (d, c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++                    // SAFETY: as above.
++                    let s = unsafe { &*(srow.as_ptr().add(c.off as usize) as *const [u8; 4]) };
++                    for ch in 0..3 {
++                        d[ch] = (((s[ch] as u32 * yk) >> 8).min(255)) as u8;
++                    }
++                    d[3] = 255;
++                }
 +            }
 +        }
++
 +        2
 +    }
 +}
@@ -1374,6 +1347,78 @@ index 0000000..f9f19f9
 +        let mut canvas = Image::new(OUT_W, OUT_H);
 +        game.draw(&mut canvas, None);
 +        assert!(canvas.px.iter().any(|&b| b != 0), "canvas left blank");
++    }
++}
++
++#[cfg(test)]
++mod separable_path_tests {
++    use super::{Game, Image, BRIGHTEN_LCD, BRIGHTEN_SCANLINES, LCD_OFFSETS, PI};
++    use crate::pipeline::{SRC_H, SRC_W};
++    use crate::surface::{OUT_H, OUT_W};
++
++    /// A GB/GBC frame: 160x144 of picture sitting inside the 240x160 buffer, so
++    /// the source and picture rects are both partial and the scale is 4.5x
++    /// across and 3.33x down. This is what the device actually runs, and it is
++    /// the path the 3x lookup does *not* cover.
++    fn gb_game() -> Game {
++        let mut g = Game::new();
++        let mut frame = Vec::with_capacity((SRC_W * SRC_H * 4) as usize);
++        for y in 0..SRC_H {
++            for x in 0..SRC_W {
++                frame.push((x % 251) as u8);
++                frame.push((y % 241) as u8);
++                frame.push(((x * 3 + y) % 239) as u8);
++                frame.push(0);
++            }
++        }
++        g.upload(&frame);
++        let (pw, ph) = (160.0 / SRC_W as f32, 144.0 / SRC_H as f32);
++        g.src = [0.0, 0.0, pw, ph];
++        g.pic = [0.0, 0.0, pw, ph];
++        g
++    }
++
++    #[test]
++    fn the_separable_path_matches_the_mask_in_floats() {
++        let g = gb_game();
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        let path = g.draw(&mut canvas, None);
++        assert_eq!(path, 2, "this shape must not take the 3x lookup");
++
++        let (sw, sh) = (SRC_W as f32, SRC_H as f32);
++        let (rw, rh) = (OUT_W as f32, OUT_H as f32);
++        let mut worst = 0i32;
++        for py in (0..OUT_H).step_by(29) {
++            for px in (0..OUT_W).step_by(31) {
++                let u = g.src[0] + (px as f32 + 0.5) / rw * g.src[2];
++                let v = g.src[1] + (py as f32 + 0.5) / rh * g.src[3];
++                let sx = ((u * sw) as i32).clamp(0, SRC_W as i32 - 1) as u32;
++                let sy = ((v * sh) as i32).clamp(0, SRC_H as i32 - 1) as u32;
++                let yk = (BRIGHTEN_SCANLINES + (2.0 * PI * (v * sh).fract()).sin())
++                    / (BRIGHTEN_SCANLINES + 1.0);
++                for c in 0..3usize {
++                    let xk = (BRIGHTEN_LCD
++                        + (2.0 * PI * (u * sw).fract() + LCD_OFFSETS[2 - c]).sin())
++                        / (BRIGHTEN_LCD + 1.0);
++                    let src = g.frame.px[((sy * SRC_W + sx) * 4) as usize + c] as f32;
++                    let want = (src * xk * yk).clamp(0.0, 255.0) as i32;
++                    let got = canvas.px[((py * OUT_W + px) * 4) as usize + c] as i32;
++                    worst = worst.max((got - want).abs());
++                }
++            }
++        }
++        assert!(worst <= 2, "separable path differs from the mask by {worst}");
++    }
++
++    /// The hot loop reads the source through a raw pointer on the strength of
++    /// the column offsets being clamped. Drive every row and column so an
++    /// out-of-bounds offset would fault here rather than on the handheld.
++    #[test]
++    fn it_stays_inside_the_source_for_every_pixel() {
++        let g = gb_game();
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        g.draw(&mut canvas, None);
++        assert!(canvas.px.iter().any(|&b| b != 0));
 +    }
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs

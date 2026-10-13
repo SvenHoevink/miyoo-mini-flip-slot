@@ -201,7 +201,30 @@ Progress, p50 of `take>swapped`:
 |---|---|
 | first measured run | 52.9 |
 | + rotated output memcpy | 36.2 |
-| + 3x lookup for the game pass | to be measured |
+| + 3x lookup for the game pass | 43.3 — **worse, and the path never ran** |
+| + per-stage profiling | the game pass is 32 of the 47 ms |
+
+Per-stage, from the device:
+
+```
+slot: soft: clear 1.2 game 32.6 sprites 0.0 out 2.7 ms/frame, game path separable
+```
+
+So the clear, the sprites and the output are all cheap, and the game pass is
+the whole remaining cost. `game path separable` also says the 3x lookup does
+not run: GB and GBC are 160x144 inside the 240x160 buffer, so the source and
+picture rects are partial and the scale is 4.5x across, not 3x. The lookup only
+ever fits GBA.
+
+### NEON will not come for free here
+
+The horizontal scale makes the source read a **gather** — each output column
+takes an arbitrary source texel — and NEON has no gather instruction. Cleaning
+the loop up (no bounds checks, no per-pixel branch) did not make LLVM
+autovectorise it, and would not have: the obstacle is the access pattern, not
+the loop shape. Vectorising this needs the row expanded to destination width
+first, or a `vtbl` shuffle exploiting the fixed scale ratio, and either way it
+needs inline asm or a C shim, since the intrinsics are unstable here.
 
 The lesson from the middle row: the memcpy fast path was first written with
 `!half` in its condition, and this panel is *always* rotated, so it never ran
