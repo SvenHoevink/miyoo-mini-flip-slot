@@ -20,14 +20,15 @@ export SLOT_ROOT="$SD"
 # /dev/fb0 appears inverted on the panel, confirmed on the device.
 export SLOT_FB_ROTATE=180
 
-# Temporary, while the software renderer is being tuned: one line per frame in
-# slot.log breaking the frame down, of which take>swapped is this backend's
-# rasteriser plus the output blit. Drop it once the frame rate is settled.
-export SLOT_TRACE_LATENCY=1
-
-# Also on, to capture how the clamshell hall sensor signals open and close so
-# the lid can be wired up properly. Drop both once that is done.
-export SLOT_TRACE_INPUT=1
+# Diagnostics, off by default because each writes a line per frame or per event
+# to the card:
+#   SLOT_TRACE_LATENCY=1  per-frame breakdown and the backend's own per-stage
+#                         timings, into slot.log
+#   SLOT_TRACE_INPUT=1    every input event and how it mapped, into
+#                         input-trace.log, plus a survey of the input nodes
+#   SLOT_FB_VSYNC=1       block in the page flip until the panel latches; off
+#                         because slot paces itself and waiting here too cost
+#                         most of the frame budget
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 

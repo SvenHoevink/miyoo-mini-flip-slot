@@ -4,6 +4,23 @@ Porting [slot](https://slot-cfw.fyi/) to the **Miyoo Mini Flip**. Read
 `README.md` first for the target hardware, the blockers and the plan; this file
 is about how to work in the repo.
 
+## Where things stand
+
+The port runs games. See the README for status and what is still open; see
+`notes/hardware.md` for everything measured off the device, including the frame
+budget and the full button map.
+
+Two hard-won rules from getting here:
+
+**Do not kill `alliumd`.** It owns the MENU button and draws a hotkeys overlay
+over the game, which is genuinely annoying, and stopping it makes the handheld
+power off when a game launches.
+
+**Look at the screen before theorising about the UI.** `dd if=/dev/fb0` on the
+device and `tools/fb2png.py` on the result gives a screenshot over the network.
+Four rounds of gesture tuning went into a menu problem that one screenshot
+showed was Allium drawing over us.
+
 ## Ground rules
 
 **Never report a port step as working until it ran on the handheld.** This

@@ -14,7 +14,9 @@ git submodule update --init
 
 ## Status
 
-**It runs on the device, and stops at the renderer — exactly as predicted.**
+**It runs games on the handheld.** GB, GBC and GBA, at roughly the frame budget,
+with working input and a software renderer standing in for the GPU this device
+does not have.
 
 `task all` produces, from a clean tree, three armv7 artifacts that the handheld
 could load — verified as 32-bit ARMv7-A, VFPv4 hard-float, needing nothing
@@ -26,25 +28,25 @@ beyond glibc 2.28:
 | `vendor-miyoo/gpsp_libretro.so` | 756 KB | ARM dynarec, all upstream patches |
 | `vendor-miyoo/mgba_libretro.so` | 2.1 MB | all 7 upstream patches |
 
-The whole of slot needed **exactly one** source change to compile for armv7
-(`patches/0001-crash-registers-on-armv7.patch`, 6 lines: the crash handler's
-register read). Everything else, the GLES pipeline included, compiles as-is —
-because the `gl` crate resolves entry points at runtime, so **the GPU problem
-is a runtime problem, not a compile-time one.** The binary will build, ship,
-start, fail to find `libEGL.so`, and die. The software rasteriser is still the
-work; see the plan.
+Compiling for armv7 took **one** six-line change (`patches/0001`): the GLES
+pipeline builds untouched, because the `gl` crate resolves entry points at
+runtime. The GPU problem was never a compile-time one — the binary built, ran,
+and died looking for `libEGL.so`. Replacing that is `patches/0002`.
 
-Confirmed on hardware on 2026-10-12 (`notes/hardware.md`). `slot --init-root`
-completed with exit 0 on the device, and a normal start gets this far:
+Where it stands:
 
-```
-slot: boot: start at 0.0 ms
-slot: fb0 hint 752x560
-slot: gl context: libEGL.so: cannot open shared object file: No such file or directory
-```
+| | |
+|---|---|
+| boots, renders, runs games | yes |
+| GB / GBC / GBA | yes, GBA on gpSP |
+| frame budget | backend 8.2 ms of a 16.86 ms period, core 6.3 ms |
+| buttons, including the d-pad | yes |
+| lid open/close | detected, does nothing |
+| audio | ALSA is present; untested |
+| battery indicator | no source on this device |
 
-Toolchain, libc, loader and binary are all correct — the device's glibc is
-**2.28**, the exact version we link against. Only the renderer is missing.
+The renderer, the cores and the input map are all working. What is left is in
+"Still open" at the bottom.
 
 ## The problem in one table
 
@@ -140,58 +142,44 @@ Choices worth knowing, with the reasoning in the scripts themselves:
   `task unpatch` reverts. A patch that no longer applies is a hard error, not a
   warning, so an upstream bump cannot silently drop a change.
 
-## Plan
+## What the port needed
 
-- [x] **armv7 toolchain.** `toolchain/Dockerfile`; `task build`.
-- [x] **Cores for armv7.** Both built with upstream's patches; `task cores`.
-      gpSP has `HAVE_DYNAREC=1` (ARM JIT) and is expected to be the GBA core —
-      mGBA has no GBA dynarec and interprets, which at 1.2 GHz probably will not
-      hold 60fps. Unmeasured.
-- [x] **Probe the hardware.** Done; see `notes/hardware.md`. glibc is 2.28
-      exactly, the panel is 752x560x32 and already triple-buffered, and the card
-      is not mounted `noexec`.
-- [ ] **Per-button evdev codes.** The probe found `event0` (`soc:gpio_keys`) and
-      `event1` (the clamshell hall sensor, which slot's `SW_LID` handling can
-      use), but not the individual keycodes. Needs an `evtest`-style capture.
-- [x] **A dev loop.** `task run:qemu` runs the device build here and stops at
-      EGL, so the rasteriser can be written and iterated without the handheld.
-- [x] **Software `Surface`.** `soft/fb.rs`: mmap `/dev/fb0` and page-flip via
-      `FBIOPAN_DISPLAY` across the panel's three buffers. Not yet run on the
-      device.
-- [x] **Software rasteriser.** `soft/raster.rs` and `soft/mod.rs`: all five
-      `Draw` variants, the game plane, and the Lcd3x mask computed from the same
-      `lcd3x_factors` the shader uses. It renders slot's UI correctly under
-      qemu — see below. Not yet run on the device.
-- [ ] **An MI_AO audio sink.** There is no ALSA on the device, and slot
-      `dlopen`s `libasound`. `/config/lib/libmi_ao.so` is the replacement, behind
-      slot's existing `Sink` trait. Allium's `ffi` crate binds it already.
-- [ ] **A battery source.** `/sys/class/power_supply` does not exist on this
-      device, so `slot-power` has nothing to read. Find how Allium does it.
-- [x] **Decide the shader passes.** Lcd3x and the blue-light gain are
-      implemented exactly; the bezel, split and lift paths are no-ops because
-      `bezel::framed()` needs a 4:3 panel and 752x560 is not one, so the device
-      never reaches them. Grid, Dot and Simpletex fall back to no effect.
-- [x] **Make the rasteriser fast enough to be worth measuring.** The first
-      on-device run ran but dropped frames badly. The game pass was calling
-      `lcd3x_factors` per pixel — four `sin()` each, ~83 million a second over
-      the game area at 60 fps. The mask is separable, so it now precomputes one
-      row and one column and the inner loop is integer; the sprite path
-      precomputes source columns and short-circuits transparent and opaque
-      texels; the output blit uses a gain lookup, skips the identity case and
-      no longer repaints the static border. Output is pixel-identical.
-- [ ] **Measure.** `SLOT_TRACE_LATENCY=1` is set in the card's launch script and
-      writes a per-frame breakdown to `slot.log`, of which `take>swapped` is
-      this backend. Nothing above has a real frame time attached to it yet.
-- [x] **Fit the panel.** Resolved by measurement rather than choice: the panel
-      is **752x560**, not the 750x560 on the spec sheets, so upstream's own
-      720x480 (`SCALE = 3` over 240x160) drops in with a 16px side and 40px
-      top/bottom border. No non-integer scaling, no compromise. A bezel for that
-      border is still to draw.
-- [x] **Boot integration.** `card/App/Slot` plus an armv7
-      `card/System/launch_frontend.sh`; `task dist` assembles the card tree.
-      Untested on hardware.
-- [ ] **Measure.** RAM headroom and sustained frame time, on-device, before
-      calling anything done.
+- **armv7 toolchain and cores.** `toolchain/Dockerfile`; `task all`. gpSP has the
+  ARM JIT and is the GBA core to use — 6.3 ms a frame against mGBA's 14-18.
+- **A software renderer.** `patches/0002`: slot's GLES2 backend replaced by a
+  framebuffer and a CPU rasteriser, behind a cargo feature, with nothing above
+  `slot-gfx` aware of the swap.
+- **Four 32-bit assumptions in upstream**, none visible on the aarch64 hardware
+  slot was written for: the crash handler's register read (`0001`), evdev
+  capability bitmaps read as 64-bit words (`0004`), `struct input_event` being
+  16 bytes rather than 24 (`0003`), and the input threads being starved into
+  stalls of over a second (`0003`).
+- **Miyoo button codes.** `gpio_keys` reports keyboard codes, not `BTN_*`
+  (`0003`).
+- **An upside-down panel.** `SLOT_FB_ROTATE=180`, set in the card's launch
+  script.
+
+## Still open
+
+- **The lid does nothing.** The hall sensor is detected and its events are
+  dropped rather than acted on, because it advertises `KEY_POWER` and closing
+  the clamshell otherwise shut the handheld down. Wiring it to `Btn::Lid` needs
+  its open/close signalling captured first; see `notes/hardware.md`.
+- **Allium owns the MENU button.** Its daemon draws a hotkeys overlay over the
+  running game and claims MENU for itself, so slot's gestures work but are
+  shadowed. Stopping the daemon fixed the overlay and made the handheld power
+  off when launching a game, so it is reverted — **do not kill `alliumd`**. The
+  route worth trying is a setting or per-app config in Allium.
+- **No in-game settings menu.** Upstream's quick menu is shelf-only; in-game the
+  menu button belongs to the link menu, which this device has no support for. A
+  patch to open the quick menu in-game was written and dropped in favour of
+  matching upstream.
+- **No battery indicator.** `/sys/class/power_supply` does not exist here, so
+  `slot-power` has nothing to read.
+- **Audio is untested.** ALSA is present and the sink loads; it reached
+  "device busy" once, with something else holding the PCM.
+- **The sprite path is unoptimised.** It costs 12 ms a frame on menu screens
+  with ~186 draws, because gameplay never exercises it (0.0 ms there).
 
 ## Layout
 
