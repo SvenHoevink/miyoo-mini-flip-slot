@@ -37,14 +37,23 @@ export SLOT_FB_ROTATE=180
 #   SLOT_FB_VSYNC=1       block in the page flip until the panel latches; off
 #                         because slot paces itself and waiting here too cost
 #                         most of the frame budget
-#   SLOT_FB_PAGES=1       give up the page flip and draw at the scanout
+#   SLOT_FB_PAGES=1       give up the page flip and draw at the scanout; this
+#                         skips the driver's 6.6 ms page copy but tears, on the
+#                         shelf and in game both, so it is not used
+#   SLOT_DRIVE_EMU=0      stop chaining the core to the display's rate
 
-# The driver's FBIOPAN_DISPLAY measured 6.6 ms a frame here -- the shape of a
-# whole-page copy, not a latch -- which with 13.4 ms of real work put the
-# in-game loop at 20 ms, so slot paced the emulator and its audio to 50 Hz.
-# That is the slow gameplay and the dropped pitch. Drawing at the scanout and
-# waiting for the blank gives those 6.6 ms back; watch for tearing.
-export SLOT_FB_PAGES=1
+# The driver's FBIOPAN_DISPLAY costs 6.6 ms a frame here, which with 13.4 ms of
+# real work puts the loop near 20 ms. Drawing straight at the scanout
+# (SLOT_FB_PAGES=1) gives those 6.6 ms back but tears visibly, so the page flip
+# stays. Instead the core is unchained from the display: it keeps its own
+# 59.73 Hz and the display drops the frames it cannot fit, so the speed and the
+# audio pitch are right and the cost is judder rather than slow motion.
+export SLOT_DRIVE_EMU=0
+
+# TEMPORARY, for one run: with the core unchained the resample factor should sit
+# at 1.0 rather than following the display. Remove once confirmed.
+export SLOT_TRACE=1
+export SLOT_TRACE_LATENCY=1
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 

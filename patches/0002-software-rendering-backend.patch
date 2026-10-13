@@ -2445,10 +2445,33 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..1435048 100644
+index cada2b8..5ed0931 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
-@@ -152,7 +152,11 @@ pub fn run() {
+@@ -128,7 +128,21 @@ pub fn run() {
+         .name("slot-bootlogo".into())
+         .spawn(move || slot::bootlogo::refresh(&card));
+     let mut drawn = false;
+-    frontend.drive_emulator();
++    // Driven mode chains the core to the display: the emulator waits for a
++    // present tick, so the display's rate becomes the machine's rate. That is
++    // right where the display can hold 60 Hz, and this one cannot -- the
++    // driver's pan costs 6.6 ms a frame on top of 13 ms of real work, so the
++    // loop lands near 20 ms. Chained to that, a Game Boy runs at 50 Hz: slow
++    // motion with the audio stretched to match, which is what SLOT_TRACE
++    // measured as a 1.37 resample factor.
++    //
++    // `SLOT_DRIVE_EMU=0` unchains it. The core then keeps its own 59.73 Hz and
++    // the display shows whatever frame is latest, dropping the ones it cannot
++    // fit. That trades correct speed and pitch for judder, which is the right
++    // way round -- and unlike drawing at the scanout it does not tear.
++    if std::env::var("SLOT_DRIVE_EMU").as_deref() != Ok("0") {
++        frontend.drive_emulator();
++    }
+     let mut pacer = Pacer::new();
+     let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
+     loop {
+@@ -152,7 +166,11 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
