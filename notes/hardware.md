@@ -206,7 +206,26 @@ Progress, p50 of `take>swapped`:
 | + flat column table, no per-pixel checks | 34.5 (game 32.6 -> 21.0) |
 | + source row expanded once per source row | 26.5 (game 17.1, upload 0.4) |
 | + NEON kernel for the row scale | 25.6 (**game 17.1 -> 7.8**) |
-| + cached column table and scratch | to be measured |
+| + cached column table and scratch | — |
+| + memset clear, all games on gpSP | 25.7 (stages sum to **12.8**) |
+
+With everything on gpSP: `emu>pub` 6.4, and the backend's own stages are
+clear 0.9, upload 0.3, game 8.6, sprites 0.0, out 3.0 — **12.8 ms**, inside the
+16.77 ms period. The memset took the clear from 1.4 to 0.9.
+
+### The gap is not the renderer
+
+`take>swapped` is 25.7 against stages summing to 12.8, and the pacer reports
+`work 28 ms`. That ~13 ms is now larger than anything left in the rasteriser,
+and it is *not* in the rasteriser: `latency::taken()` fires immediately after
+`upload_game`, and the whole of `Frontend::compose` runs after it —
+`cart_faces.sync`, `sync_clock`, `sync_about`, `sync_quick_clock`,
+`sync_core_picker`, texture uploads, then building the display list. All of it
+lands inside `take>swapped` and none of it inside the backend's profile.
+
+`patches/0005` times that block temporarily, printing `slot: compose: sync N
+build N ms/frame`. It is diagnostic only and should be dropped once the budget
+is settled.
 
 With gpSP the stages add up to about 12.4 ms (clear 1.4, upload 0.3, game 7.8,
 sprites 0.0, out 2.9) and slot's own pacer agrees: `work 12.7 ms, period
