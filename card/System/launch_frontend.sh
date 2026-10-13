@@ -29,6 +29,8 @@ export SLOT_FB_ROTATE=180
 #   SLOT_FB_VSYNC=1       block in the page flip until the panel latches; off
 #                         because slot paces itself and waiting here too cost
 #                         most of the frame budget
+#   SLOT_FB_PAGES=1       give up the page flip and draw at the scanout; the
+#                         driver's pan costs 6.6 ms a frame on this panel
 
 # TEMPORARY, to capture how the clamshell hall sensor signals open and close so
 # the lid can be wired to Btn::Lid. Writes input-trace.log; remove once mapped.
@@ -42,6 +44,13 @@ export SLOT_TRACE_LATENCY=1
 # ring ran dry, which is what a stutter is; dropped says the sink is not
 # keeping up. Remove once the audio is settled.
 export SLOT_TRACE=1
+
+# The driver's FBIOPAN_DISPLAY measured 6.6 ms a frame here -- the shape of a
+# whole-page copy, not a latch -- which with 13.4 ms of real work put the
+# in-game loop at 20 ms, so slot paced the emulator and its audio to 50 Hz.
+# That is the slow gameplay and the dropped pitch. Drawing at the scanout and
+# waiting for the blank gives those 6.6 ms back; watch for tearing.
+export SLOT_FB_PAGES=1
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 

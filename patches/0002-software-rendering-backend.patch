@@ -246,10 +246,10 @@ index 160e42a..c00d881 100644
  }
 diff --git a/crates/slot-gfx/src/soft/fb.rs b/crates/slot-gfx/src/soft/fb.rs
 new file mode 100644
-index 0000000..a027cd1
+index 0000000..cf46e75
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/fb.rs
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,359 @@
 +//! A `Surface` over `/dev/fb0` for devices with no GPU.
 +//!
 +//! The Miyoo Mini Flip's SigmaStar SSD202D has no 3D core and no libEGL, so the
@@ -452,7 +452,20 @@ index 0000000..a027cd1
 +        // Red at bit 16 means the byte order is BGRA, which is what the Mini
 +        // Flip reports and what nearly every 32bpp fbdev panel uses.
 +        let bgr = var.red.offset >= 16;
-+        let pages = (var.yres_virtual / var.yres.max(1)).max(1);
++        // The driver offers three pages, but its pan is not free: on this
++        // panel FBIOPAN_DISPLAY with FB_ACTIVATE_NOW costs 6.6 ms a frame,
++        // which is the shape of a whole-page copy (1.68 MB at the bus speed we
++        // see elsewhere) rather than a latch. That is 40% of the frame budget
++        // spent inside an ioctl, and it is why in-game pacing sits at 50 Hz.
++        //
++        // `SLOT_FB_PAGES=1` gives up the flip and draws straight at the
++        // scanout, waiting for the blank instead, which trades the copy for a
++        // tearing risk. Per device in the launch script; measure both.
++        let offered = (var.yres_virtual / var.yres.max(1)).max(1);
++        let pages = match std::env::var("SLOT_FB_PAGES").ok().and_then(|v| v.trim().parse().ok()) {
++            Some(n) if n >= 1 => offered.min(n),
++            _ => offered,
++        };
 +        let map_len = stride * var.yres_virtual.max(var.yres) as usize;
 +
 +        // SAFETY: mapping `map_len` bytes of the framebuffer we just opened.
@@ -2431,3 +2444,20 @@ index b3ee812..99480a7 100644
  
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+index cada2b8..1435048 100644
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -152,7 +152,11 @@ pub fn run() {
+         }
+         let swap_took = swap.elapsed();
+         slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
+-        let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
++        // The swap is frame work too. This panel's pan ioctl is a page copy
++        // costing several ms, and a pacer that does not know about it sleeps
++        // before a frame that was always going to overrun -- two pacers in
++        // series, which is how the in-game period drifted to 20 ms.
++        let dropped = pacer.swapped(work + swap_took, swap_took > Duration::from_millis(1));
+         if slot::latency::tracing() {
+             frames += 1;
+             missed += u32::from(dropped);
