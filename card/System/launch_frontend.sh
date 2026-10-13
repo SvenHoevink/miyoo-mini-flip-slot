@@ -31,4 +31,28 @@ export SLOT_TRACE_INPUT=1
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
-exec /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
+# Allium's daemon keeps running under whatever it launches, and it owns the
+# MENU button globally: it draws a "Global Hotkeys / Ingame Hotkeys" overlay
+# over the game and claims MENU + power/volume/brightness for itself. slot wants
+# that button too -- a tap is its quick menu, a hold ejects -- so both react to
+# every press and the result is unusable.
+#
+# On the Anbernic handhelds slot *is* the launcher and owns input outright, so
+# stopping alliumd for the session is what gives it the same footing. It is put
+# back on the way out, including when slot crashes, since it is also what
+# returns the handheld to its launcher.
+ALLIUMD="$SD/.allium/bin/alliumd"
+stopped=""
+if [ -x "$ALLIUMD" ] && pgrep alliumd > /dev/null 2>&1; then
+	killall alliumd > /dev/null 2>&1 && stopped=1
+fi
+restore_allium() {
+	[ "$stopped" = 1 ] || return 0
+	pgrep alliumd > /dev/null 2>&1 && return 0
+	cd "$SD" && setsid "$ALLIUMD" > /dev/null 2>&1 &
+}
+trap restore_allium EXIT INT TERM
+
+# Not exec: the trap has to run when slot exits.
+/lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
+restore_allium

@@ -341,6 +341,25 @@ properly needs the open/close signalling, which the input trace is back on to
 capture: whether it holds a value across the closed state, or just pulses on
 each transition, decides whether it can drive `Btn::Lid` directly.
 
+## Allium's daemon fights slot for the MENU button
+
+`alliumd` keeps running underneath whatever it launches, and it owns MENU
+globally: it draws a "Global Hotkeys / Ingame Hotkeys" overlay over the running
+game and claims MENU plus power, volume and brightness. slot wants the same
+button — a tap is its quick menu, a hold ejects — so both react to every press.
+
+This was the real cause of the menu button feeling broken, and it is invisible
+from slot's own logs: the gesture log showed slot deciding correctly all along.
+Capturing `/dev/fb0` over the network and looking at it is what settled it,
+which is worth remembering as a diagnostic — `dd if=/dev/fb0` on the device,
+then `tools/fb2png.py`.
+
+`card/System/launch_frontend.sh` stops `alliumd` for the session and restores it
+on the way out, including on a crash, since it is also what returns the handheld
+to its launcher. On the Anbernic handhelds slot is the launcher and owns input
+outright, so this gives it the same footing rather than changing how slot
+behaves.
+
 ## Open problem: no battery sysfs
 
 ```
