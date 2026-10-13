@@ -89,7 +89,10 @@ if [ -f "$ROOT"/.slot-boot ]; then
     # handheld is to carry the card to a computer. So start the network here,
     # in the background so it never delays the frontend, when .slot-net asks.
     if [ -f "$ROOT"/.slot-net ]; then
-        "$ROOT"/System/net-up.sh "$ROOT" "$ROOT"/slot-net.txt &
+        # setsid, not just &: backgrounded from here it is still in the boot
+        # script's process group, and it stopped after a single attempt rather
+        # than retrying -- the same thing that had to be fixed for telnetd.
+        setsid "$ROOT"/System/net-up.sh "$ROOT" "$ROOT"/slot-net.txt > /dev/null 2>&1 &
     fi
     SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
 fi

@@ -62,7 +62,7 @@ while :; do
 	# Association first: it and DHCP fail for different reasons.
 	assoc=""
 	n=0
-	while [ $n -lt 25 ]; do
+	while [ $n -lt 45 ]; do
 		state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
 		[ "$state" = "COMPLETED" ] && assoc=1 && break
 		essid=$(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p')
@@ -98,7 +98,7 @@ while :; do
 	}
 	sync
 	attempt=$((attempt + 1))
-	sleep 20
+	sleep 15
 done
 
 # setsid so they outlive whatever started this.
