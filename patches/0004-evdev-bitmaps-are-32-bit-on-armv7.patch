@@ -1,5 +1,5 @@
 diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
-index 44fb04c..8f78230 100644
+index 44fb04c..210311e 100644
 --- a/crates/slot-power/src/device.rs
 +++ b/crates/slot-power/src/device.rs
 @@ -184,12 +184,24 @@ fn ran(what: &str, result: std::io::Result<std::process::ExitStatus>) {
@@ -29,7 +29,66 @@ index 44fb04c..8f78230 100644
  }
  
  pub fn rumble_node(sysfs: &Path) -> Option<String> {
-@@ -537,3 +549,45 @@ pub fn read_only_in(mounts: &str, path: &Path) -> bool {
+@@ -361,6 +373,48 @@ fn read_number(path: &Path) -> Option<u32> {
+     fs::read_to_string(path).ok()?.trim().parse().ok()
+ }
+ 
++/// The Miyoo Mini Flip has no `/sys/class/power_supply` at all. Its charge is
++/// behind a vendor tool, which prints one line of JSON:
++///
++/// ```text
++/// {"battery":93, "voltage":4026, "charging":0}
++/// ```
++///
++/// Allium reads the same tool on this hardware. Spawning a process to read a
++/// battery is not lovely, but it is the only source there is, and it is read
++/// rarely -- the alternative is the SAR ADC behind `/dev/sar` and a pair of
++/// vendor ioctls, which is a lot of machinery for the same number.
++const AXP_TOOL: &str = "/customer/app/axp_test";
++
++fn axp_battery() -> Option<Battery> {
++    if !Path::new(AXP_TOOL).is_file() {
++        return None;
++    }
++    let out = std::process::Command::new(AXP_TOOL).output().ok()?;
++    let text = String::from_utf8_lossy(&out.stdout);
++
++    // Deliberately not a JSON parser: one flat object of integers, and a
++    // dependency for this would be absurd.
++    let field = |name: &str| -> Option<i64> {
++        let at = text.find(&format!("\"{name}\""))?;
++        let rest = &text[at + name.len() + 2..];
++        let start = rest.find(|c: char| c == '-' || c.is_ascii_digit())?;
++        let rest = &rest[start..];
++        let end = rest
++            .find(|c: char| !(c == '-' || c.is_ascii_digit()))
++            .unwrap_or(rest.len());
++        rest[..end].parse().ok()
++    };
++
++    let percent = field("battery")?.clamp(0, 100) as u8;
++    let charge = match field("charging") {
++        Some(0) => Charge::Discharging,
++        Some(_) => Charge::Charging,
++        None => Charge::Unknown,
++    };
++    Some(Battery { percent, charge })
++}
++
+ fn charge_at(dir: &Path) -> Charge {
+     let Ok(text) = fs::read_to_string(dir.join("status")) else {
+         return Charge::Unknown;
+@@ -412,6 +466,9 @@ impl Platform for DevicePlatform {
+     }
+ 
+     fn battery(&self) -> Option<Battery> {
++        if let Some(b) = axp_battery() {
++            return Some(b);
++        }
+         let dir = self.battery.as_ref()?;
+         let percent = read_number(&dir.join("capacity"))?;
+         Some(Battery {
+@@ -537,3 +594,45 @@ pub fn read_only_in(mounts: &str, path: &Path) -> bool {
          .max_by_key(|(point, _)| point.as_os_str().len())
          .is_some_and(|(_, options)| options.split(',').any(|o| o == "ro"))
  }

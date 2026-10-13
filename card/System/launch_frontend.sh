@@ -48,4 +48,23 @@ export SLOT_TRACE_LATENCY=1
 # alliumd is PID 817-ish, started by /customer/main, and evidently something
 # depends on it staying alive. If the overlay is worth another attempt, find out
 # what notices its absence first -- do not just kill it again.
-exec /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
+# Crash handling. slot's own handler prints the faulting pc and lr to the log
+# (see patches/0001 for the armv7 register read); this adds the kernel side:
+# upstream's coresave.sh writes the core, the process maps and a copy of the
+# log into $SD/crash. Kept per-boot so a crash is still there after a restart.
+mkdir -p "$SD/crash" 2>/dev/null
+echo "|/bin/sh $SYS/coresave-miyoo.sh %p %s %e %t" > /proc/sys/kernel/core_pattern 2>/dev/null
+ulimit -c unlimited 2>/dev/null
+
+# Not exec: the exit status is worth recording. An unexplained shutdown looks
+# the same as a clean exit from the outside, and this is what tells them apart.
+started="$(date '+%F %T' 2>/dev/null)"
+/lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
+status=$?
+echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$SD/crash/exits.log"
+if [ "$status" -gt 128 ]; then
+	# 128 + signal: killed rather than returned. 139 is SIGSEGV, 134 SIGABRT.
+	echo "  killed by signal $((status - 128)); see crash/ and slot.log.1" >> "$SD/crash/exits.log"
+	cp -f "$SD/slot.log" "$SD/crash/slot-exit-$status.log" 2>/dev/null
+fi
+sync

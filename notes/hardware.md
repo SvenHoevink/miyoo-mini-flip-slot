@@ -555,7 +555,38 @@ truncated slot fails to start, and the boot hook falls through to Allium. If it
 hangs instead of falling through, delete `.slot-boot` with the card in any
 computer.
 
-## Open problem: no battery sysfs
+## Battery: a vendor tool, not sysfs
+
+There is no `/sys/class/power_supply` at all. The charge is behind
+`/customer/app/axp_test`, which prints one line:
+
+```text
+{"battery":93, "voltage":4026, "charging":0}
+```
+
+`patches/0004` reads it when sysfs has nothing, which is what gives slot its
+indicator back. Allium reads the same tool on this hardware. The other source is
+the SAR ADC behind `/dev/sar` and two vendor ioctls — a lot of machinery for the
+same number, and Allium only uses it on the older model.
+
+## Crash handling
+
+`slot.log` is rotated to `slot.log.1` each start, and slot's own signal handler
+prints the faulting pc and lr (the armv7 register read is `patches/0001`). On
+top of that the launch script now:
+
+- installs `coresave-miyoo.sh` as `core_pattern`, which wraps upstream's
+  `coresave.sh` with this card's path — the kernel runs a pipe program with none
+  of our environment, and upstream defaults to the Anbernic `/mnt/sdcard`
+- raises the core limit and makes `$SD/crash/`
+- records every exit in `crash/exits.log` with its status, and copies the log
+  aside when the status is above 128, meaning a signal killed it rather than it
+  returning
+
+That last one is the point: from the outside an unexplained shutdown looks
+exactly like a clean exit. `task crashes` fetches both records.
+
+## Old note: no battery sysfs
 
 ```
 $ ls /sys/class/power_supply

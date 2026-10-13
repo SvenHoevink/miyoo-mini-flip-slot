@@ -231,7 +231,7 @@ tasks:
       # friends, and logs an error for each one it cannot find -- then ours on
       # top, which replaces its launch_frontend.sh with the armv7 one.
       - cp -R {{.UPSTREAM}}/card/System/. {{.OUT}}/System/
-      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/net-up.sh {{.OUT}}/System/
+      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/net-up.sh card/System/coresave-miyoo.sh {{.OUT}}/System/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
       - cp vendor-miyoo/libslotao.so {{.OUT}}/System/
@@ -392,6 +392,8 @@ tasks:
       - curl -sS -T card/System/launch_frontend.sh "{{.FTP}}/System/launch_frontend.sh"
       - curl -sS -T card/System/probe.sh "{{.FTP}}/System/probe.sh"
       - curl -sS -T card/System/net-up.sh "{{.FTP}}/System/net-up.sh"
+      - curl -sS -T card/System/coresave-miyoo.sh "{{.FTP}}/System/coresave-miyoo.sh"
+      - curl -sS -T card/System/coresave.sh "{{.FTP}}/System/coresave.sh" 2>/dev/null || true
       - curl -sS -T vendor-miyoo/libslotao.so "{{.FTP}}/System/libslotao.so"
       - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
 
@@ -455,6 +457,18 @@ tasks:
       - |
         sh tools/device-sh.sh {{.DEVICE}} 'for s in TERM KILL; do pid=$(ps | grep "[S]ystem/slot" | head -1 | tr -s " " | cut -d" " -f2); [ -z "$pid" ] && break; kill -$s "$pid"; sleep 2; done; ps | grep -c "[S]ystem/slot"'
       - 'echo "(a count of 0 above means it stopped; alliumd comes back with it)"'
+
+  crashes:
+    desc: Fetch the crash and exit records off the handheld
+    deps: [device:check]
+    cmds:
+      - mkdir -p device-dump/crash
+      - curl -sS -o device-dump/crash/exits.log "{{.FTP}}/crash/exits.log" || true
+      - curl -sS -o device-dump/crash/cores.log "{{.FTP}}/crash/cores.log" || true
+      - 'echo "--- exits (status > 128 means a signal killed it) ---"'
+      - tail -20 device-dump/crash/exits.log 2>/dev/null || echo "(none yet)"
+      - 'echo "--- cores ---"'
+      - tail -10 device-dump/crash/cores.log 2>/dev/null || echo "(none yet)"
 
   log:
     desc: Fetch slot.log (and any traces) off the handheld over FTP
