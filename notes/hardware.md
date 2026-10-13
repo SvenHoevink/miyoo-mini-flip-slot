@@ -209,7 +209,20 @@ Progress, p50 of `take>swapped`:
 | + cached column table and scratch | — |
 | + memset clear, all games on gpSP | 25.7 (stages sum to **12.8**) |
 | + deferred clear | clear 0.9 -> **0.0**, stages 11.6 |
-| + game straight to the framebuffer | to be measured |
+| + game straight to the framebuffer | **8.2** (clear 0.0, upload 0.2, out 8.0 incl. game) |
+
+Worst single frame in each 60-frame window: p50 **15.4 ms**, p90 18.7, against a
+16.86 ms period — where it had been 19-21 ms. `take>swapped` p50 11.1,
+`emu>pub` 6.3.
+
+### What is still unexplained
+
+The pacer reports `work 36-45 ms` while `take>swapped` is 11 and the core is 6.
+`work` is measured from the top of the loop to the swap, so it also spans
+`advance` and `step_emulator`, and the latter can block waiting on the emulator
+thread. That would make most of it *waiting* rather than work, which is what the
+healthy frames suggest — `total 17.8 ms` on a good one — but it has not been
+proven, and it is the obvious thing to measure next if the stutter persists.
 
 With everything on gpSP: `emu>pub` 6.4, and the backend's own stages are
 clear 0.9, upload 0.3, game 8.6, sprites 0.0, out 3.0 — **12.8 ms**, inside the
