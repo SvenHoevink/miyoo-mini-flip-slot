@@ -224,11 +224,21 @@ task deploy:cores    # push the libretro cores too, which rarely change
 task log             # pull slot.log back and print the last stage/frame lines
 ```
 
-On the handheld, once per boot, run **Apps → slot net**: it calls Allium's own
-`wifi-on`, `telnet-on` and `ftp-on`, then writes the device's address to
-`slot-net.txt` at the card root, which is what `SLOT_DEVICE` wants. WiFi itself
-has to be configured in Allium's settings once beforehand, since
-`wait-for-wifi.sh` only waits for a link it already knows how to make.
+On the handheld, once per boot, run **Apps → slot net**. It writes what happened
+to `slot-net.txt` at the card root, including the address `SLOT_DEVICE` wants,
+and diagnostics when the link does not come up.
+
+If WiFi has never been set up, put the network name on line 1 and the password
+on line 2 of **`slot-wifi.txt`** at the card root; the app writes
+`/appconfigs/wpa_supplicant.conf` from it. (Allium's own settings do the same
+job if you would rather not leave a password on the card.)
+
+It deliberately does **not** call Allium's `telnet-on.sh` and `ftp-on.sh`: both
+start with `wait-for-wifi.sh`, which pings `1.1.1.1` once a second for up to
+sixty seconds, so calling the pair of them after waiting once meant up to three
+minutes of a handheld that looks frozen. It also only needs a LAN address, not
+the internet, so it waits for `wlan0` to have an address — bounded at twenty
+seconds — and starts `telnetd` and `ftpd` directly.
 
 The `device:check` step fails with a clear message rather than a curl error
 when the handheld is not listening.
