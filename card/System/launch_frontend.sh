@@ -37,6 +37,12 @@ export SLOT_TRACE_INPUT=1
 # TEMPORARY, to confirm whether the audio retry churn is what slowed gameplay.
 export SLOT_TRACE_LATENCY=1
 
+# TEMPORARY, for the audio stutter: makes slot report the ring every so often as
+# "queued/target, N dropped, M starved". Starved is the number that says the
+# ring ran dry, which is what a stutter is; dropped says the sink is not
+# keeping up. Remove once the audio is settled.
+export SLOT_TRACE=1
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns

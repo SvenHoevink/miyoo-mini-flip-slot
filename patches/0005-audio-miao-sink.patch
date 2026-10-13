@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..bce10a3
+index 0000000..06c50d0
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,212 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -278,6 +278,17 @@ index 0000000..bce10a3
 +        let join = std::thread::Builder::new()
 +            .name("slot-audio-miao".into())
 +            .spawn(move || {
++                // Ask the scheduler to favour this thread, as the input readers
++                // do. It spends its life blocked in MI_AO_SendFrame and needs
++                // almost no CPU, but on two cores against a renderer and an
++                // emulator it can still be left unscheduled -- and when it is,
++                // the ring runs dry and `fill` writes silence, which is what a
++                // stutter is. The input threads had exactly this problem.
++                //
++                // SAFETY: setpriority on the calling thread, 0 meaning "me".
++                unsafe {
++                    libc::setpriority(0, 0, -10);
++                }
 +                let shim = match Shim::load() {
 +                    Ok(s) => s,
 +                    Err(e) => {
