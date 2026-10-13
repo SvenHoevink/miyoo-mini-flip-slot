@@ -550,10 +550,10 @@ index 0000000..a027cd1
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..99e4367
+index 0000000..7c33cb3
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1107 @@
+@@ -0,0 +1,1139 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1005,6 +1005,8 @@ index 0000000..99e4367
 +    /// be followed through every page before the fast path is safe again.
 +    last_out: Option<(i32, i32, i32, i32)>,
 +    clear_left: u32,
++    /// Set by `begin_frame`, discharged by `draw_list` or `end_frame`.
++    pending_clear: bool,
 +    textures: Vec<Option<Tex>>,
 +    white: TexId,
 +    game: Game,
@@ -1029,6 +1031,7 @@ index 0000000..99e4367
 +            mount: Mount::from_env(),
 +            last_out: None,
 +            clear_left: 0,
++            pending_clear: false,
 +            textures: Vec::new(),
 +            white: TexId::from_raw(0),
 +            game: Game::new(),
@@ -1066,9 +1069,41 @@ index 0000000..99e4367
 +        }
 +    }
 +
++    /// Does the deferred clear, unless the list begins with a game that covers
++    /// the whole canvas and will therefore overwrite every pixel anyway.
++    fn discharge_clear(&mut self, items: &[Draw]) {
++        if !self.pending_clear {
++            return;
++        }
++        self.pending_clear = false;
++        let covered = matches!(items.first(), Some(Draw::Game)) && {
++            let (x, y, w, h) = screen_rect(self.game.power);
++            x <= 0.0
++                && y <= 0.0
++                && w >= self.canvas.w as f32
++                && h >= self.canvas.h as f32
++        };
++        if covered {
++            return;
++        }
++        let t = std::time::Instant::now();
++        // Alpha 0 rather than 255, which makes the backdrop uniform and the
++        // clear a memset. Nothing downstream reads the canvas alpha: the output
++        // writes its own, and sprite blending only uses it to update itself.
++        let b = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
++        self.canvas
++            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 0]);
++        if self.profiling {
++            let us = t.elapsed().as_micros() as u64;
++            self.profile.clear_us += us;
++            self.profile.frame_us += us;
++        }
++    }
++
 +    /// Same splitting as the GL compositor: sprites batch up to a `Game` or
 +    /// `Shot`, which draws the game plane, then the batch continues.
 +    pub fn draw_list(&mut self, items: &[Draw]) {
++        self.discharge_clear(items);
 +        let mut from = 0;
 +        for (i, item) in items.iter().enumerate() {
 +            match *item {
@@ -1251,16 +1286,11 @@ index 0000000..99e4367
 +            self.canvas.w as f32 / OUT_W as f32,
 +            self.canvas.h as f32 / OUT_H as f32,
 +        ];
-+        let t = std::time::Instant::now();
-+        // Alpha 0 rather than 255, which makes the backdrop uniform and the
-+        // clear a memset. Nothing downstream reads the canvas alpha: the output
-+        // writes its own, and sprite blending only uses it to update itself.
-+        let b = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
-+        self.canvas
-+            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 0]);
-+        if self.profiling {
-+            { let us = t.elapsed().as_micros() as u64; self.profile.clear_us += us; self.profile.frame_us += us; }
-+        }
++        // The clear is deferred rather than done here. In play the display list
++        // is a single Draw::Game covering the whole canvas, so clearing first
++        // writes 1.4 MB that the game pass immediately overwrites. draw_list
++        // decides; anything that does not fully cover still gets its clear.
++        self.pending_clear = true;
 +    }
 +
 +    pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
@@ -1288,6 +1318,8 @@ index 0000000..99e4367
 +    }
 +
 +    fn output_frame(&mut self, window: (u32, u32)) {
++        // A frame that drew nothing at all still needs its clear.
++        self.discharge_clear(&[]);
 +        let Some(target) = fb::current() else {
 +            return;
 +        };

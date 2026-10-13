@@ -18,6 +18,9 @@ vars:
   # Set it in the environment: SLOT_DEVICE=192.168.1.x task deploy
   DEVICE: '{{.SLOT_DEVICE | default ""}}'
   FTP: 'ftp://{{.SLOT_DEVICE}}'
+  # How long device:check waits for the handheld, which drops its WiFi when it
+  # sleeps. 0 checks once; SLOT_WAIT_S=120 rides out a nap.
+  WAIT_S: '{{.SLOT_WAIT_S | default "0"}}'
 
   # The renderer to build. "software" is the framebuffer rasteriser this device
   # needs; pass GFX= to build the GL path instead, which the Mini Flip cannot run.
@@ -309,8 +312,10 @@ tasks:
             --no-default-features --features software
 
   device:check:
-    desc: Fail early, with a useful message, when the handheld is not reachable
-    internal: true
+    desc: >-
+      Wait for the handheld to answer on FTP, up to SLOT_WAIT_S seconds
+      (default 0, i.e. check once). The handheld drops its WiFi when it sleeps,
+      so a wait makes deploys survive it nodding off
     cmds:
       - |
         set -eu
@@ -318,10 +323,20 @@ tasks:
           echo "set SLOT_DEVICE to the handheld's IP, e.g. SLOT_DEVICE=192.168.1.42 task deploy" >&2
           exit 1
         fi
-        if ! curl -s --connect-timeout 5 --list-only "{{.FTP}}/" >/dev/null; then
-          echo "no FTP on {{.DEVICE}}:21 — on the handheld, turn WiFi on and then FTP on" >&2
-          exit 1
-        fi
+        waited=0
+        limit={{.WAIT_S}}
+        until curl -s --connect-timeout 3 --list-only "{{.FTP}}/" >/dev/null; do
+          if [ "$waited" -ge "$limit" ]; then
+            echo "no FTP on {{.DEVICE}}:21 after ${waited}s." >&2
+            echo "wake the handheld and run Apps > slot net; it loses the link when it sleeps." >&2
+            echo "to wait for it instead: SLOT_WAIT_S=120 task <whatever>" >&2
+            exit 1
+          fi
+          [ "$waited" = 0 ] && echo "waiting for {{.DEVICE}} to answer..." >&2
+          sleep 3
+          waited=$((waited + 3))
+        done
+        [ "$waited" -gt 0 ] && echo "{{.DEVICE}} answered after ${waited}s" >&2 || true
 
   deploy:
     desc: >-
