@@ -514,6 +514,8 @@ the same vfat card the game is reading and writing, and which is also why a
 deploy drops you back into Allium. **Do not judge device timings taken while a
 deploy is in flight**, and prefer ejecting and relaunching before pushing.
 
+Confirmed: every eject since, with nothing deploying, has been quick.
+
 ## The lid shuts the handheld down
 
 `event1 "hall wake key"` advertises `KEY_POWER`, so closing the clamshell
