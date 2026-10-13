@@ -204,7 +204,22 @@ Progress, p50 of `take>swapped`:
 | + 3x lookup for the game pass | 43.3 — **worse, and the path never ran** |
 | + per-stage profiling | the game pass is 32 of the 47 ms |
 | + flat column table, no per-pixel checks | 34.5 (game 32.6 -> 21.0) |
-| + source row expanded once per source row | to be measured |
+| + source row expanded once per source row | 26.5 (game 17.1, upload 0.4) |
+| + NEON kernel for the row scale | to be measured |
+
+The frame upload was the ~10 ms that the stage timings could not account for:
+it converted 38,400 pixels one three-byte copy at a time, before any of the
+timed work. It is one memcpy now, 0.4 ms.
+
+### gpSP is worth more than any of this
+
+| GBA core | `emu>pub` |
+|---|---|
+| mGBA (interpreter) | 14.2 ms |
+| **gpSP (ARM JIT)** | **5.5 ms** |
+
+Pick it with START on the shelf over a GBA cart. This is the single largest win
+in the whole exercise and it is a menu option.
 
 Per-stage, from the device:
 
@@ -227,6 +242,14 @@ autovectorise it, and would not have: the obstacle is the access pattern, not
 the loop shape. Vectorising this needs the row expanded to destination width
 first, or a `vtbl` shuffle exploiting the fixed scale ratio, and either way it
 needs inline asm or a C shim, since the intrinsics are unstable here.
+
+**Done, as inline asm.** Two things to know if you touch it: the assembler
+needs `.fpu neon` inside the block, because the target feature cannot be named
+on stable for armv7; and a 16-bit scalar operand to `vmull` must live in
+`d0`-`d7`, so the row factor goes in `d4` rather than anywhere convenient.
+`task test` runs the workspace as armv7 under qemu, which is how the kernel is
+checked against its scalar reference — the only way to exercise it short of the
+handheld.
 
 The expansion is now done anyway, for its own sake: each *source* row is
 expanded once to destination width with the column mask folded in, and reused

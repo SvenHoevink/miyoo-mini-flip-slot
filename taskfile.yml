@@ -289,6 +289,19 @@ tasks:
         timeout {{.TIMEOUT}} {{.LD}} $bin 2>&1 | tail -5'
       - python3 -I tools/fb2png.py target-miyoo/fb.raw {{.SIZE}} 0 {{.OUT}}
 
+  test:
+    desc: >-
+      Run the workspace tests as armv7 under qemu, which is the only way to
+      exercise the NEON kernel and anything else that is 32-bit specific
+    deps: [image, binfmt, patch]
+    cmds:
+      - task: sh
+        vars:
+          CMD: >-
+            cd {{.UPSTREAM}} && QEMU_LD_PREFIX=/opt/miyoomini-toolchain/arm-linux-gnueabihf/libc
+            cargo test -p slot-gfx -p slot-power --lib --target {{.TARGET}}
+            --no-default-features --features software
+
   all:
     desc: Build the cores and the frontend for armv7
     cmds:

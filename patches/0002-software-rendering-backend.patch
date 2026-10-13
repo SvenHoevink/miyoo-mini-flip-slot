@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..1498a5e
+index 0000000..fe21fde
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,912 @@
+@@ -0,0 +1,1028 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -730,19 +730,21 @@ index 0000000..1498a5e
 +                            e[ch] = (s[ch] as u16) << 8;
 +                        }
 +                    }
++                    e[3] = u16::MAX;
 +                }
 +                built = Some((sy, row_inside));
 +            }
 +
 +            let dstart = (py as usize * dw + x0 as usize) * 4;
 +            let drow = &mut dst.px[dstart..dstart + width * 4];
-+            for (d, e) in drow.chunks_exact_mut(4).zip(line.chunks_exact(4)) {
-+                for ch in 0..3 {
-+                    // 8.8 from the line, 8.8 from the row, so shift 16 back off.
-+                    d[ch] = (((e[ch] as u32 * yk) >> 16).min(255)) as u8;
-+                }
-+                d[3] = 255;
-+            }
++            // Alpha rides through the same multiply rather than being stored
++            // separately, which keeps the kernel to one uniform pass. The line's
++            // alpha lane is 0xffff, so it lands at 255 whenever the row factor
++            // is 1.0 or more and a little under when the screen is dimming.
++            // Nothing reads it: the output writes its own alpha, and sprite
++            // blending only uses the canvas alpha to update itself.
++            // SAFETY: both slices are width * 4 long.
++            unsafe { scale_row(drow, &line, yk as u16) };
 +        }
 +
 +        2
@@ -817,6 +819,75 @@ index 0000000..1498a5e
 +            path: self.path,
 +            ..Default::default()
 +        };
++    }
++}
++
++
++/// Scale a prepared row by one 8.8 factor, writing 8.8 fixed values down to
++/// bytes: `dst[i] = min(255, (line[i] * yk) >> 16)`.
++///
++/// This is the backend's hot loop. `line` holds the source row already expanded
++/// to destination width with the column mask folded in, so there is no gather
++/// left and the work is a straight widening multiply — which is exactly what
++/// NEON is for, and what LLVM declines to emit here (4-byte stride, three
++/// channels of four, u16 to u32 to u8).
++///
++/// Rust's armv7 NEON intrinsics are unstable and upstream pins stable, so this
++/// is inline asm. `tests` drives it against `scale_row_scalar` under qemu.
++#[cfg(target_arch = "arm")]
++unsafe fn scale_row(dst: &mut [u8], line: &[u16], yk: u16) {
++    let n = dst.len().min(line.len());
++    let chunks = n / 8;
++    if chunks > 0 {
++        let mut s = line.as_ptr();
++        let mut d = dst.as_mut_ptr();
++        for _ in 0..chunks {
++            // SAFETY: `chunks` counts whole groups of eight inside both slices.
++            core::arch::asm!(
++                // The target feature cannot be named on stable for armv7, so
++                // tell the assembler directly; cortex-a7 always has NEON.
++                ".fpu neon",
++                // A 16-bit scalar operand must live in d0-d7, so k goes in d4
++                // (the low half of q2) rather than anywhere convenient.
++                "vdup.16 d4, {k}",
++                "vld1.16 {{d0, d1}}, [{s}]",
++                "vmull.u16 q8, d0, d4[0]",
++                "vmull.u16 q9, d1, d4[0]",
++                "vshrn.i32 d6, q8, #16",
++                "vshrn.i32 d7, q9, #16",
++                // Saturating narrow: this is where the min(255) happens.
++                "vqmovn.u16 d0, q3",
++                "vst1.8 {{d0}}, [{d}]",
++                k = in(reg) yk as u32,
++                s = in(reg) s,
++                d = in(reg) d,
++                out("q0") _,
++                out("q2") _,
++                out("q3") _,
++                out("q8") _,
++                out("q9") _,
++                options(nostack),
++            );
++            s = s.add(8);
++            d = d.add(8);
++        }
++    }
++    // The tail, when the row is not a multiple of eight.
++    for i in chunks * 8..n {
++        dst[i] = (((line[i] as u32 * yk as u32) >> 16).min(255)) as u8;
++    }
++}
++
++#[cfg(not(target_arch = "arm"))]
++unsafe fn scale_row(dst: &mut [u8], line: &[u16], yk: u16) {
++    scale_row_scalar(dst, line, yk)
++}
++
++/// The reference the NEON kernel is tested against, and the fallback off-device.
++fn scale_row_scalar(dst: &mut [u8], line: &[u16], yk: u16) {
++    let n = dst.len().min(line.len());
++    for i in 0..n {
++        dst[i] = (((line[i] as u32 * yk as u32) >> 16).min(255)) as u8;
 +    }
 +}
 +
@@ -1434,6 +1505,51 @@ index 0000000..1498a5e
 +        let mut canvas = Image::new(OUT_W, OUT_H);
 +        g.draw(&mut canvas, None);
 +        assert!(canvas.px.iter().any(|&b| b != 0));
++    }
++}
++
++#[cfg(test)]
++mod neon_kernel_tests {
++    use super::{scale_row, scale_row_scalar};
++
++    /// Values that exercise the saturation, the rounding and every lane
++    /// position, including a length that is not a multiple of eight so the
++    /// scalar tail is covered.
++    fn line() -> Vec<u16> {
++        (0..723u32)
++            .map(|i| ((i * 2731) % 65536) as u16)
++            .collect()
++    }
++
++    #[test]
++    fn it_matches_the_scalar_reference() {
++        let line = line();
++        // 256 is unity; above it saturates, below it dims. 410 is the brightest
++        // the screen-power overshoot reaches.
++        for yk in [0u16, 1, 64, 255, 256, 257, 300, 410, 1024, 65535] {
++            let mut a = vec![0u8; line.len()];
++            let mut b = vec![0u8; line.len()];
++            unsafe { scale_row(&mut a, &line, yk) };
++            scale_row_scalar(&mut b, &line, yk);
++            assert_eq!(a, b, "neon and scalar differ at yk = {yk}");
++        }
++    }
++
++    #[test]
++    fn it_saturates_rather_than_wrapping() {
++        let line = vec![u16::MAX; 16];
++        let mut out = vec![0u8; 16];
++        unsafe { scale_row(&mut out, &line, 65535) };
++        assert!(out.iter().all(|&v| v == 255), "expected saturation, got {out:?}");
++    }
++
++    #[test]
++    fn it_writes_nothing_past_the_end() {
++        let line = line();
++        let mut out = vec![0u8; line.len() + 8];
++        let n = line.len();
++        unsafe { scale_row(&mut out[..n], &line, 300) };
++        assert!(out[n..].iter().all(|&v| v == 0), "wrote past the slice");
 +    }
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
