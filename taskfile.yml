@@ -344,7 +344,15 @@ tasks:
       instead of moving the SD card. Needs SLOT_DEVICE set
     deps: [device:check, build]
     cmds:
-      - curl -sS -T target-miyoo/rust/{{.TARGET}}/device/slot "{{.FTP}}/System/slot"
+      # Upload beside the live binary, then rename over it. FTP truncates on
+      # open, so writing straight to System/slot pulls the pages out from under
+      # a running slot and hangs the handheld -- which it did, once slot became
+      # the boot process rather than something launched per session. A rename is
+      # atomic and leaves the running process on the old inode.
+      - curl -sS -T target-miyoo/rust/{{.TARGET}}/device/slot "{{.FTP}}/System/slot.new"
+      - >-
+        sh tools/device-sh.sh {{.DEVICE}}
+        'cd /mnt/SDCARD/System && [ -s slot.new ] && chmod 755 slot.new && mv slot.new slot && echo renamed || echo "upload incomplete, left slot alone"'
       - curl -sS -T card/System/launch_frontend.sh "{{.FTP}}/System/launch_frontend.sh"
       - curl -sS -T card/System/probe.sh "{{.FTP}}/System/probe.sh"
       - curl -sS -T card/System/net-up.sh "{{.FTP}}/System/net-up.sh"

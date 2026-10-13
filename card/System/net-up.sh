@@ -75,9 +75,11 @@ fi
 log "address: $addr"
 # setsid so they outlive whatever started this.
 pgrep telnetd > /dev/null 2>&1 || setsid telnetd -l sh > /dev/null 2>&1 || telnetd -l sh > /dev/null 2>&1
-pgrep ftpd > /dev/null 2>&1 || setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
+pgrep tcpsvd > /dev/null 2>&1 || setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
 log "telnet: $(pgrep telnetd > /dev/null 2>&1 && echo up || echo down)"
-log "ftp:    $(pgrep ftpd > /dev/null 2>&1 && echo up || echo down)"
+# tcpsvd is the listener; ftpd is only spawned per connection, so looking for
+# ftpd reports "down" while FTP is serving perfectly well.
+log "ftp:    $(pgrep tcpsvd > /dev/null 2>&1 && echo up || echo down)"
 log ""
 log "on the computer:  export SLOT_DEVICE=$addr"
 sync

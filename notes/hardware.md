@@ -428,6 +428,22 @@ millisecond:
 That alone can manufacture a double tap, which lands on the polaroids screen.
 Worth remembering before blaming gesture thresholds.
 
+## Never overwrite the live binary
+
+With slot as the boot process, `curl -T` straight onto `System/slot` hangs the
+handheld: FTP truncates the file on open, and the running process loses the
+pages it is executing from. Reachable one moment, gone the next, with no
+network and no response to buttons.
+
+`task deploy` uploads to `slot.new` and renames over the top, which is atomic
+and leaves the running process on the old inode. The new build is picked up on
+the next start.
+
+Recovery, if it happens anyway: force the handheld off with the power button. A
+truncated slot fails to start, and the boot hook falls through to Allium. If it
+hangs instead of falling through, delete `.slot-boot` with the card in any
+computer.
+
 ## Open problem: no battery sysfs
 
 ```
