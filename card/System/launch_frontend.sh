@@ -34,6 +34,9 @@ export SLOT_FB_ROTATE=180
 # the lid can be wired to Btn::Lid. Writes input-trace.log; remove once mapped.
 export SLOT_TRACE_INPUT=1
 
+# TEMPORARY, to confirm whether the audio retry churn is what slowed gameplay.
+export SLOT_TRACE_LATENCY=1
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns

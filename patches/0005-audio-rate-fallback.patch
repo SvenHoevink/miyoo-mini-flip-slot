@@ -1,5 +1,5 @@
 diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
-index b9d1a71..ab0b053 100644
+index b9d1a71..2471ac3 100644
 --- a/crates/slot/src/audio/alsa.rs
 +++ b/crates/slot/src/audio/alsa.rs
 @@ -78,7 +78,28 @@ impl Alsa {
@@ -77,3 +77,35 @@ index b9d1a71..ab0b053 100644
                          self.failing = false;
                      }
                      Err(e) => {
+@@ -256,6 +287,9 @@ impl Playback {
+     }
+ 
+     fn write(&self, pcm: *mut c_void, buf: &[i16]) -> bool {
++        // Bounded so a genuinely wedged device cannot spin here forever.
++        const INTERRUPT_RETRIES: u32 = 64;
++        let mut retries = 0u32;
+         let mut written = 0;
+         while written < PERIOD_FRAMES {
+             let at = written * CHANNELS as usize;
+@@ -267,6 +301,21 @@ impl Playback {
+                 )
+             };
+             if frames < 0 {
++                // -512 is ERESTARTSYS and -4 is EINTR: a blocking write that a
++                // signal interrupted. ERESTARTSYS is kernel-internal and should
++                // never reach userspace at all, but this device's driver leaks
++                // it, and treating it as fatal left the sink dead and the ring
++                // overflowing -- 417,000 samples dropped in one session, heard
++                // as a pop every second or two instead of audio. Just write
++                // again; the stream is fine.
++                if frames == -512 || frames == -4 {
++                    retries += 1;
++                    if retries > INTERRUPT_RETRIES {
++                        eprintln!("slot: audio: interrupted {retries} times, giving up");
++                        return false;
++                    }
++                    continue;
++                }
+                 let err = unsafe { (self.alsa.recover)(pcm, frames as c_int, 1) };
+                 if err < 0 {
+                     eprintln!("slot: audio: {}", self.alsa.message(err));
