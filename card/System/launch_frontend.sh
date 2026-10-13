@@ -30,11 +30,6 @@ export SLOT_FB_ROTATE=180
 #                         because slot paces itself and waiting here too cost
 #                         most of the frame budget
 
-# TEMPORARY, for one diagnostic run: confirms whether Frontend::advance is
-# dropping input during a rebuild, which would explain holds that never eject.
-# Remove once answered.
-export SLOT_TRACE_LATENCY=1
-
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
