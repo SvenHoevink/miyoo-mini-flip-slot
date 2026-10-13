@@ -167,6 +167,18 @@ If hand-written NEON is really needed, the options on stable are inline
 `arm_neon.h` with `-mfpu=neon-vfpv4`). Do not reach for either until the
 per-stage profile says which loop deserves it.
 
+## Match upstream's behaviour unless the device forces otherwise
+
+The port exists to run slot on different hardware, not to redesign it. Where
+something feels wrong, find the device-level cause before changing how the
+frontend behaves: the menu button appeared broken through four rounds of
+threshold tuning, and the actual causes were input threads being starved (a
+device problem, fixed) and the quick menu being shelf-only (upstream's design,
+left alone). Gesture timings and phase dispatch are upstream's to decide.
+
+A patch that changes UX rather than making upstream work here should say so in
+its own header, and should be the last resort rather than the first.
+
 ## Conventions
 
 - Match upstream's style in any code that mirrors it — it is terse, comments
