@@ -374,8 +374,13 @@ tasks:
       otherwise the only way out
     deps: [device:check]
     cmds:
-      - sh tools/device-sh.sh {{.DEVICE}} 'killall slot 2>/dev/null; sleep 1; ps | grep -c "[S]ystem/slot"'
-      - 'echo "(a count of 0 above means it stopped)"'
+      # Not `killall slot`: slot is started through the loader, so the process
+      # name is ld-linux-armhf.so.3 and killall matches nothing. This busybox
+      # has no `pkill -f` either, so find the pid from ps. A plain TERM has been
+      # seen not to shift it, hence the KILL follow-up.
+      - |
+        sh tools/device-sh.sh {{.DEVICE}} 'for s in TERM KILL; do pid=$(ps | grep "[S]ystem/slot" | head -1 | tr -s " " | cut -d" " -f2); [ -z "$pid" ] && break; kill -$s "$pid"; sleep 2; done; ps | grep -c "[S]ystem/slot"'
+      - 'echo "(a count of 0 above means it stopped; alliumd comes back with it)"'
 
   log:
     desc: Fetch slot.log (and any traces) off the handheld over FTP
