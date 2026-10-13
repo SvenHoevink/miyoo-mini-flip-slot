@@ -325,7 +325,26 @@ Consequences, all of them slot behaving correctly:
 
 `SLOT_FB_PAGES=1` (launch script) caps the pages the backend will flip between.
 With one page it draws at the scanout and waits for the blank instead, trading
-the copy for a tearing risk. Untested on the panel as of this note.
+the copy for a tearing risk.
+
+Measured with it on, same game:
+
+| | before | after |
+|---|---|---|
+| `swap` | 6.6 ms | **0.0 ms** |
+| starved samples, per run | 444,368 | **26,830** |
+| resample factor (`SLOT_TRACE`) | 1.37 | 0.94-0.96 |
+| frames missing a latch, per 600 in game | ~200 | **5-9** |
+
+Smooth in the hand and **no tearing reported**, which makes sense: `swap` reads
+0.0 ms, so this driver ignores `FBIO_WAITFORVSYNC` as well, and the panel is
+simply latching whole frames out of a buffer slot writes at a steady 60 Hz.
+slot's own pacer is now the only clock in the loop, which is what it is for.
+
+What is left: the shelf costs **28.8 ms a frame** in sprites over 194 draws now
+that it fills the panel, so the menu runs at about 35 Hz. Nothing depends on
+the menu's frame rate the way audio depends on the game's, but it is the
+largest number left in the backend.
 
 ### What is still unexplained
 
