@@ -195,6 +195,20 @@ read>pad 39.0  pad>emu 6.8  emu>pub  9.6  pub>take 1.5  take>swapped 49.1  (swap
 (`emu>pub`) runs in 10-16 ms and the panel swap in 3-16 ms, so neither is
 anywhere near the limit. Optimise the renderer, not the cores.
 
+## The lid shuts the handheld down
+
+`event1 "hall wake key"` advertises `KEY_POWER`, so closing the clamshell
+decodes as a power-button press and slot acts on it. slot's own lid support
+reads a `hallkey` file under `/sys/class/power_supply`, and **that directory
+does not exist on this device at all**, so `find_hall` returns `None` and there
+is nothing else feeding `Btn::Lid`.
+
+For now the hall node's key events are dropped rather than acted on
+(`patches/0003`), so the lid does nothing instead of shutting down. Wiring it up
+properly needs the open/close signalling, which the input trace is back on to
+capture: whether it holds a value across the closed state, or just pulses on
+each transition, decides whether it can drive `Btn::Lid` directly.
+
 ## Open problem: no battery sysfs
 
 ```

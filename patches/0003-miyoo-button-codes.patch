@@ -1,3 +1,50 @@
+diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
+index 9f71f9d..a99494e 100644
+--- a/crates/slot/src/input/device.rs
++++ b/crates/slot/src/input/device.rs
+@@ -46,9 +46,18 @@ impl DeviceInput {
+             let queue = pending.clone();
+             let name = node.display().to_string();
+             let trace = trace.clone();
++            // The Mini Flip's clamshell sensor is its own evdev node that
++            // advertises KEY_POWER, so its events would otherwise decode as a
++            // power-button press and shut the handheld down every time the lid
++            // is closed. slot's own lid support reads a `hallkey` file under
++            // /sys/class/power_supply, which does not exist on this device, so
++            // there is nothing to fall back to yet: drop the node's keys rather
++            // than act on them, until the open/close signalling is known.
++            let hall_node = cfg!(feature = "miyoo")
++                && device_name(sys, &node).to_ascii_lowercase().contains("hall");
+             let spawned = std::thread::Builder::new()
+                 .name(format!("slot-input-{name}"))
+-                .spawn(move || read_node(&node, &queue, trace.as_deref()));
++                .spawn(move || read_node(&node, &queue, trace.as_deref(), hall_node));
+             if let Err(e) = spawned {
+                 eprintln!("slot: input {name}: {e}");
+             }
+@@ -86,7 +95,12 @@ fn quicken_poll(sys: &Path, node: &Path) {
+     }
+ }
+ 
+-fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
++fn read_node(
++    node: &Path,
++    queue: &Mutex<Vec<RawEvent>>,
++    trace: Option<&Trace>,
++    hall_node: bool,
++) {
+     let label = node
+         .file_name()
+         .map(|n| n.to_string_lossy().into_owned())
+@@ -120,6 +134,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
+             }
+             match ev.kind {
+                 EV_ABS => events.extend(hat.feed(ev)),
++                // Still traced above, just not acted on. See open_traced.
++                _ if hall_node => {}
+                 _ => events.extend(to_raw(ev)),
+             }
+         }
 diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
 index 02cc4bb..c4de188 100644
 --- a/crates/slot/src/input/evdev.rs

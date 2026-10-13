@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..828e630
+index 0000000..b6f3637
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,649 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1049,22 +1049,46 @@ index 0000000..828e630
 +        // The case that actually runs on this device: the canvas is exactly the
 +        // size of the rect, the panel wants the order the canvas already holds,
 +        // and there is no gain. That makes every row a memcpy.
-+        let one_to_one = w == cw && h == ch && target.bgr && identity && !half;
++        // The case that actually runs on this device: the canvas is exactly the
++        // size of the rect, the panel wants the order the canvas already holds,
++        // and there is no gain. The upside-down panel still qualifies -- a 180
++        // degree rotation is just the rows and the pixels within them reversed,
++        // which is a tight copy rather than the general per-pixel path. Leaving
++        // `half` out of this test was worth ~50 ms a frame of nothing, since
++        // this device is always rotated.
++        let one_to_one = w == cw && h == ch && target.bgr && identity;
 +        let span = (x_end - x_start) as usize;
 +
 +        if one_to_one {
 +            for py in y_start..y_end {
 +                let si = ((py - y) as usize * cw as usize + (x_start - x) as usize) * 4;
-+                let o = x_start as usize * 4;
++                let Some(src) = self.canvas.px.get(si..si + span * 4) else {
++                    continue;
++                };
++                let dy = if half { ph - 1 - py } else { py };
++                let o = if half {
++                    (pw - x_end) as usize * 4
++                } else {
++                    x_start as usize * 4
++                };
 +                // SAFETY: one row inside the mapping.
 +                let row = unsafe {
 +                    std::slice::from_raw_parts_mut(
-+                        target.ptr.add(py as usize * target.stride),
++                        target.ptr.add(dy as usize * target.stride),
 +                        target.stride,
 +                    )
 +                };
-+                if o + span * 4 <= row.len() && si + span * 4 <= self.canvas.px.len() {
-+                    row[o..o + span * 4].copy_from_slice(&self.canvas.px[si..si + span * 4]);
++                let Some(dst) = row.get_mut(o..o + span * 4) else {
++                    continue;
++                };
++                if half {
++                    // Reverse the row, four bytes at a time. Iterators here so
++                    // the bounds checks fall away.
++                    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
++                        d.copy_from_slice(s);
++                    }
++                } else {
++                    dst.copy_from_slice(src);
 +                }
 +            }
 +            return;

@@ -25,6 +25,10 @@ export SLOT_FB_ROTATE=180
 # rasteriser plus the output blit. Drop it once the frame rate is settled.
 export SLOT_TRACE_LATENCY=1
 
+# Also on, to capture how the clamshell hall sensor signals open and close so
+# the lid can be wired up properly. Drop both once that is done.
+export SLOT_TRACE_INPUT=1
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 exec /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
