@@ -383,3 +383,34 @@ index b841d5f..d393527 100644
 +    }
      Box::new(AlsaSink::new())
  }
+diff --git a/crates/slot/src/audio/ring.rs b/crates/slot/src/audio/ring.rs
+index aada45b..0b1eddf 100644
+--- a/crates/slot/src/audio/ring.rs
++++ b/crates/slot/src/audio/ring.rs
+@@ -4,8 +4,25 @@ use std::time::{Duration, Instant};
+ 
+ use crate::drc::drc_target;
+ 
++/// Ring depth, in frames of video at 60 Hz. Eight of them is 133 ms, half of
++/// it the DRC target, which is ample where production is steady.
++///
++/// It is not steady here. The frontend spikes to 30-50 ms on this device --
++/// input and `advance`, not the renderer -- and with the core unchained from
++/// the display (`SLOT_DRIVE_EMU=0`) nothing stretches the audio to cover a
++/// spike any more: the ring simply drains, and `queued` was measured dipping to
++/// 540 frames against a 3200 target, which is 11 ms from empty. A deeper ring
++/// absorbs the spike and the self-paced core catches up afterwards, at the cost
++/// of that much more audio latency. `SLOT_RING_FRAMES` to try a depth.
++const RING_FRAMES: usize = 12;
++
+ pub fn ring_capacity(sample_rate: u32) -> usize {
+-    sample_rate as usize * 8 / 60
++    let frames = std::env::var("SLOT_RING_FRAMES")
++        .ok()
++        .and_then(|v| v.trim().parse::<usize>().ok())
++        .filter(|n| (2..=60).contains(n))
++        .unwrap_or(RING_FRAMES);
++    sample_rate as usize * frames / 60
+ }
+ 
+ const MAX_WAIT: Duration = Duration::from_millis(50);
