@@ -62,22 +62,48 @@ fi
 
 [ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
 
-# Wait for an address rather than for the internet, and bound it so this can
-# never look like a hang.
-addr=""
+# Association and DHCP are separate steps that fail for different reasons, so
+# wait for them separately and say which one did not finish. Twenty seconds was
+# not enough for both; the supplicant alone can take ten.
+assoc=""
 n=0
-while [ $n -lt 20 ]; do
-	addr=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-	[ -n "$addr" ] && break
+while [ $n -lt 30 ]; do
+	# wpa_cli is the direct answer; iwconfig's ESSID is the fallback.
+	state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+	[ "$state" = "COMPLETED" ] && assoc="yes" && break
+	essid=$(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p')
+	[ -n "$essid" ] && assoc="yes" && break
 	n=$((n + 1))
 	sleep 1
 done
+log "associate: ${assoc:-NO} after ${n}s${state:+ (wpa_state=$state)}"
+
+# Only worth asking for a lease once the link is up. Allium's wifi-on.sh starts
+# udhcpc itself, but if that attempt ran before association it has already
+# given up, so ask again.
+addr=""
+if [ -n "$assoc" ]; then
+	udhcpc -i wlan0 -n -q -t 5 -T 2 -s /etc/init.d/udhcpc.script > /dev/null 2>&1
+	n=0
+	while [ $n -lt 25 ]; do
+		addr=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+		[ -n "$addr" ] && break
+		n=$((n + 1))
+		sleep 1
+	done
+	log "dhcp:      ${addr:-NO LEASE} after ${n}s"
+fi
 
 if [ -n "$addr" ]; then
 	log "address: $addr"
 	# Directly, not via the -on.sh wrappers, which would each wait again.
-	pgrep telnetd > /dev/null 2>&1 || (cd "$root" && telnetd -l sh)
-	pgrep ftpd > /dev/null 2>&1 || (cd "$root" && tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &)
+	# setsid so they outlive this script: if the launcher kills the app's
+	# process group on exit, a plain background job goes with it, which would
+	# look exactly like wifi dropping afterwards.
+	pgrep telnetd > /dev/null 2>&1 || setsid telnetd -l sh > /dev/null 2>&1 ||
+		telnetd -l sh > /dev/null 2>&1
+	pgrep ftpd > /dev/null 2>&1 ||
+		setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
 	log "telnet: $(pgrep telnetd > /dev/null 2>&1 && echo up || echo down)"
 	log "ftp:    $(pgrep ftpd > /dev/null 2>&1 && echo up || echo down)"
 	log ""
@@ -91,5 +117,10 @@ else
 	log "  wlan0: $(ifconfig wlan0 2>/dev/null | head -1 || echo 'no such interface')"
 	log "  config: $(wc -c < "$conf" 2>/dev/null || echo 0) bytes"
 	log "  supplicant: $(pgrep wpa_supplicant > /dev/null 2>&1 && echo running || echo 'not running')"
+	log "  wpa_state: $(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p' || echo '?')"
+	log "  essid: $(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p' || echo none)"
+	log ""
+	log "  networks in range (this radio is 2.4 GHz only):"
+	iwlist wlan0 scan 2>/dev/null | sed -n 's/.*ESSID:"\(.*\)"/    \1/p' | sort -u | head -15 >> "$out"
 fi
 sync
