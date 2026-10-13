@@ -77,6 +77,10 @@ libmi_venc.so   libmi_wlan.so
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
 - `libmi_ao.so` — audio out, used by Allium via FFI.
+- **Audio works through MI_AO.** Game sound and slot's own cartridge effects,
+  no clicking. The cost is real: with audio dead the pacer reported work well
+  under the period, and with it running it is **15.5 ms against 16.76 ms** —
+  zero frames missed, but about 1 ms of headroom, which is why it feels shaky.
 - **MI_AO is the path that works, and the audio server owns it.** The vendor
   stack goes through MI_AO, and with the server running slot's
   `MI_AO_SetPubAttr` returns `0xa0052009` — decoded with the SDK's own macro
