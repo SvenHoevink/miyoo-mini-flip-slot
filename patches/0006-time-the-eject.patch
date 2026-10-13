@@ -4,8 +4,12 @@ Ejecting a GBA cart was felt as a 15 s stall. `flush_eject` writes the state
 and the save RAM straight through on the UI thread -- deliberately, so the
 shelf cannot show the cart out of the slot before the data is down -- which on
 this card is two fsync'd writes plus two directory fsyncs, and `settle_saves`
-first joins any autosave already in flight. This says which of the three it is
-before anything is changed about it. Diagnostic only; no behaviour change.
+first joins any autosave already in flight. This says which of the three it is.
+
+Measured: join 0 ms, snapshot 19 ms, write 170 ms for 557,056 bytes -- so the
+stall was not here, and the suspect is the FTP deploy that was writing to the
+same card at the time. Kept anyway: it is one line per eject, and it is what
+would catch a recurrence. No behaviour change.
 
 Applies to upstream 94a35a0.
 

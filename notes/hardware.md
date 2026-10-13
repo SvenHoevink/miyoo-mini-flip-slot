@@ -489,6 +489,31 @@ The lesson from the middle row: the memcpy fast path was first written with
 `!half` in its condition, and this panel is *always* rotated, so it never ran
 once and the number did not move. Measure the change, do not assume it.
 
+## Ejecting is not slow; deploying over it is (2026-10-13)
+
+A GBA eject was felt as a 15 s stall. `flush_eject` runs on the UI thread by
+design -- the shelf must not show the cart out of the slot before the data is
+down -- and for a GBA cart that is 425,984 bytes of state plus 131,072 of save
+RAM, each fsync'd and followed by a directory fsync on vfat. A plausible 15 s.
+
+It is not. Measured on the device with patch 0006:
+
+```
+slot: eject: join 0 ms, snapshot 19 ms, write 170 ms for 557056 bytes
+slot: emu: stopping at 27885.9 ms -> stopped at 27926.2 ms          (40 ms)
+slot: prefetch: 16777216 bytes of Kirby ... in 366.0 ms
+```
+
+Under 0.6 s end to end, and `join 0 ms` rules out colliding with an autosave
+already in flight (autosaves write on their own thread; `settle_saves` joins
+one before the eject writes again). The eject animation is `*t += dt` bounded
+by `EJECT_S` = 0.35 s, so nothing in-process accounts for it either.
+
+What was different: `task deploy` was running, which pushes ~10 MB over FTP to
+the same vfat card the game is reading and writing, and which is also why a
+deploy drops you back into Allium. **Do not judge device timings taken while a
+deploy is in flight**, and prefer ejecting and relaunching before pushing.
+
 ## The lid shuts the handheld down
 
 `event1 "hall wake key"` advertises `KEY_POWER`, so closing the clamshell
