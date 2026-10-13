@@ -295,6 +295,38 @@ Worst single frame in each 60-frame window: p50 **15.4 ms**, p90 18.7, against a
 16.86 ms period — where it had been 19-21 ms. `take>swapped` p50 11.1,
 `emu>pub` 6.3.
 
+### The swap is a page copy, not a latch (2026-10-13)
+
+In game, averaged over the in-game window of a 442 s run:
+
+```
+read>pad 14.0  pad>emu 0.4  emu>pub 5.4  pub>take 1.3  take>swapped 14.6  (swap 6.6)
+```
+
+`swap` is `FBIOPAN_DISPLAY` with `FB_ACTIVATE_NOW`, which should return at once.
+**6.6 ms** is instead what a whole-page copy costs here: 752 x 560 x 4 = 1.68 MB
+at roughly the bandwidth the rest of the backend sees. The log confirms the
+cheap path was taken (`fb: FBIOPAN_DISPLAY ok, 3 pages, vsync wait off`), so
+this is the driver's own pan, not the `PUT_VSCREENINFO` fallback.
+
+That cost was invisible for a long time because `Pacer` measures `work` from the
+top of the loop to the swap and not through it, so "work 15.5 ms, zero frames
+missed" was really a 22 ms loop with `missed` only counting over 25 ms.
+
+Consequences, all of them slot behaving correctly:
+
+- the loop runs at ~20 ms, so `pacer.period` is what reaches the emulator as
+  `present_ns`, the core is paced to it and the resampler scaled by the same
+  factor — `SLOT_TRACE` showed it walking to **1.37**. Slow gameplay and a
+  dropped audio pitch are the same fact.
+- one underrun puts `Ring` into priming, where `fill` returns silence until the
+  ring is half full again, so each late frame buys a run of silence. 444,368
+  starved samples over that run, and a click every few seconds.
+
+`SLOT_FB_PAGES=1` (launch script) caps the pages the backend will flip between.
+With one page it draws at the scanout and waits for the blank instead, trading
+the copy for a tearing risk. Untested on the panel as of this note.
+
 ### What is still unexplained
 
 The pacer reports `work 36-45 ms` while `take>swapped` is 11 and the core is 6.
