@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..8dd4f85
+index 0000000..99e4367
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1104 @@
+@@ -0,0 +1,1107 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1222,9 +1222,12 @@ index 0000000..8dd4f85
 +            self.canvas.h as f32 / OUT_H as f32,
 +        ];
 +        let t = std::time::Instant::now();
++        // Alpha 0 rather than 255, which makes the backdrop uniform and the
++        // clear a memset. Nothing downstream reads the canvas alpha: the output
++        // writes its own, and sprite blending only uses it to update itself.
 +        let b = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
 +        self.canvas
-+            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 255]);
++            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 0]);
 +        if self.profiling {
 +            { let us = t.elapsed().as_micros() as u64; self.profile.clear_us += us; self.profile.frame_us += us; }
 +        }
@@ -1630,10 +1633,10 @@ index 0000000..8dd4f85
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..8e20c55
+index 0000000..061b45f
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,260 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -1682,6 +1685,13 @@ index 0000000..8e20c55
 +    }
 +
 +    pub fn fill(&mut self, rgba: [u8; 4]) {
++        // A uniform colour is a memset, which is worth detecting: the canvas is
++        // 1.4 MB and the loop below is 345,600 four-byte copies on this device,
++        // every frame.
++        if rgba.iter().all(|&b| b == rgba[0]) {
++            self.px.fill(rgba[0]);
++            return;
++        }
 +        for p in self.px.chunks_exact_mut(4) {
 +            p.copy_from_slice(&rgba);
 +        }
