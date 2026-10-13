@@ -211,6 +211,26 @@ upstream/slot            pinned submodule, read-only
 taskfile.yml             the armv7 build tasks
 ```
 
+## Working over the network instead of moving the card
+
+Allium already ships the pieces: `.allium/scripts/wifi-on.sh`, `telnet-on.sh`
+(a root shell on port 23) and `ftp-on.sh` (writable FTP of the card root on
+port 21). With those up, nothing needs the SD card moved:
+
+```sh
+export SLOT_DEVICE=192.168.1.x
+task deploy          # build and push the frontend over FTP
+task deploy:cores    # push the libretro cores too, which rarely change
+task log             # pull slot.log back and print the last stage/frame lines
+```
+
+On the handheld, once per boot: turn WiFi on, then FTP on (and telnet, for a
+shell). The `device:check` step fails with a clear message rather than a curl
+error when either is missing.
+
+A telnet shell is also the quickest way to try something without a rebuild —
+`SLOT_FB_VSYNC=1 sh /mnt/SDCARD/System/launch_frontend.sh`, for instance.
+
 ## Seeing what it draws
 
 ```sh

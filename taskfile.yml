@@ -13,6 +13,12 @@ vars:
   # newer than the device's 2.28, which is fine for running what we linked.
   ARMBOX: arm32v7/debian:bullseye-slim
   LD: /lib/ld-linux-armhf.so.3
+  # The handheld's address on the network, for the deploy/log tasks. Allium
+  # serves a writable FTP of the card root, so no SD shuffling is needed.
+  # Set it in the environment: SLOT_DEVICE=192.168.1.x task deploy
+  DEVICE: '{{.SLOT_DEVICE | default ""}}'
+  FTP: 'ftp://{{.SLOT_DEVICE}}'
+
   # The renderer to build. "software" is the framebuffer rasteriser this device
   # needs; pass GFX= to build the GL path instead, which the Mini Flip cannot run.
   GFX: software
@@ -301,6 +307,51 @@ tasks:
             cd {{.UPSTREAM}} && QEMU_LD_PREFIX=/opt/miyoomini-toolchain/arm-linux-gnueabihf/libc
             cargo test -p slot-gfx -p slot-power --lib --target {{.TARGET}}
             --no-default-features --features software
+
+  device:check:
+    desc: Fail early, with a useful message, when the handheld is not reachable
+    internal: true
+    cmds:
+      - |
+        set -eu
+        if [ -z "{{.DEVICE}}" ]; then
+          echo "set SLOT_DEVICE to the handheld's IP, e.g. SLOT_DEVICE=192.168.1.42 task deploy" >&2
+          exit 1
+        fi
+        if ! curl -s --connect-timeout 5 --list-only "{{.FTP}}/" >/dev/null; then
+          echo "no FTP on {{.DEVICE}}:21 — on the handheld, turn WiFi on and then FTP on" >&2
+          exit 1
+        fi
+
+  deploy:
+    desc: >-
+      Push the built frontend and cores to the handheld over Allium's FTP,
+      instead of moving the SD card. Needs SLOT_DEVICE set
+    deps: [device:check, build]
+    cmds:
+      - curl -sS -T target-miyoo/rust/{{.TARGET}}/device/slot "{{.FTP}}/System/slot"
+      - curl -sS -T card/System/launch_frontend.sh "{{.FTP}}/System/launch_frontend.sh"
+      - curl -sS -T card/System/probe.sh "{{.FTP}}/System/probe.sh"
+      - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
+
+  deploy:cores:
+    desc: Push the two libretro cores as well, which rarely change
+    deps: [device:check, cores]
+    cmds:
+      - curl -sS -T vendor-miyoo/gpsp_libretro.so "{{.FTP}}/System/gpsp_libretro.so"
+      - curl -sS -T vendor-miyoo/mgba_libretro.so "{{.FTP}}/System/mgba_libretro.so"
+
+  log:
+    desc: Fetch slot.log (and any traces) off the handheld over FTP
+    deps: [device:check]
+    cmds:
+      - mkdir -p device-dump
+      - curl -sS -o device-dump/slot.log "{{.FTP}}/slot.log"
+      - curl -sS -o device-dump/input-trace.log "{{.FTP}}/input-trace.log" || true
+      - 'echo "--- stages ---"'
+      - grep "soft:" device-dump/slot.log | tail -3 || true
+      - 'echo "--- frame ---"'
+      - grep "latency:" device-dump/slot.log | tail -3 || true
 
   all:
     desc: Build the cores and the frontend for armv7
