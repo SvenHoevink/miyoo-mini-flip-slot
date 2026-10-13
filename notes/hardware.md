@@ -208,6 +208,8 @@ Progress, p50 of `take>swapped`:
 | + NEON kernel for the row scale | 25.6 (**game 17.1 -> 7.8**) |
 | + cached column table and scratch | — |
 | + memset clear, all games on gpSP | 25.7 (stages sum to **12.8**) |
+| + deferred clear | clear 0.9 -> **0.0**, stages 11.6 |
+| + game straight to the framebuffer | to be measured |
 
 With everything on gpSP: `emu>pub` 6.4, and the backend's own stages are
 clear 0.9, upload 0.3, game 8.6, sprites 0.0, out 3.0 — **12.8 ms**, inside the

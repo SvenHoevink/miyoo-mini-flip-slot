@@ -550,10 +550,10 @@ index 0000000..a027cd1
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..7c33cb3
+index 0000000..89d1dbd
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1139 @@
+@@ -0,0 +1,1406 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -620,6 +620,82 @@ index 0000000..7c33cb3
 +    img: Image,
 +}
 +
++/// Where the game pass writes: the canvas, or the panel directly.
++enum Dest<'a> {
++    Canvas(&'a mut Image),
++    Fb(FbDest),
++}
++
++/// Enough of the framebuffer to write the game straight at it.
++#[derive(Copy, Clone)]
++struct FbDest {
++    target: fb::Target,
++    /// Where the canvas lands on the panel, in panel pixels.
++    x: i32,
++    y: i32,
++    w: i32,
++    h: i32,
++    /// The panel is mounted upside down, so rows and columns both reverse.
++    half: bool,
++}
++
++impl Dest<'_> {
++    fn width(&self) -> usize {
++        match self {
++            Dest::Canvas(c) => c.w as usize,
++            Dest::Fb(f) => f.w as usize,
++        }
++    }
++
++    fn height(&self) -> usize {
++        match self {
++            Dest::Canvas(c) => c.h as usize,
++            Dest::Fb(f) => f.h as usize,
++        }
++    }
++
++    /// The destination bytes for one row of the scaled image, `width * 4` long.
++    ///
++    /// # Safety
++    /// For the framebuffer case the caller must not hold two rows at once; each
++    /// call hands out a fresh borrow of a distinct row inside the mapping.
++    unsafe fn row(&mut self, i: usize, width: usize) -> Option<&mut [u8]> {
++        match self {
++            Dest::Canvas(c) => {
++                let start = (i * c.w as usize) * 4;
++                c.px.get_mut(start..start + width * 4)
++            }
++            Dest::Fb(f) => {
++                // Upside down: the last row of the image goes to the first
++                // scanline, and the columns were mirrored when the table was
++                // built, so the row is written forwards from the far edge.
++                let py = if f.half {
++                    f.target.h as i32 - 1 - (f.y + i as i32)
++                } else {
++                    f.y + i as i32
++                };
++                if py < 0 || py >= f.target.h as i32 {
++                    return None;
++                }
++                let x = if f.half {
++                    f.target.w as i32 - (f.x + f.w)
++                } else {
++                    f.x
++                };
++                if x < 0 || x + f.w > f.target.w as i32 {
++                    return None;
++                }
++                let row = std::slice::from_raw_parts_mut(
++                    f.target.ptr.add(py as usize * f.target.stride),
++                    f.target.stride,
++                );
++                let o = x as usize * 4;
++                row.get_mut(o..o + width * 4)
++            }
++        }
++    }
++}
++
 +/// One destination column: which source texel it reads, and the three x factors
 +/// in 8.8 fixed point (256 where the picture rect does not cover it, so the hot
 +/// loop needs no branch).
@@ -642,6 +718,8 @@ index 0000000..7c33cb3
 +    pic: [u32; 4],
 +    lcd: bool,
 +    img_w: u32,
++    /// Built right-to-left, for writing straight at an upside-down panel.
++    mirror: bool,
 +}
 +
 +#[allow(clippy::too_many_arguments)]
@@ -656,8 +734,13 @@ index 0000000..7c33cb3
 +    pic: [f32; 4],
 +    lcd: bool,
 +    img_w: u32,
++    mirror: bool,
 +) {
 +    for i in 0..width {
++        // Mirroring here, once per source row, is what lets the rotated panel
++        // take the direct path: the NEON kernel only writes forwards, and
++        // reversing afterwards would cost the copy the path exists to avoid.
++        let i = if mirror { width - 1 - i } else { i };
 +        let px = x0 + i as i32;
 +        let u = src[0] + (px as f32 + 0.5 - rx) / rw * src[2];
 +        let texel = ((u * sw) as i32).clamp(0, img_w as i32 - 1) as u32;
@@ -723,8 +806,19 @@ index 0000000..7c33cb3
 +        self.frame.px[..want].copy_from_slice(&xrgb8888[..want]);
 +    }
 +
-+    /// Returns 1 if the 3x lookup ran, 2 for the separable fallback.
++    /// Returns 2 when it drew, 0 when there was nothing to draw.
 +    fn draw(&mut self, dst: &mut Image, tex: Option<&Image>) -> u8 {
++        self.draw_inner(Dest::Canvas(dst), tex, false)
++    }
++
++    /// Scale straight into the framebuffer, skipping the canvas entirely. Worth
++    /// a whole pass over 1.4 MB when the display list is nothing but the game.
++    fn draw_direct(&mut self, fb: FbDest, tex: Option<&Image>) -> u8 {
++        let mirror = fb.half;
++        self.draw_inner(Dest::Fb(fb), tex, mirror)
++    }
++
++    fn draw_inner(&mut self, mut dest: Dest<'_>, tex: Option<&Image>, mirror: bool) -> u8 {
 +        let img = tex.unwrap_or(&self.frame);
 +        let (rx, ry, rw, rh) = screen_rect(self.power);
 +        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
@@ -735,8 +829,8 @@ index 0000000..7c33cb3
 +
 +        let x0 = (rx.round() as i32).max(0);
 +        let y0 = (ry.round() as i32).max(0);
-+        let x1 = ((rx + rw).round() as i32).min(dst.w as i32);
-+        let y1 = ((ry + rh).round() as i32).min(dst.h as i32);
++        let x1 = ((rx + rw).round() as i32).min(dest.width() as i32);
++        let y1 = ((ry + rh).round() as i32).min(dest.height() as i32);
 +        if x0 >= x1 || y0 >= y1 {
 +            return 0;
 +        }
@@ -761,6 +855,7 @@ index 0000000..7c33cb3
 +        let key = ColKey {
 +            x0,
 +            width,
++            mirror,
 +            rx: rx.to_bits(),
 +            rw: rw.to_bits(),
 +            src: bits(src),
@@ -771,7 +866,19 @@ index 0000000..7c33cb3
 +        if self.col_key != Some(key) {
 +            self.col.clear();
 +            self.col.reserve(width);
-+            build_col(&mut self.col, width, x0, rx, rw, sw, src, self.pic, lcd, img.w);
++            build_col(
++                &mut self.col,
++                width,
++                x0,
++                rx,
++                rw,
++                sw,
++                src,
++                self.pic,
++                lcd,
++                img.w,
++                mirror,
++            );
 +            self.col_key = Some(key);
 +        }
 +        let col = &self.col;
@@ -780,7 +887,6 @@ index 0000000..7c33cb3
 +        }
 +        let line = &mut self.line;
 +
-+        let dw = dst.w as usize;
 +        let row_bytes = img.w as usize * 4;
 +
 +        // The vertical scale reuses each source row several times over -- 480
@@ -829,8 +935,10 @@ index 0000000..7c33cb3
 +                built = Some((sy, row_inside));
 +            }
 +
-+            let dstart = (py as usize * dw + x0 as usize) * 4;
-+            let drow = &mut dst.px[dstart..dstart + width * 4];
++            // SAFETY: one row at a time, never two at once.
++            let Some(drow) = (unsafe { dest.row(py as usize, width) }) else {
++                continue;
++            };
 +            // Alpha rides through the same multiply rather than being stored
 +            // separately, which keeps the kernel to one uniform pass. The line's
 +            // alpha lane is 0xffff, so it lands at 255 whenever the row factor
@@ -882,7 +990,10 @@ index 0000000..7c33cb3
 +    /// budget on average; this says whether the stutters are the renderer.
 +    worst_us: u64,
 +    frame_us: u64,
-+    /// 0 none, 1 the 3x lookup, 2 the separable fallback.
++    /// 0 nothing drawn, 2 the separable path. (1 was a 3x lookup, removed: it
++    /// only ever fitted GBA, since GB and GBC are 160x144 inside a 240x160
++    /// buffer at 4.5x, and on the one run where it did ship it measured slower
++    /// than the multiply it replaced.)
 +    path: u8,
 +}
 +
@@ -910,7 +1021,6 @@ index 0000000..7c33cb3
 +            ms(self.out_us),
 +            self.worst_us as f64 / 1000.0,
 +            match self.path {
-+                1 => "3x-lut",
 +                2 => "separable",
 +                _ => "none",
 +            }
@@ -1007,6 +1117,11 @@ index 0000000..7c33cb3
 +    clear_left: u32,
 +    /// Set by `begin_frame`, discharged by `draw_list` or `end_frame`.
 +    pending_clear: bool,
++    /// The display list was nothing but a full-canvas game, so the game pass is
++    /// deferred to `end_frame` and scaled straight onto the panel. That skips
++    /// the canvas entirely: a 1.4 MB write here and a 1.4 MB read-and-write
++    /// there, every frame, purely to stage a picture nothing else draws on.
++    direct_game: bool,
 +    textures: Vec<Option<Tex>>,
 +    white: TexId,
 +    game: Game,
@@ -1032,6 +1147,7 @@ index 0000000..7c33cb3
 +            last_out: None,
 +            clear_left: 0,
 +            pending_clear: false,
++            direct_game: false,
 +            textures: Vec::new(),
 +            white: TexId::from_raw(0),
 +            game: Game::new(),
@@ -1104,6 +1220,17 @@ index 0000000..7c33cb3
 +    /// `Shot`, which draws the game plane, then the batch continues.
 +    pub fn draw_list(&mut self, items: &[Draw]) {
 +        self.discharge_clear(items);
++        // Exactly one item, and it covers everything: nothing can be drawn over
++        // it and nothing shows through, so it can go straight to the panel.
++        // end_frame checks the rest -- scale, byte order, blue light -- since
++        // only it knows the panel.
++        self.direct_game = matches!(items, [Draw::Game]) && {
++            let (x, y, w, h) = screen_rect(self.game.power);
++            x <= 0.0 && y <= 0.0 && w >= self.canvas.w as f32 && h >= self.canvas.h as f32
++        };
++        if self.direct_game {
++            return;
++        }
 +        let mut from = 0;
 +        for (i, item) in items.iter().enumerate() {
 +            match *item {
@@ -1384,6 +1511,31 @@ index 0000000..7c33cb3
 +        // The case that actually runs on this device: the canvas is exactly the
 +        // size of the rect, the panel wants the order the canvas already holds,
 +        // and there is no gain. That makes every row a memcpy.
++        // With nothing but the game to draw, scale it onto the panel here
++        // rather than via the canvas. Same conditions as the one-to-one copy
++        // below, since it is that copy being folded into the game pass.
++        if self.direct_game && w == cw && h == ch && target.bgr && identity {
++            let t = std::time::Instant::now();
++            let path = self.game.draw_direct(
++                FbDest {
++                    target,
++                    x,
++                    y,
++                    w,
++                    h,
++                    half,
++                },
++                None,
++            );
++            if self.profiling {
++                let us = t.elapsed().as_micros() as u64;
++                self.profile.game_us += us;
++                self.profile.frame_us += us;
++                self.profile.path = path;
++            }
++            return;
++        }
++
 +        // The case that actually runs on this device: the canvas is exactly the
 +        // size of the rect, the panel wants the order the canvas already holds,
 +        // and there is no gain. The upside-down panel still qualifies -- a 180
@@ -1510,7 +1662,7 @@ index 0000000..7c33cb3
 +}
 +
 +#[cfg(test)]
-+mod game_fast_path_tests {
++mod whole_source_tests {
 +    use super::{Game, Image, BRIGHTEN_LCD, BRIGHTEN_SCANLINES, LCD_OFFSETS, PI};
 +    use crate::pipeline::{SCALE, SRC_H, SRC_W};
 +    use crate::surface::{OUT_H, OUT_W};
@@ -1545,7 +1697,7 @@ index 0000000..7c33cb3
 +    }
 +
 +    #[test]
-+    fn the_3x_lookup_matches_the_general_path() {
++    fn a_whole_source_3x_frame_matches_the_mask_in_floats() {
 +        let mut game = Game::new();
 +        game.upload(&frame());
 +        let mut canvas = Image::new(OUT_W, OUT_H);
@@ -1562,9 +1714,9 @@ index 0000000..7c33cb3
 +                }
 +            }
 +        }
-+        // The lookup rounds where the general path truncates in fixed point, so
-+        // allow a single level, but no more.
-+        assert!(worst <= 1, "lookup path differs from the mask by {worst}");
++        // Fixed point truncates where the float reference rounds, so allow a
++        // single level, but no more.
++        assert!(worst <= 1, "3x output differs from the mask by {worst}");
 +    }
 +
 +    #[test]
@@ -1691,6 +1843,121 @@ index 0000000..7c33cb3
 +        let n = line.len();
 +        unsafe { scale_row(&mut out[..n], &line, 300) };
 +        assert!(out[n..].iter().all(|&v| v == 0), "wrote past the slice");
++    }
++}
++
++#[cfg(test)]
++mod direct_path_tests {
++    use super::{fb, Dest, FbDest, Game, Image};
++    use crate::pipeline::{SRC_H, SRC_W};
++    use crate::surface::{OUT_H, OUT_W};
++
++    fn game() -> Game {
++        let mut g = Game::new();
++        let mut frame = Vec::with_capacity((SRC_W * SRC_H * 4) as usize);
++        for y in 0..SRC_H {
++            for x in 0..SRC_W {
++                frame.push((x % 251) as u8);
++                frame.push((y % 241) as u8);
++                frame.push(((x * 3 + y) % 239) as u8);
++                frame.push(0);
++            }
++        }
++        g.upload(&frame);
++        g
++    }
++
++    /// Render the panel the long way -- game into the canvas, canvas copied out
++    /// -- so the direct path has something to be equal to.
++    fn via_canvas(half: bool, pw: u32, ph: u32, x: i32, y: i32) -> Vec<u8> {
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        game().draw(&mut canvas, None);
++        let mut panel = vec![0u8; pw as usize * ph as usize * 4];
++        for cy in 0..OUT_H as i32 {
++            for cx in 0..OUT_W as i32 {
++                let (px, py) = if half {
++                    (pw as i32 - 1 - (x + cx), ph as i32 - 1 - (y + cy))
++                } else {
++                    (x + cx, y + cy)
++                };
++                let si = ((cy as usize * OUT_W as usize) + cx as usize) * 4;
++                let di = ((py as usize * pw as usize) + px as usize) * 4;
++                panel[di..di + 4].copy_from_slice(&canvas.px[si..si + 4]);
++            }
++        }
++        panel
++    }
++
++    fn via_direct(half: bool, pw: u32, ph: u32, x: i32, y: i32) -> Vec<u8> {
++        let mut panel = vec![0u8; pw as usize * ph as usize * 4];
++        let target = fb::Target {
++            ptr: panel.as_mut_ptr(),
++            w: pw,
++            h: ph,
++            stride: pw as usize * 4,
++            bgr: true,
++        };
++        game().draw_direct(
++            FbDest {
++                target,
++                x,
++                y,
++                w: OUT_W as i32,
++                h: OUT_H as i32,
++                half,
++            },
++            None,
++        );
++        panel
++    }
++
++    /// The panel geometry this device actually has: 720x480 centred in 752x560.
++    const PW: u32 = 752;
++    const PH: u32 = 560;
++    const X: i32 = 16;
++    const Y: i32 = 40;
++
++    #[test]
++    fn direct_matches_the_canvas_path_upright() {
++        assert_eq!(
++            via_direct(false, PW, PH, X, Y),
++            via_canvas(false, PW, PH, X, Y),
++            "direct path differs from canvas path"
++        );
++    }
++
++    #[test]
++    fn direct_matches_the_canvas_path_upside_down() {
++        // The one that matters here: this panel is always rotated, and the
++        // mirroring happens in the column table rather than in a second pass.
++        assert_eq!(
++            via_direct(true, PW, PH, X, Y),
++            via_canvas(true, PW, PH, X, Y),
++            "rotated direct path differs from canvas path"
++        );
++    }
++
++    #[test]
++    fn it_leaves_the_surround_alone() {
++        let panel = via_direct(true, PW, PH, X, Y);
++        // The border is the compositor's to clear, not the game pass's; the
++        // game must not have written outside its rect.
++        let lit = |px: u32, py: u32| {
++            let i = ((py as usize * PW as usize) + px as usize) * 4;
++            panel[i..i + 3].iter().any(|&b| b != 0)
++        };
++        assert!(!lit(0, 0), "wrote into the top-left border");
++        assert!(!lit(PW - 1, PH - 1), "wrote into the bottom-right border");
++        assert!(!lit(PW / 2, 5), "wrote above the image");
++    }
++
++    #[test]
++    fn a_canvas_destination_still_works() {
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        let path = game().draw(&mut canvas, None);
++        assert_eq!(path, 2, "the separable path is the only one now");
++        assert!(canvas.px.iter().any(|&b| b != 0));
++        let _ = Dest::Canvas(&mut canvas);
 +    }
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
