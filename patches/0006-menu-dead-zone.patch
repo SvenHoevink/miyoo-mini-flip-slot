@@ -1,20 +1,25 @@
 diff --git a/crates/slot-input/src/gesture.rs b/crates/slot-input/src/gesture.rs
-index a0837ab..a56ae20 100644
+index a0837ab..86a84f0 100644
 --- a/crates/slot-input/src/gesture.rs
 +++ b/crates/slot-input/src/gesture.rs
-@@ -294,7 +294,14 @@ impl Gestures {
-         };
-         let ejected = self.menu_eject_fired;
-         self.menu_eject_fired = false;
--        let tapped = !ejected && now.saturating_sub(d) < MENU_TAP_MS;
-+        // A release that did not already eject is a tap, however long it was
-+        // held. Comparing against MENU_TAP_MS instead left a dead zone between
-+        // 250 ms and the 1 s hold where the button did nothing whatsoever: on
-+        // this device a deliberate press measures around 380 ms, between the
-+        // polled GPIO and a frame of quantisation, so the dead zone is where
-+        // most presses landed. Short means "not long enough to eject", which is
-+        // also what the hold is actually competing with.
-+        let tapped = !ejected && now.saturating_sub(d) < MENU_HOLD_MS;
-         self.menu_last_tap = tapped.then_some(now);
-         match tapped {
-             true => vec![Action::QuickMenu],
+@@ -3,7 +3,19 @@ use crate::{Btn, Millis, RawEvent};
+ pub const SELECT_CHORD_MS: Millis = 600;
+ 
+ pub const SELECT_TAP_MS: Millis = 50;
+-pub const MENU_TAP_MS: Millis = 250;
++/// How long a press can last and still count as a tap.
++///
++/// Upstream's 250 ms assumes hardware that reports an 80-150 ms tap faithfully.
++/// The Miyoo Mini Flip polls its GPIO buttons and slot times gestures from when
++/// it processes events, so a deliberate press measures around 380 ms here --
++/// measured, in the input trace -- and fell into the gap between this and the
++/// 1 s hold, where the button does nothing at all.
++///
++/// Widened rather than abolished: treating every release as a tap meant a
++/// quick menu opening a third of a second after an eject, and made the
++/// double-tap easy to hit by accident. A press longer than this still does
++/// nothing, which is the lesser of the two annoyances.
++pub const MENU_TAP_MS: Millis = 600;
+ pub const MENU_DOUBLE_TAP_MS: Millis = 350;
+ pub const MENU_HOLD_MS: Millis = 1000;
+ pub const FF_DOUBLE_TAP_MS: Millis = 250;
