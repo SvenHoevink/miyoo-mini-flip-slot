@@ -550,10 +550,10 @@ index 0000000..a027cd1
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..89d1dbd
+index 0000000..22c73ca
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1406 @@
+@@ -0,0 +1,1413 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -990,6 +990,9 @@ index 0000000..89d1dbd
 +    /// budget on average; this says whether the stutters are the renderer.
 +    worst_us: u64,
 +    frame_us: u64,
++    /// Whether the game went straight to the panel, skipping the canvas. When
++    /// it did, `out` includes `game` rather than being separate work.
++    direct: bool,
 +    /// 0 nothing drawn, 2 the separable path. (1 was a 3x lookup, removed: it
 +    /// only ever fitted GBA, since GB and GBC are 160x144 inside a 240x160
 +    /// buffer at 4.5x, and on the one run where it did ship it measured slower
@@ -1013,10 +1016,11 @@ index 0000000..89d1dbd
 +        let n = self.frames as u64;
 +        let ms = |v: u64| v as f64 / 1000.0 / n as f64;
 +        eprintln!(
-+            "slot: soft: clear {:.1} upload {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, worst {:.1}, game path {}",
++            "slot: soft: clear {:.1} upload {:.1} game {:.1}{} sprites {:.1} out {:.1} ms/frame, worst {:.1}, game path {}",
 +            ms(self.clear_us),
 +            ms(self.upload_us),
 +            ms(self.game_us),
++            if self.direct { " (inside out)" } else { "" },
 +            ms(self.sprite_us),
 +            ms(self.out_us),
 +            self.worst_us as f64 / 1000.0,
@@ -1027,6 +1031,7 @@ index 0000000..89d1dbd
 +        );
 +        *self = Profile {
 +            path: self.path,
++            direct: self.direct,
 +            ..Default::default()
 +        };
 +    }
@@ -1528,10 +1533,12 @@ index 0000000..89d1dbd
 +                None,
 +            );
 +            if self.profiling {
-+                let us = t.elapsed().as_micros() as u64;
-+                self.profile.game_us += us;
-+                self.profile.frame_us += us;
++                // game_us only, not frame_us: this runs inside end_frame, whose
++                // own timer already counts it. Adding it here too double-counted
++                // the game and inflated the worst-frame figure with it.
++                self.profile.game_us += t.elapsed().as_micros() as u64;
 +                self.profile.path = path;
++                self.profile.direct = true;
 +            }
 +            return;
 +        }
