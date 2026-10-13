@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..ab368a2
+index 0000000..7ccfe59
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,897 @@
+@@ -0,0 +1,910 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -691,6 +691,17 @@ index 0000000..ab368a2
 +
 +        let dw = dst.w as usize;
 +        let row_bytes = img.w as usize * 4;
++
++        // The vertical scale reuses each source row several times over -- 480
++        // output rows from 144 of source for GB -- so the gather is hoisted out
++        // of the inner loop. Each *source* row is expanded once into `line`,
++        // destination-width, with the per-column mask already folded in as 8.8.
++        // Every output row is then a linear multiply by the row's own factor,
++        // with no gather left in it, which is both ~3x less scatter-reading and
++        // a shape the compiler can actually do something with.
++        let mut line = vec![0u16; width * 4];
++        let mut built: Option<(usize, bool)> = None;
++
 +        for py in y0..y1 {
 +            let v = src[1] + (py as f32 + 0.5 - ry) / rh * src[3];
 +            let sy = ((v * sh) as i32).clamp(0, img.h as i32 - 1) as usize;
@@ -705,34 +716,36 @@ index 0000000..ab368a2
 +            };
 +            let yk = (yk * 256.0).round().clamp(0.0, 65535.0) as u32;
 +
-+            let srow = &img.px[sy * row_bytes..(sy + 1) * row_bytes];
-+            let dstart = (py as usize * dw + x0 as usize) * 4;
-+            let drow = &mut dst.px[dstart..dstart + width * 4];
-+
-+            if row_inside {
-+                for (d, c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++            if built != Some((sy, row_inside)) {
++                let srow = &img.px[sy * row_bytes..(sy + 1) * row_bytes];
++                for (e, c) in line.chunks_exact_mut(4).zip(col.iter()) {
 +                    // SAFETY: `off` is a texel index clamped to img.w - 1 times
 +                    // four, and `srow` is a whole source row, so off + 4 is in
-+                    // bounds. Reading it as a fixed-size array is what lets the
-+                    // three channel accesses below drop their bounds checks.
++                    // bounds. Reading a fixed-size array is what drops the
++                    // bounds checks on the channels below.
 +                    let s = unsafe { &*(srow.as_ptr().add(c.off as usize) as *const [u8; 4]) };
-+                    for ch in 0..3 {
-+                        // 8.8 x 8.8 over a u8, so shift the 16 back off.
-+                        d[ch] = (((s[ch] as u32 * c.k[ch] as u32 * yk) >> 16).min(255)) as u8;
++                    if row_inside {
++                        for ch in 0..3 {
++                            e[ch] = s[ch] as u16 * c.k[ch];
++                        }
++                    } else {
++                        // Outside the picture the x mask is 1, so 8.8 of itself.
++                        for ch in 0..3 {
++                            e[ch] = (s[ch] as u16) << 8;
++                        }
 +                    }
-+                    d[3] = 255;
 +                }
-+            } else {
-+                // Outside the picture rect every factor is 1, so this is the
-+                // brightness scale alone and the mask drops out entirely.
-+                for (d, c) in drow.chunks_exact_mut(4).zip(col.iter()) {
-+                    // SAFETY: as above.
-+                    let s = unsafe { &*(srow.as_ptr().add(c.off as usize) as *const [u8; 4]) };
-+                    for ch in 0..3 {
-+                        d[ch] = (((s[ch] as u32 * yk) >> 8).min(255)) as u8;
-+                    }
-+                    d[3] = 255;
++                built = Some((sy, row_inside));
++            }
++
++            let dstart = (py as usize * dw + x0 as usize) * 4;
++            let drow = &mut dst.px[dstart..dstart + width * 4];
++            for (d, e) in drow.chunks_exact_mut(4).zip(line.chunks_exact(4)) {
++                for ch in 0..3 {
++                    // 8.8 from the line, 8.8 from the row, so shift 16 back off.
++                    d[ch] = (((e[ch] as u32 * yk) >> 16).min(255)) as u8;
 +                }
++                d[3] = 255;
 +            }
 +        }
 +

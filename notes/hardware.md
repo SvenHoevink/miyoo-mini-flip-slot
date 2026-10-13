@@ -203,6 +203,8 @@ Progress, p50 of `take>swapped`:
 | + rotated output memcpy | 36.2 |
 | + 3x lookup for the game pass | 43.3 — **worse, and the path never ran** |
 | + per-stage profiling | the game pass is 32 of the 47 ms |
+| + flat column table, no per-pixel checks | 34.5 (game 32.6 -> 21.0) |
+| + source row expanded once per source row | to be measured |
 
 Per-stage, from the device:
 
@@ -225,6 +227,14 @@ autovectorise it, and would not have: the obstacle is the access pattern, not
 the loop shape. Vectorising this needs the row expanded to destination width
 first, or a `vtbl` shuffle exploiting the fixed scale ratio, and either way it
 needs inline asm or a C shim, since the intrinsics are unstable here.
+
+The expansion is now done anyway, for its own sake: each *source* row is
+expanded once to destination width with the column mask folded in, and reused
+for the three-odd output rows that map to it, which cuts the gather work by
+that factor. The remaining per-output-row loop is linear, so it is the right
+shape for NEON — LLVM still will not take it (4-byte stride, three channels of
+four, u16 to u32 to u8), but hand-written it is now a simple widening multiply
+by a row scalar rather than anything clever.
 
 The lesson from the middle row: the memcpy fast path was first written with
 `!half` in its condition, and this panel is *always* rotated, so it never ran
