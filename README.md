@@ -298,7 +298,28 @@ outcome at this stage, and worth doing only because the failure message is
 evidence. ROMs, if you want them in place for later, go unzipped in
 `Games/GBA`, `Games/GB` and `Games/GBC`, and GBA needs `BIOS/gba_bios.bin`.
 
-### Caveats worth reading before you copy
+### Controls on the Mini Flip
+
+The button map is in `patches/0003`; the gestures are upstream's, from
+`crates/slot-input/src/gesture.rs`. The ones worth knowing:
+
+| gesture | action |
+|---|---|
+| **hold MENU ~1 s** | **eject the cart, back to the shelf** |
+| tap MENU | quick menu (brightness, volume) |
+| double-tap MENU | polaroids |
+| SELECT held, then MENU | game menu |
+| hold POWER ~1 s | power menu |
+
+slot boots straight into whatever cart was last seated — that is intended, not
+a fault: the cart is remembered in `Config/slot.state` and re-seated at startup,
+so the handheld behaves as though you left it in the slot. Ejecting clears it
+and the next boot lands on the shelf.
+
+On this device MENU is `KEY_ESC`, A is `KEY_SPACE`, B is `KEY_LEFTCTRL` — see
+`notes/hardware.md` for the full table.
+
+## Caveats worth reading before you copy
 
 - **Keep a backup of the card.** Nothing here deletes, but the stock firmware
   is particular and a known-good copy costs nothing.
