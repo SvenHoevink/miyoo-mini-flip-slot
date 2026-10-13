@@ -191,9 +191,21 @@ read>pad 39.0  pad>emu 6.8  emu>pub  9.6  pub>take 1.5  take>swapped 49.1  (swap
 ```
 
 `take>swapped` is this backend — the rasteriser plus the output blit — and at
-**~50 ms against a 16.7 ms budget** it is the whole problem. The emulator core
-(`emu>pub`) runs in 10-16 ms and the panel swap in 3-16 ms, so neither is
+**~50 ms against a 16.7 ms budget** it was the whole problem. The emulator core
+(`emu>pub`) runs in 10-20 ms and the panel swap in 3-16 ms, so neither is
 anywhere near the limit. Optimise the renderer, not the cores.
+
+Progress, p50 of `take>swapped`:
+
+| | ms |
+|---|---|
+| first measured run | 52.9 |
+| + rotated output memcpy | 36.2 |
+| + 3x lookup for the game pass | to be measured |
+
+The lesson from the middle row: the memcpy fast path was first written with
+`!half` in its condition, and this panel is *always* rotated, so it never ran
+once and the number did not move. Measure the change, do not assume it.
 
 ## The lid shuts the handheld down
 

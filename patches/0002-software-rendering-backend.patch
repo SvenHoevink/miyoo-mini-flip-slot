@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..b6f3637
+index 0000000..704b26d
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,766 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -683,6 +683,55 @@ index 0000000..b6f3637
 +        }
 +
 +        let dw = dst.w as usize;
++
++        // The case this device actually runs: a 240x160 frame scaled to exactly
++        // 3x, whole source, whole picture. The mask then has only 3x3 phases, so
++        // every output byte is one table lookup rather than two multiplies and a
++        // shift -- 27 tables of 256 bytes, about 7 KB, which stays in L1.
++        //
++        // The phases line up with lcd3x_mask() by construction: at 3x the
++        // sub-texel centres are (o + 0.5) / 3, which is what it tabulates.
++        let whole = src == WHOLE_TEXTURE && self.pic == WHOLE_TEXTURE;
++        let aligned = rx.fract() == 0.0
++            && ry.fract() == 0.0
++            && rw == sw * SCALE as f32
++            && rh == sh * SCALE as f32;
++        if lcd && whole && aligned {
++            let mask = crate::lcd3x::lcd3x_mask();
++            let mut lut = [[[0u8; 256]; 3]; 9];
++            for oy in 0..3 {
++                for ox in 0..3 {
++                    for c in 0..3 {
++                        // The canvas is in panel order, so byte 0 is blue.
++                        let k = mask[oy][ox][2 - c] * bright;
++                        for (v, out) in lut[oy * 3 + ox][c].iter_mut().enumerate() {
++                            *out = (v as f32 * k).clamp(0.0, 255.0) as u8;
++                        }
++                    }
++                }
++            }
++            let sx0 = (x0 - rx as i32) as usize;
++            for py in y0..y1 {
++                let dy = (py - ry as i32) as usize;
++                let sy = dy / SCALE as usize;
++                let oy = dy % SCALE as usize;
++                let src_row = sy * img.w as usize * 4;
++                let mut di = (py as usize * dw + x0 as usize) * 4;
++                let mut sx = sx0;
++                for _ in 0..(x1 - x0) {
++                    let si = src_row + (sx / SCALE as usize) * 4;
++                    let table = &lut[oy * 3 + sx % SCALE as usize];
++                    for c in 0..3 {
++                        dst.px[di + c] = table[c][img.px[si + c] as usize];
++                    }
++                    dst.px[di + 3] = 255;
++                    di += 4;
++                    sx += 1;
++                }
++            }
++            return;
++        }
++
 +        for py in y0..y1 {
 +            let v = src[1] + (py as f32 + 0.5 - ry) / rh * src[3];
 +            let sy = ((v * sh) as i32).clamp(0, img.h as i32 - 1) as usize;
@@ -1171,6 +1220,74 @@ index 0000000..b6f3637
 +                }
 +            }
 +        }
++    }
++}
++
++#[cfg(test)]
++mod game_fast_path_tests {
++    use super::{Game, Image, BRIGHTEN_LCD, BRIGHTEN_SCANLINES, LCD_OFFSETS, PI};
++    use crate::pipeline::{SCALE, SRC_H, SRC_W};
++    use crate::surface::{OUT_H, OUT_W};
++
++    /// A frame with every channel varying, so a swapped or truncated channel
++    /// shows up rather than cancelling out.
++    fn frame() -> Vec<u8> {
++        let mut v = Vec::with_capacity((SRC_W * SRC_H * 4) as usize);
++        for y in 0..SRC_H {
++            for x in 0..SRC_W {
++                // XRGB8888 is B, G, R, X in memory.
++                v.push((x % 256) as u8);
++                v.push((y % 256) as u8);
++                v.push(((x + y) % 256) as u8);
++                v.push(0);
++            }
++        }
++        v
++    }
++
++    /// What the separable path computes, in floats, for one output pixel.
++    fn expected(px: u32, py: u32, src: &[u8], c: u32) -> u8 {
++        let (ox, oy) = (px % SCALE, py % SCALE);
++        let (sx, sy) = (px / SCALE, py / SCALE);
++        let (fx, fy) = ((ox as f32 + 0.5) / 3.0, (oy as f32 + 0.5) / 3.0);
++        let yk = (BRIGHTEN_SCANLINES + (2.0 * PI * fy).sin()) / (BRIGHTEN_SCANLINES + 1.0);
++        // Channel c of the stored (panel-order) pixel is colour 2 - c.
++        let xk = (BRIGHTEN_LCD + (2.0 * PI * fx + LCD_OFFSETS[(2 - c) as usize]).sin())
++            / (BRIGHTEN_LCD + 1.0);
++        let v = src[((sy * SRC_W + sx) * 4 + c) as usize] as f32;
++        (v * xk * yk).clamp(0.0, 255.0) as u8
++    }
++
++    #[test]
++    fn the_3x_lookup_matches_the_general_path() {
++        let mut game = Game::new();
++        game.upload(&frame());
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        game.draw(&mut canvas, None);
++
++        let mut worst = 0i32;
++        // Every 3x3 phase, across the frame.
++        for py in (0..OUT_H).step_by(37) {
++            for px in (0..OUT_W).step_by(41) {
++                for c in 0..3u32 {
++                    let got = canvas.px[((py * OUT_W + px) * 4 + c) as usize] as i32;
++                    let want = expected(px, py, &game.frame.px, c) as i32;
++                    worst = worst.max((got - want).abs());
++                }
++            }
++        }
++        // The lookup rounds where the general path truncates in fixed point, so
++        // allow a single level, but no more.
++        assert!(worst <= 1, "lookup path differs from the mask by {worst}");
++    }
++
++    #[test]
++    fn it_actually_wrote_something() {
++        let mut game = Game::new();
++        game.upload(&frame());
++        let mut canvas = Image::new(OUT_W, OUT_H);
++        game.draw(&mut canvas, None);
++        assert!(canvas.px.iter().any(|&b| b != 0), "canvas left blank");
 +    }
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
