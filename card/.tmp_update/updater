@@ -53,15 +53,17 @@ fi
 
 # use audioserver to prevent pop-noise
 #
-# Not when slot is taking over: the audio server holds the PCM open, and slot
-# then fails to open any of plug:default, default, plughw:0,0 or hw:0,0 --
-# "Device or resource busy" is what its log shows. Allium's own apps go through
-# the server; slot talks to ALSA directly, as it does on the Anbernic machines.
+# This was skipped under slot for a while, to free the PCM that the server holds
+# open -- slot could not open any device while it was running. That did let slot
+# open plug:default at 48 kHz, and it still produced no sound: every write
+# failed and snd_pcm_recover returned -512 persistently, not as the interrupted
+# syscall it resembles. What it did produce was a click every three seconds,
+# which is exactly what the server is here to prevent.
 #
-# The cost is the pop on open that the server exists to avoid. If that turns out
-# to be worse than no sound at all, put it back and teach slot to use the server
-# instead.
-if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ] && [ ! -f "$ROOT"/.slot-boot ]; then
+# So it stays. Direct ALSA looks like a dead end on this device; Allium's own
+# apps go through the server, and teaching slot to do the same is the route if
+# sound is wanted. See notes/hardware.md.
+if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ]; then
     "$ROOT"/.tmp_update/script/start_audioserver.sh
 fi
 

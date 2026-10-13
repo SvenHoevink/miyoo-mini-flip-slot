@@ -1,5 +1,5 @@
 diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
-index b9d1a71..615d9f4 100644
+index b9d1a71..7fa2cb4 100644
 --- a/crates/slot/src/audio/alsa.rs
 +++ b/crates/slot/src/audio/alsa.rs
 @@ -78,7 +78,28 @@ impl Alsa {
@@ -32,7 +32,14 @@ index b9d1a71..615d9f4 100644
          let mut last = AudioError::NoDevice;
          for name in DEVICES {
              let Ok(cname) = CString::new(name) else {
-@@ -200,18 +221,21 @@ struct Playback {
+@@ -196,23 +217,30 @@ struct Playback {
+     pcm: Option<*mut c_void>,
+     rate: u32,
+     failing: bool,
++    /// Whether the first write error has been reported. A Cell because the
++    /// write path takes &self.
++    said_write_error: std::cell::Cell<bool>,
+ }
  
  fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
      let alsa = Alsa::load()?;
@@ -57,9 +64,11 @@ index b9d1a71..615d9f4 100644
 -        rate: sample_rate,
 +        rate,
          failing: pcm.is_none(),
++        said_write_error: std::cell::Cell::new(false),
      })
  }
-@@ -230,9 +254,16 @@ impl Playback {
+ 
+@@ -230,9 +258,16 @@ impl Playback {
                      eprintln!("slot: audio released after silence");
                  }
                  (None, true) => match self.alsa.open_pcm(self.rate) {
@@ -77,7 +86,7 @@ index b9d1a71..615d9f4 100644
                          self.failing = false;
                      }
                      Err(e) => {
-@@ -256,6 +287,9 @@ impl Playback {
+@@ -256,6 +291,9 @@ impl Playback {
      }
  
      fn write(&self, pcm: *mut c_void, buf: &[i16]) -> bool {
@@ -87,17 +96,23 @@ index b9d1a71..615d9f4 100644
          let mut written = 0;
          while written < PERIOD_FRAMES {
              let at = written * CHANNELS as usize;
-@@ -267,7 +301,33 @@ impl Playback {
+@@ -267,7 +305,39 @@ impl Playback {
                  )
              };
              if frames < 0 {
++                // Say what the write actually failed with, once. The recover
++                // path below reports its own error and that turned out to be
++                // -512 persistently, which is not the interrupted-syscall case
++                // it looks like -- so the useful number is this one.
++                if !self.said_write_error.get() {
++                    self.said_write_error.set(true);
++                    eprintln!(
++                        "slot: audio: writei failed: {} ({frames})",
++                        self.alsa.message(frames as c_int)
++                    );
++                }
 +                // -512 is ERESTARTSYS and -4 is EINTR: a blocking write that a
-+                // signal interrupted. ERESTARTSYS is kernel-internal and should
-+                // never reach userspace at all, but this device's driver leaks
-+                // it, and treating it as fatal left the sink dead and the ring
-+                // overflowing -- 417,000 samples dropped in one session, heard
-+                // as a pop every second or two instead of audio. Just write
-+                // again; the stream is fine.
++                // signal interrupted.
 +                if frames == -512 || frames == -4 {
 +                    retries += 1;
 +                    if retries > INTERRUPT_RETRIES {
