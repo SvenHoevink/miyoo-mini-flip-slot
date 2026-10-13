@@ -1,0 +1,44 @@
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index f7f35e9..8d284a6 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -32,6 +32,8 @@ const DOZE_TIMEOUT: Duration = Duration::from_secs(180);
+ const ALERT_INK: [u8; 3] = [0xf0, 0xb4, 0x3c];
+ 
+ pub struct Frontend {
++    /// Diagnostic: whether the rebuild notice has already been made.
++    said_rebuild: bool,
+     session: Session,
+     start: Instant,
+     last: Instant,
+@@ -113,6 +115,7 @@ impl Frontend {
+             .app_mut()
+             .set_power(Power::new(platform, DOZE_TIMEOUT));
+         Frontend {
++            said_rebuild: false,
+             session,
+             start: now,
+             last: now,
+@@ -492,8 +495,22 @@ impl Frontend {
+         let now = self.now();
+         let events = input.poll(now);
+         if self.rebuild.is_some() {
++            // Diagnostic: this discards the events just polled and skips
++            // session.feed, which is what calls Gestures::tick -- so no hold
++            // timer advances and no press is recorded for the duration. The
++            // suspicion is that this is why an 8.5 s hold produced no eject.
++            // One line per spell, not per frame, so it stays readable.
++            if crate::latency::tracing() && !self.said_rebuild {
++                self.said_rebuild = true;
++                eprintln!("slot: advance: input dropped from {now}ms, rebuild in progress");
++            }
+             return;
+         }
++        if crate::latency::tracing() && self.said_rebuild {
++            self.said_rebuild = false;
++            let n = events.len();
++            eprintln!("slot: advance: input resumed at {now}ms ({n} events)");
++        }
+         self.session.feed(events, now);
+         let dt = self.last.elapsed().as_secs_f32();
+         self.last = Instant::now();
