@@ -171,8 +171,17 @@ Choices worth knowing, with the reasoning in the scripts themselves:
       implemented exactly; the bezel, split and lift paths are no-ops because
       `bezel::framed()` needs a 4:3 panel and 752x560 is not one, so the device
       never reaches them. Grid, Dot and Simpletex fall back to no effect.
-- [ ] **Measure, then reconsider those fallbacks.** Nothing above has a frame
-      time attached to it yet.
+- [x] **Make the rasteriser fast enough to be worth measuring.** The first
+      on-device run ran but dropped frames badly. The game pass was calling
+      `lcd3x_factors` per pixel — four `sin()` each, ~83 million a second over
+      the game area at 60 fps. The mask is separable, so it now precomputes one
+      row and one column and the inner loop is integer; the sprite path
+      precomputes source columns and short-circuits transparent and opaque
+      texels; the output blit uses a gain lookup, skips the identity case and
+      no longer repaints the static border. Output is pixel-identical.
+- [ ] **Measure.** `SLOT_TRACE_LATENCY=1` is set in the card's launch script and
+      writes a per-frame breakdown to `slot.log`, of which `take>swapped` is
+      this backend. Nothing above has a real frame time attached to it yet.
 - [x] **Fit the panel.** Resolved by measurement rather than choice: the panel
       is **752x560**, not the 750x560 on the spec sheets, so upstream's own
       720x480 (`SCALE = 3` over 240x160) drops in with a 16px side and 40px
@@ -208,12 +217,17 @@ taskfile.yml             the armv7 build tasks
 task shot        # renders a frame under qemu into target-miyoo/frame.png
 ```
 
-![slot's clock screen, rendered by the software rasteriser](docs/frame.png)
+![slot's shelf, rendered by the software rasteriser](docs/shelf.png)
 
-That is slot drawn entirely on the CPU at 752x560 — no GPU, no EGL — with the
-720x480 canvas centred and the panel's border around it. Text, filled rects and
-alpha blending all land where the GL path puts them. It boots to "first frame"
-in about 500 ms under emulation, which says nothing about the device.
+That is slot's shelf drawn entirely on the CPU at 752x560 — no GPU, no EGL —
+with the 720x480 canvas centred and the panel's border around it. Carts, labels,
+text and alpha all land where the GL path puts them.
+
+To get a populated shelf without ROMs, `task shot` writes a content root and
+slot needs `Config/slot.state` to hold **every** key its parser requires
+(`cart`, `brightness`, `blue_light`, `volume`, `muted`, `clock_set`,
+`utc_offset_min` at least) — a partial file is discarded whole and you land back
+on the clock screen.
 
 ## Running it without the handheld
 

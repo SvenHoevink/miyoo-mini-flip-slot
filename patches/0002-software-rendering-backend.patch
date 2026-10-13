@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..f444b6b
+index 0000000..b8226ff
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,566 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -554,15 +554,24 @@ index 0000000..f444b6b
 +
 +pub use fb::FbdevSurface;
 +
++use std::f32::consts::PI;
++
 +use crate::draw::{Draw, TexId};
 +use crate::grade::blue_light_gain;
-+use crate::lcd3x::{lcd3x_factors, ScreenEffect};
++use crate::lcd3x::ScreenEffect;
 +use crate::pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
 +use crate::power::{screen_brightness, screen_rect};
 +use crate::surface::{blit_rect, GfxError, Surface, OUT_H, OUT_W};
 +use raster::Image;
 +
 +pub const BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
++
++// The constants behind lcd3x_factors, which this backend evaluates separably
++// rather than calling per pixel. Kept in step with crate::lcd3x by the test at
++// the bottom of this file, which checks the split against the original.
++const BRIGHTEN_SCANLINES: f32 = 16.0;
++const BRIGHTEN_LCD: f32 = 4.0;
++const LCD_OFFSETS: [f32; 3] = [PI / 2.0, PI * (0.5 - 2.0 / 3.0), PI * (0.5 - 4.0 / 3.0)];
 +
 +/// Same rule as the GL compositor: an exact integer multiple of the output size
 +/// renders at `OUT_W x OUT_H` and is scaled on the way out, anything else
@@ -626,47 +635,82 @@ index 0000000..f444b6b
 +    fn draw(&self, dst: &mut Image, tex: Option<&Image>) {
 +        let img = tex.unwrap_or(&self.frame);
 +        let (rx, ry, rw, rh) = screen_rect(self.power);
-+        if !(rw > 0.0 && rh > 0.0) {
++        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
 +            return;
 +        }
-+        let bright = screen_brightness(self.power);
 +        let src = if tex.is_some() { WHOLE_TEXTURE } else { self.src };
-+        // Source texel count, for the sub-texel phase the mask needs.
 +        let (sw, sh) = (img.w as f32, img.h as f32);
 +
 +        let x0 = (rx.round() as i32).max(0);
 +        let y0 = (ry.round() as i32).max(0);
 +        let x1 = ((rx + rw).round() as i32).min(dst.w as i32);
 +        let y1 = ((ry + rh).round() as i32).min(dst.h as i32);
++        if x0 >= x1 || y0 >= y1 {
++            return;
++        }
 +
++        // The whole inner loop is integer. Everything that varies only with the
++        // column, or only with the row, is computed once into these tables:
++        // without that this does four sin() per pixel through lcd3x_factors,
++        // which is roughly 83 million sin() a second at 60 fps over the game
++        // area, and the Cortex-A7 cannot come close to that.
++        //
++        // The mask is separable, so the split is exact rather than an
++        // approximation: lcd3x_factors is yfactor(y) * xfactor(x) per channel.
++        let lcd = self.effect == ScreenEffect::Lcd3x;
++        let bright = screen_brightness(self.power);
++        let width = (x1 - x0) as usize;
++
++        // Per column: the source texel to read, whether the pic rect includes
++        // it, and the three x factors in 8.8 fixed point.
++        let mut col_texel = vec![0u32; width];
++        let mut col_inside = vec![false; width];
++        let mut col_k = vec![[256u16; 3]; width];
++        for (i, slot) in col_texel.iter_mut().enumerate() {
++            let px = x0 + i as i32;
++            let u = src[0] + (px as f32 + 0.5 - rx) / rw * src[2];
++            *slot = ((u * sw) as i32).clamp(0, img.w as i32 - 1) as u32;
++            col_inside[i] = u >= self.pic[0] && u < self.pic[2];
++            if lcd {
++                // The x half of lcd3x_factors, with yfactor factored out.
++                let fx = (u * sw).fract();
++                for (c, k) in col_k[i].iter_mut().enumerate() {
++                    let o = LCD_OFFSETS[c];
++                    let v = (BRIGHTEN_LCD + (2.0 * PI * fx + o).sin()) / (BRIGHTEN_LCD + 1.0);
++                    *k = (v * 256.0).round().clamp(0.0, 65535.0) as u16;
++                }
++            }
++        }
++
++        let dw = dst.w as usize;
 +        for py in y0..y1 {
-+            let ty = (py as f32 + 0.5 - ry) / rh;
-+            let v = src[1] + ty * src[3];
-+            for px in x0..x1 {
-+                let tx = (px as f32 + 0.5 - rx) / rw;
-+                let u = src[0] + tx * src[2];
-+                let s = img.sample(u, v);
-+                let mut c = [s[0] as f32, s[1] as f32, s[2] as f32];
++            let v = src[1] + (py as f32 + 0.5 - ry) / rh * src[3];
++            let sy = ((v * sh) as i32).clamp(0, img.h as i32 - 1) as usize;
++            let row_inside = v >= self.pic[1] && v < self.pic[3];
 +
-+                let inside = u >= self.pic[0]
-+                    && v >= self.pic[1]
-+                    && u < self.pic[2]
-+                    && v < self.pic[3];
-+                if inside && self.effect == ScreenEffect::Lcd3x {
-+                    // Identical to the shader: f = fract(uv * u_src), then
-+                    // c *= yfactor * xfactors.
-+                    let f = ((u * sw).fract(), (v * sh).fract());
-+                    let k = lcd3x_factors(f.0, f.1);
-+                    for (ch, k) in c.iter_mut().zip(k) {
-+                        *ch *= k;
-+                    }
-+                }
++            // The y half of the mask, with brightness folded in so the inner
++            // loop multiplies once per channel and shifts.
++            let yk = if lcd && row_inside {
++                let fy = (v * sh).fract();
++                (BRIGHTEN_SCANLINES + (2.0 * PI * fy).sin()) / (BRIGHTEN_SCANLINES + 1.0) * bright
++            } else {
++                bright
++            };
++            let yk = (yk * 256.0).round().clamp(0.0, 65535.0) as u32;
 +
-+                let i = (py as usize * dst.w as usize + px as usize) * 4;
-+                for (o, ch) in c.iter().enumerate() {
-+                    dst.px[i + o] = (ch * bright).clamp(0.0, 255.0) as u8;
++            let src_row = sy * img.w as usize * 4;
++            let mut di = (py as usize * dw + x0 as usize) * 4;
++            for i in 0..width {
++                let si = src_row + col_texel[i] as usize * 4;
++                let mask = lcd && row_inside && col_inside[i];
++                for c in 0..3 {
++                    let k = if mask { col_k[i][c] as u32 } else { 256 };
++                    // 8.8 x 8.8 over a u8, so shift 16 back down.
++                    let v = (img.px[si + c] as u32 * k * yk) >> 16;
++                    dst.px[di + c] = v.min(255) as u8;
 +                }
-+                dst.px[i + 3] = 255;
++                dst.px[di + 3] = 255;
++                di += 4;
 +            }
 +        }
 +    }
@@ -922,6 +966,10 @@ index 0000000..f444b6b
 +    }
 +
 +    /// Scale the canvas onto the panel and hand it to the framebuffer.
++    ///
++    /// Only the area the canvas lands on is written. The surround is black and
++    /// `FbdevSurface::new` clears every page once, so repainting it each frame
++    /// would be ~75k pixels of wasted work per frame on this panel.
 +    pub fn end_frame(&mut self, window: (u32, u32)) {
 +        let Some(target) = fb::current() else {
 +            return;
@@ -929,55 +977,82 @@ index 0000000..f444b6b
 +        let (x, y_gl, w, h) = blit_rect(window, self.shake);
 +        // `blit_rect` measures y from the bottom, as a GL viewport does.
 +        let y = window.1 as i32 - y_gl - h;
++        if w <= 0 || h <= 0 {
++            return;
++        }
 +
-+        let (cw, ch) = (self.canvas.w as f32, self.canvas.h as f32);
-+        let gain = self.gain;
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
 +        let pw = target.w as i32;
 +        let ph = target.h as i32;
-+
 +        let half = self.mount == Mount::Half;
-+        for py in 0..ph {
++
++        // Blue-light gain as a lookup instead of a float multiply per channel
++        // per pixel; at step 0 it is the identity and the copy is straight.
++        let identity = self.gain == [1.0, 1.0, 1.0];
++        let mut lut = [[0u8; 256]; 3];
++        if !identity {
++            for (c, table) in lut.iter_mut().enumerate() {
++                for (v, out) in table.iter_mut().enumerate() {
++                    *out = (v as f32 * self.gain[c]).clamp(0.0, 255.0) as u8;
++                }
++            }
++        }
++
++        // Source column per destination column, once.
++        let x_end = (x + w).min(pw);
++        let x_start = x.max(0);
++        if x_start >= x_end {
++            return;
++        }
++        let span = (x_end - x_start) as usize;
++        let mut col = vec![0usize; span];
++        for (i, slot) in col.iter_mut().enumerate() {
++            let px = x_start + i as i32;
++            *slot = (((px - x) as i64 * cw as i64) / w as i64).clamp(0, cw as i64 - 1) as usize;
++        }
++
++        let y_start = y.max(0);
++        let y_end = (y + h).min(ph);
++        for py in y_start..y_end {
++            let sy = (((py - y) as i64 * ch as i64) / h as i64).clamp(0, ch as i64 - 1) as usize;
++            let src_row = sy * self.canvas.w as usize * 4;
 +            // On an upside-down panel the last canvas row goes to the first
-+            // scanline, and each row is also reversed below.
-+            let sy = if half { ph - 1 - py } else { py };
++            // scanline, and each row is reversed too.
++            let dy = if half { ph - 1 - py } else { py };
 +            // SAFETY: one row inside the mapping, `stride` bytes wide.
 +            let row = unsafe {
 +                std::slice::from_raw_parts_mut(
-+                    target.ptr.add(sy as usize * target.stride),
++                    target.ptr.add(dy as usize * target.stride),
 +                    target.stride,
 +                )
 +            };
-+            let inside_y = py >= y && py < y + h;
-+            let v = if inside_y {
-+                (py - y) as f32 / h as f32 * ch
-+            } else {
-+                0.0
-+            };
-+            for px in 0..pw {
-+                let o = if half { pw - 1 - px } else { px } as usize * 4;
++            for (i, &sx) in col.iter().enumerate() {
++                let px = x_start + i as i32;
++                let dx = if half { pw - 1 - px } else { px } as usize;
++                let o = dx * 4;
 +                if o + 4 > row.len() {
-+                    break;
++                    continue;
 +                }
-+                let mut rgb = [0u8; 3];
-+                if inside_y && px >= x && px < x + w {
-+                    let u = (px - x) as f32 / w as f32 * cw;
-+                    let sx = (u as i32).clamp(0, self.canvas.w as i32 - 1) as usize;
-+                    let sy = (v as i32).clamp(0, self.canvas.h as i32 - 1) as usize;
-+                    let i = (sy * self.canvas.w as usize + sx) * 4;
-+                    for c in 0..3 {
-+                        rgb[c] =
-+                            (self.canvas.px[i + c] as f32 * gain[c]).clamp(0.0, 255.0) as u8;
-+                    }
++                let si = src_row + sx * 4;
++                let (mut r, mut g, mut b) = (
++                    self.canvas.px[si],
++                    self.canvas.px[si + 1],
++                    self.canvas.px[si + 2],
++                );
++                if !identity {
++                    r = lut[0][r as usize];
++                    g = lut[1][g as usize];
++                    b = lut[2][b as usize];
 +                }
 +                // BLIT_FRAG writes rgb with alpha 1.0; the panel is XRGB.
 +                if target.bgr {
-+                    row[o] = rgb[2];
-+                    row[o + 1] = rgb[1];
-+                    row[o + 2] = rgb[0];
++                    row[o] = b;
++                    row[o + 1] = g;
++                    row[o + 2] = r;
 +                } else {
-+                    row[o] = rgb[0];
-+                    row[o + 1] = rgb[1];
-+                    row[o + 2] = rgb[2];
++                    row[o] = r;
++                    row[o + 1] = g;
++                    row[o + 2] = b;
 +                }
 +                row[o + 3] = 255;
 +            }
@@ -985,12 +1060,42 @@ index 0000000..f444b6b
 +        let _ = SCALE;
 +    }
 +}
++
++#[cfg(test)]
++mod lcd3x_split_tests {
++    use super::{BRIGHTEN_LCD, BRIGHTEN_SCANLINES, LCD_OFFSETS, PI};
++    use crate::lcd3x::lcd3x_factors;
++
++    /// The hot loop multiplies a per-row y factor by a per-column x factor
++    /// instead of calling lcd3x_factors per pixel. That is only legitimate if
++    /// the product is the same function, so pin it.
++    #[test]
++    fn the_separated_mask_equals_lcd3x_factors() {
++        for yi in 0..17 {
++            for xi in 0..17 {
++                let (x, y) = (xi as f32 / 17.0, yi as f32 / 17.0);
++                let yk = (BRIGHTEN_SCANLINES + (2.0 * PI * y).sin()) / (BRIGHTEN_SCANLINES + 1.0);
++                let want = lcd3x_factors(x, y);
++                for c in 0..3 {
++                    let xk = (BRIGHTEN_LCD + (2.0 * PI * x + LCD_OFFSETS[c]).sin())
++                        / (BRIGHTEN_LCD + 1.0);
++                    let got = yk * xk;
++                    assert!(
++                        (got - want[c]).abs() < 1e-6,
++                        "channel {c} at ({x}, {y}): {got} vs {}",
++                        want[c]
++                    );
++                }
++            }
++        }
++    }
++}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..fe96d3c
+index 0000000..9c5d3ec
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,235 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -1120,21 +1225,63 @@ index 0000000..fe96d3c
 +}
 +
 +/// An axis-aligned textured rect, nearest-sampled.
++///
++/// The shelf is several of these a frame, each covering a large part of the
++/// canvas, so the per-pixel work matters as much as the game plane's. The
++/// source column is computed once per column rather than per pixel, and the
++/// two cases that dominate -- a fully transparent texel and a fully opaque one
++/// at full alpha -- skip the blend entirely.
 +pub fn blit(dst: &mut Image, tex: &Image, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
 +    let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
 +        return;
 +    };
++    if tex.w == 0 || tex.h == 0 {
++        return;
++    }
 +    let plain = colour == [1.0, 1.0, 1.0, 1.0];
++    let width = (x1 - x0) as usize;
++
++    // Source texel per destination column, so the inner loop has no float
++    // divide and no clamp.
++    let mut col = vec![0u32; width];
++    for (i, slot) in col.iter_mut().enumerate() {
++        let px = x0 + i as i32;
++        let u = (px as f32 + 0.5 - x) / w;
++        *slot = ((u * tex.w as f32) as i32).clamp(0, tex.w as i32 - 1) as u32;
++    }
++
++    let dw = dst.w as usize;
++    let tw = tex.w as usize;
 +    for py in y0..y1 {
 +        let v = (py as f32 + 0.5 - y) / h;
-+        for px in x0..x1 {
-+            let u = (px as f32 + 0.5 - x) / w;
-+            let mut s = tex.sample(u, v);
++        let sy = ((v * tex.h as f32) as i32).clamp(0, tex.h as i32 - 1) as usize;
++        let src_row = sy * tw * 4;
++        let mut di = (py as usize * dw + x0 as usize) * 4;
++        for &c in col.iter().take(width) {
++            let si = src_row + c as usize * 4;
++            let a = tex.px[si + 3];
++            if a == 0 {
++                // Cart art is mostly rounded corners and padding; skipping the
++                // blend here is most of the saving on the shelf.
++                di += 4;
++                continue;
++            }
++            if plain && a == 255 {
++                dst.px[di..di + 4].copy_from_slice(&tex.px[si..si + 4]);
++                di += 4;
++                continue;
++            }
++            let mut s = [
++                tex.px[si],
++                tex.px[si + 1],
++                tex.px[si + 2],
++                a,
++            ];
 +            if !plain {
 +                s = modulate(s, colour);
 +            }
-+            let i = dst.idx(px as u32, py as u32);
-+            blend(&mut dst.px[i..i + 4], s);
++            blend(&mut dst.px[di..di + 4], s);
++            di += 4;
 +        }
 +    }
 +}

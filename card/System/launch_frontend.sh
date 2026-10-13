@@ -20,10 +20,10 @@ export SLOT_ROOT="$SD"
 # /dev/fb0 appears inverted on the panel, confirmed on the device.
 export SLOT_FB_ROTATE=180
 
-# Temporary, while input is being brought up: slot surveys every /dev/input
-# node (opened or skipped, with its capability bitmap) and logs each event and
-# whether it mapped, to $SD/input-trace.log. Drop this once buttons work.
-export SLOT_TRACE_INPUT=1
+# Temporary, while the software renderer is being tuned: one line per frame in
+# slot.log breaking the frame down, of which take>swapped is this backend's
+# rasteriser plus the output blit. Drop it once the frame rate is settled.
+export SLOT_TRACE_LATENCY=1
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
