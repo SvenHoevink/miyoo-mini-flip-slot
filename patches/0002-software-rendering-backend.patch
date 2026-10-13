@@ -198,10 +198,10 @@ index 988bb8c..ca19343 100644
          unsafe {
 diff --git a/crates/slot-gfx/src/soft/fb.rs b/crates/slot-gfx/src/soft/fb.rs
 new file mode 100644
-index 0000000..01d482e
+index 0000000..e569bad
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/fb.rs
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,329 @@
 +//! A `Surface` over `/dev/fb0` for devices with no GPU.
 +//!
 +//! The Miyoo Mini Flip's SigmaStar SSD202D has no 3D core and no libEGL, so the
@@ -337,6 +337,8 @@ index 0000000..01d482e
 +    back: u32,
 +    /// Geometry came from SLOT_FB_SIZE, not a driver, so skip every ioctl.
 +    synthetic: bool,
++    /// Block in `swap` until the panel latches. Off by default; see `swap`.
++    wait_vsync: bool,
 +}
 +
 +fn ioctl<T>(fd: RawFd, req: libc::c_ulong, arg: &mut T) -> std::io::Result<()> {
@@ -432,6 +434,7 @@ index 0000000..01d482e
 +            pages,
 +            back: 0,
 +            synthetic: std::env::var_os("SLOT_FB_SIZE").is_some(),
++            wait_vsync: std::env::var("SLOT_FB_VSYNC").as_deref() == Ok("1"),
 +        };
 +        // Start on a cleared screen rather than whatever the launcher left.
 +        me.clear();
@@ -474,8 +477,9 @@ index 0000000..01d482e
 +
 +    fn swap(&mut self) -> Result<(), GfxError> {
 +        if self.pages == 1 && !self.synthetic {
-+            // Nothing to flip to: we drew straight at the scanout. Wait for the
-+            // blank so the frame at least lands whole where the driver allows it.
++            // Nothing to flip to: we drew straight at the scanout, so waiting
++            // for the blank is the only way the frame lands whole. With pages to
++            // flip between this is skipped, which is the normal case here.
 +            let mut arg = 0u32;
 +            let _ = ioctl(self.file.as_raw_fd(), FBIO_WAITFORVSYNC, &mut arg);
 +            return Ok(());
@@ -492,8 +496,17 @@ index 0000000..01d482e
 +            .map_err(|e| GfxError::Context(format!("FBIOGET_VSCREENINFO: {e}")))?;
 +        var.xoffset = 0;
 +        var.yoffset = self.h * self.back;
-+        // FB_ACTIVATE_VBL: show it at the next blank rather than mid-scanout.
-+        var.activate = 0x200;
++        // FB_ACTIVATE_VBL (0x200) asks the driver to latch at the next vertical
++        // blank, and on this device that *blocks* for the rest of the frame --
++        // measured at 11 ms median, capped at one 16.7 ms period. slot already
++        // paces itself, so waiting here as well puts two pacers in series and
++        // costs most of the frame budget for nothing.
++        //
++        // FB_ACTIVATE_NOW hands the page over and returns; the hardware still
++        // latches whole pages at its own blank, and with three buffers there is
++        // a page in flight, so tearing is not expected. SLOT_FB_VSYNC=1 restores
++        // the blocking behaviour if a panel turns out to need it.
++        var.activate = if self.wait_vsync { 0x200 } else { 0x0 };
 +        if let Err(e) = ioctl(fd, FBIOPAN_DISPLAY, &mut var) {
 +            // Some SigmaStar kernels only accept the pan through PUT_VSCREENINFO.
 +            ioctl(fd, FBIOPUT_VSCREENINFO, &mut var)

@@ -227,6 +227,24 @@ lands inside `take>swapped` and none of it inside the backend's profile.
 build N ms/frame`. It is diagnostic only and should be dropped once the budget
 is settled.
 
+**It was not the sync work.** Measured, that block is **0.1 ms a frame** — the
+guess was wrong. The gap is the swap:
+
+```
+swap  p50=11.4  p90=15.3  max=15.9 ms
+```
+
+`take>swapped` 25.2 = about 12.5 ms of render plus 11.4 ms of *waiting*.
+`FBIOPAN_DISPLAY` was being issued with `FB_ACTIVATE_VBL`, which blocks until
+the panel latches — capped at one 16.7 ms period, which is exactly the shape of
+that distribution. slot paces itself, so blocking here too put two pacers in
+series and spent most of the budget on nothing.
+
+It now pans with `FB_ACTIVATE_NOW` and returns; the hardware still latches whole
+pages at its own blank and there are three of them, so tearing is not expected.
+`SLOT_FB_VSYNC=1` restores the blocking behaviour if that turns out to be
+wrong.
+
 With gpSP the stages add up to about 12.4 ms (clear 1.4, upload 0.3, game 7.8,
 sprites 0.0, out 2.9) and slot's own pacer agrees: `work 12.7 ms, period
 16.76 ms`, the first time work has fit inside the period. It reads as mostly
