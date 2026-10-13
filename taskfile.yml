@@ -341,6 +341,16 @@ tasks:
       - curl -sS -T vendor-miyoo/gpsp_libretro.so "{{.FTP}}/System/gpsp_libretro.so"
       - curl -sS -T vendor-miyoo/mgba_libretro.so "{{.FTP}}/System/mgba_libretro.so"
 
+  sh:device:
+    desc: >-
+      Run CMD on the handheld over Allium's telnet, e.g.
+      SLOT_DEVICE=192.168.1.x task sh:device CMD='cat /proc/meminfo'
+    deps: [device:check]
+    requires:
+      vars: [CMD]
+    cmds:
+      - sh tools/device-sh.sh {{.DEVICE}} '{{.CMD}}'
+
   log:
     desc: Fetch slot.log (and any traces) off the handheld over FTP
     deps: [device:check]

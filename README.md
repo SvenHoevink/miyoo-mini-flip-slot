@@ -248,8 +248,13 @@ seconds — and starts `telnetd` and `ftpd` directly.
 The `device:check` step fails with a clear message rather than a curl error
 when the handheld is not listening.
 
-A telnet shell is also the quickest way to try something without a rebuild —
-`SLOT_FB_VSYNC=1 sh /mnt/SDCARD/System/launch_frontend.sh`, for instance.
+`task sh:device CMD='...'` runs a command on the handheld over telnet, which is
+the quickest way to try something without a rebuild — reading `/proc`, or
+relaunching with a different setting:
+
+```sh
+SLOT_DEVICE=192.168.1.x task sh:device CMD='free -m'
+```
 
 ## Seeing what it draws
 
