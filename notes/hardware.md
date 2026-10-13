@@ -77,11 +77,37 @@ libmi_venc.so   libmi_wlan.so
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
 - `libmi_ao.so` — audio out, used by Allium via FFI.
+- **ALSA runs at 48 kHz and has no `plug` plugin.** `plug:default` and
+  `plughw:0,0` do not open at all, so there is no resampling plugin to fall back
+  on, and `hw:0,0` rejects the core's 32768 Hz outright: "Rate doesn't match
+  (requested 32768Hz, get 48000Hz)". `patches/0005` opens at a rate the hardware
+  takes and tells the ring, which is all that was needed, since `emu.rs` already
+  resamples the core's output to whatever rate the ring reports.
+- **The audio server has to be off.** The boot hook starts one to suppress a pop
+  on open, and it holds the PCM, which is why slot's sink reported "Device or
+  resource busy". Skipped when `.slot-boot` is set.
 - **ALSA does exist**, contrary to what I first concluded. The qemu container had
   no `libasound.so`, and I wrongly generalised that to the device. On hardware
   slot's ALSA sink loads and gets as far as `hw:0,0: Device or resource busy`,
   so the library and the PCM are both there and something else was holding the
   device. An `MI_AO` sink may still be wanted, but it is not forced.
+
+## The lid is a pulse, not a state
+
+The hall sensor does not hold a value while the clamshell is shut. It emits a
+momentary `KEY_POWER` press and release **in the same millisecond**:
+
+```
+35994ms event1 type=0x01 code=0x74(116) value=1 -> Power
+35994ms event1 type=0x01 code=0x74(116) value=0 -> Power
+```
+
+So `Btn::Lid`, which slot models as a held state via `SW_LID`, cannot be driven
+from it directly: something has to turn edges into a state. Only one pulse has
+been captured so far, so it is not yet known whether both transitions emit one,
+or only the close, or only the open — which decides whether a toggle is safe or
+whether the state has to come from somewhere else. More lid cycles needed before
+writing any of it.
 
 ## Panel orientation
 

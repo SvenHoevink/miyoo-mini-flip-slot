@@ -1,0 +1,79 @@
+diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
+index b9d1a71..ab0b053 100644
+--- a/crates/slot/src/audio/alsa.rs
++++ b/crates/slot/src/audio/alsa.rs
+@@ -78,7 +78,28 @@ impl Alsa {
+         }
+     }
+ 
+-    fn open_pcm(&self, rate: u32) -> Result<*mut c_void, AudioError> {
++    /// Rates to fall back to when the device will not take the core's own.
++    ///
++    /// The Miyoo Mini Flip's ALSA runs at 48 kHz and its alsa-lib has no plug
++    /// plugin -- `plug:default` and `plughw:0,0` do not open at all, and on
++    /// `hw:0,0` the soft_resample flag cannot save us: "Rate doesn't match
++    /// (requested 32768Hz, get 48000Hz)". Opening at a rate the hardware does
++    /// support costs nothing, because slot already resamples the core's output
++    /// to the device rate in `emu.rs`; it only has to be told which rate won.
++    const FALLBACK_RATES: [u32; 2] = [48_000, 44_100];
++
++    fn open_pcm(&self, rate: u32) -> Result<(*mut c_void, u32), AudioError> {
++        let mut last = AudioError::NoDevice;
++        for try_rate in std::iter::once(rate).chain(Self::FALLBACK_RATES) {
++            match self.open_pcm_at(try_rate) {
++                Ok(pcm) => return Ok((pcm, try_rate)),
++                Err(e) => last = e,
++            }
++        }
++        Err(last)
++    }
++
++    fn open_pcm_at(&self, rate: u32) -> Result<*mut c_void, AudioError> {
+         let mut last = AudioError::NoDevice;
+         for name in DEVICES {
+             let Ok(cname) = CString::new(name) else {
+@@ -200,18 +221,21 @@ struct Playback {
+ 
+ fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
+     let alsa = Alsa::load()?;
+-    let pcm = match alsa.open_pcm(sample_rate) {
+-        Ok(pcm) => Some(pcm),
++    let (pcm, rate) = match alsa.open_pcm(sample_rate) {
++        Ok((pcm, rate)) => (Some(pcm), rate),
+         Err(e) => {
+             eprintln!("slot: audio: {e}, retrying");
+-            None
++            (None, sample_rate)
+         }
+     };
+-    ring.reopen(sample_rate);
++    // The rate the device accepted, not the one we asked for: emu.rs builds its
++    // resampler from whatever the ring reports, so this is what makes a device
++    // that will not run at the core's rate work at all.
++    ring.reopen(rate);
+     Ok(Playback {
+         alsa,
+         pcm,
+-        rate: sample_rate,
++        rate,
+         failing: pcm.is_none(),
+     })
+ }
+@@ -230,9 +254,16 @@ impl Playback {
+                     eprintln!("slot: audio released after silence");
+                 }
+                 (None, true) => match self.alsa.open_pcm(self.rate) {
+-                    Ok(pcm) => {
++                    Ok((pcm, rate)) => {
+                         eprintln!("slot: audio reopened at {:.1} ms", crate::boot_time::ms());
+                         self.pcm = Some(pcm);
++                        // A reopen can land on a different rate than the first
++                        // open did, and the ring has to follow or the resampler
++                        // in emu.rs converts to the wrong target.
++                        if rate != self.rate {
++                            self.rate = rate;
++                            ring.reopen(rate);
++                        }
+                         self.failing = false;
+                     }
+                     Err(e) => {
