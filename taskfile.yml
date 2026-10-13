@@ -366,6 +366,17 @@ tasks:
     cmds:
       - sh tools/device-sh.sh {{.DEVICE}} '{{.CMD}}'
 
+  stop:
+    desc: >-
+      Stop slot on the handheld and hand the screen back to Allium. slot has no
+      quit of its own -- its power menu only offers Restart and Power Off, since
+      on the Anbernic handhelds it *is* the launcher -- so rebooting is
+      otherwise the only way out
+    deps: [device:check]
+    cmds:
+      - sh tools/device-sh.sh {{.DEVICE}} 'killall slot 2>/dev/null; sleep 1; ps | grep -c "[S]ystem/slot"'
+      - 'echo "(a count of 0 above means it stopped)"'
+
   log:
     desc: Fetch slot.log (and any traces) off the handheld over FTP
     deps: [device:check]

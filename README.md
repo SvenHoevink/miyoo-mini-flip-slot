@@ -361,6 +361,11 @@ The button map is in `patches/0003`; the gestures are upstream's, from
 an ARM JIT — the whole reason this port builds it. The choice is per game and
 is kept in `Config/selected_core.txt`.
 
+**slot has no quit.** Its power menu offers only Restart and Power Off, because
+on the Anbernic handhelds it replaces the launcher and there is nothing to
+return to. On an Allium card there is, so `task stop` kills it over telnet and
+hands the screen back — much better than rebooting, which also drops the WiFi.
+
 slot boots straight into whatever cart was last seated — that is intended, not
 a fault: the cart is remembered in `Config/slot.state` and re-seated at startup,
 so the handheld behaves as though you left it in the slot. Ejecting clears it
