@@ -303,11 +303,20 @@ In game, averaged over the in-game window of a 442 s run:
 read>pad 14.0  pad>emu 0.4  emu>pub 5.4  pub>take 1.3  take>swapped 14.6  (swap 6.6)
 ```
 
-`swap` is `FBIOPAN_DISPLAY` with `FB_ACTIVATE_NOW`, which should return at once.
-**6.6 ms** is instead what a whole-page copy costs here: 752 x 560 x 4 = 1.68 MB
-at roughly the bandwidth the rest of the backend sees. The log confirms the
-cheap path was taken (`fb: FBIOPAN_DISPLAY ok, 3 pages, vsync wait off`), so
-this is the driver's own pan, not the `PUT_VSCREENINFO` fallback.
+`swap` is `FBIOPAN_DISPLAY` with `FB_ACTIVATE_NOW`.
+
+**This was first read as a whole-page copy -- 1.68 MB at the bandwidth the rest
+of the backend sees is about 6.6 ms, which fits suspiciously well. It is not.**
+It is a vblank wait, so those 6.6 ms are idle CPU, not spent work. The evidence
+is `Pacer`: it learns its period only from frames where the swap blocked, and
+it converged on **16.77 ms**, which is the panel at 60 Hz. A driver that copied
+the page would have let the loop land anywhere; one that waits for the blank
+pins it to the panel's period, which is what happened.
+
+So the panel is 60 Hz and the median frame always fitted. What does not fit is
+the spikes -- 30-50 ms, and `read>pad` / `pad>emu` / `pub>take` say they are
+input and `advance`, not the renderer. Averaging over a window that includes
+them is what made the frame look uniformly over budget.
 
 That cost was invisible for a long time because `Pacer` measures `work` from the
 top of the loop to the swap and not through it, so "work 15.5 ms, zero frames
@@ -336,10 +345,34 @@ Measured with it on, same game:
 | resample factor (`SLOT_TRACE`) | 1.37 | 0.94-0.96 |
 | frames missing a latch, per 600 in game | ~200 | **5-9** |
 
-Smooth in the hand and **no tearing reported**, which makes sense: `swap` reads
-0.0 ms, so this driver ignores `FBIO_WAITFORVSYNC` as well, and the panel is
-simply latching whole frames out of a buffer slot writes at a steady 60 Hz.
-slot's own pacer is now the only clock in the loop, which is what it is for.
+**Reverted: it tears**, on the shelf and in game both. With one page the
+renderer writes into the buffer being scanned out, and `swap` reading 0.0 ms
+says this driver ignores `FBIO_WAITFORVSYNC` too, so there is nothing left to
+synchronise against. The page flip is the only way to get a coherent frame
+here, and its vblank wait is the price.
+
+What the single-page run did prove is that the 6.6 ms was never the frontend's
+to spend: giving it back did not make the frame cheaper, it only removed the
+synchronisation.
+
+### So the core is unchained from the display instead (`SLOT_DRIVE_EMU=0`)
+
+Driven mode makes the emulator wait for a present tick, so the display's rate
+becomes the machine's rate: a display dragged to 50 Hz by spikes is a 50 Hz
+Game Boy, slow motion with the audio stretched to match. That stretch is not
+drift -- `rate.served` measures the real tick interval and the resampler
+follows it honestly, which is where 1.37 came from.
+
+Unchained, the core keeps its own 59.73 Hz and the display drops what it cannot
+fit. Measured: `locked false at 0.00000`, so the resampler sits at 1.0 and the
+pitch is right; frames missing a latch fell from ~200 per 600 to **21-38**; and
+the tearing is gone.
+
+The cost moved to the ring. Nothing stretches the audio over a spike any more,
+so a 30-50 ms spike simply drains it: `queued` was measured at **540 frames
+against a 3200 target**, 11 ms from empty. Hence `RING_FRAMES` 12 rather than
+upstream's 8 -- 200 ms of ring, half of it the target -- which gives the
+self-paced core room to catch up. `SLOT_RING_FRAMES` tunes it.
 
 What is left: the shelf costs **28.8 ms a frame** in sprites over 194 draws now
 that it fills the panel, so the menu runs at about 35 Hz. Nothing depends on
