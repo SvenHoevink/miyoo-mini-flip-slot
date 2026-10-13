@@ -1,5 +1,5 @@
 diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
-index b9d1a71..2471ac3 100644
+index b9d1a71..615d9f4 100644
 --- a/crates/slot/src/audio/alsa.rs
 +++ b/crates/slot/src/audio/alsa.rs
 @@ -78,7 +78,28 @@ impl Alsa {
@@ -87,7 +87,7 @@ index b9d1a71..2471ac3 100644
          let mut written = 0;
          while written < PERIOD_FRAMES {
              let at = written * CHANNELS as usize;
-@@ -267,6 +301,21 @@ impl Playback {
+@@ -267,7 +301,33 @@ impl Playback {
                  )
              };
              if frames < 0 {
@@ -101,11 +101,23 @@ index b9d1a71..2471ac3 100644
 +                if frames == -512 || frames == -4 {
 +                    retries += 1;
 +                    if retries > INTERRUPT_RETRIES {
-+                        eprintln!("slot: audio: interrupted {retries} times, giving up");
++                        eprintln!("slot: audio: write interrupted {retries} times, giving up");
 +                        return false;
 +                    }
 +                    continue;
 +                }
                  let err = unsafe { (self.alsa.recover)(pcm, frames as c_int, 1) };
++                if err == -512 || err == -4 {
++                    // recover() can be interrupted the same way the write was,
++                    // and this driver returns ERESTARTSYS from it too. Nothing
++                    // is wrong with the stream; try again.
++                    retries += 1;
++                    if retries > INTERRUPT_RETRIES {
++                        eprintln!("slot: audio: recover interrupted {retries} times, giving up");
++                        return false;
++                    }
++                    continue;
++                }
                  if err < 0 {
                      eprintln!("slot: audio: {}", self.alsa.message(err));
+                     return false;

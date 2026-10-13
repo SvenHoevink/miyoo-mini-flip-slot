@@ -77,7 +77,13 @@ libmi_venc.so   libmi_wlan.so
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
 - `libmi_ao.so` — audio out, used by Allium via FFI.
-- **ALSA runs at 48 kHz and has no `plug` plugin.** `plug:default` and
+- **The driver leaks `ERESTARTSYS`.** `snd_pcm_writei` and `snd_pcm_recover`
+  both return `-512` when a signal interrupts them, which `snd_strerror` renders
+  as "Unknown error 512". It is kernel-internal and should never reach
+  userspace. Treating it as fatal killed the sink on its first write and the
+  ring then overflowed — 417,000 samples dropped in a session, heard as a pop
+  every second or two. Both calls retry it now.
+- **ALSA runs at 48 kHz and has `plug`, but it cannot resample to 32768.** `plug:default` and
   `plughw:0,0` do not open at all, so there is no resampling plugin to fall back
   on, and `hw:0,0` rejects the core's 32768 Hz outright: "Rate doesn't match
   (requested 32768Hz, get 48000Hz)". `patches/0005` opens at a rate the hardware
@@ -92,22 +98,50 @@ libmi_venc.so   libmi_wlan.so
   so the library and the PCM are both there and something else was holding the
   device. An `MI_AO` sink may still be wanted, but it is not forced.
 
-## The lid is a pulse, not a state
+## The lid: poll `hallvalue`, there are no events
 
-The hall sensor does not hold a value while the clamshell is shut. It emits a
-momentary `KEY_POWER` press and release **in the same millisecond**:
+**Resolved.** The clamshell sensor is a platform device and exposes its state at
+
+```
+/sys/devices/soc0/soc/soc:hall-mh248/hallvalue     1 open, 0 closed
+```
+
+which is the same convention slot's `read_lid` already expects — it was only
+looking under `/sys/class/power_supply`, which this device does not have at all.
+`patches/0003` points it at the right file and keeps upstream's search as the
+fallback.
+
+Sampling it once a second across a lid cycle, written to the card so the record
+survives the device suspending, gave: `1` throughout, then a single `0`, then
+nothing — **the system suspends about a second after the lid shuts**. So there
+is one poll's worth of warning and no more, and nothing at all to count edges
+from, which settles the question below.
+
+### Why not events
+
+The sensor emits no evdev events for a lid cycle. Five or six cycles produced
+nothing on `event1`; the single `KEY_POWER` pulse in the trace came at 8 s
+uptime, i.e. boot. The pops heard on each transition are the amplifier powering,
+not something slot can see.
+
+### The old note, kept because it was wrong in an instructive way
+
+
+
+The one pulse that *was* captured looked like the whole story, and it is not —
+it is the boot-time one. It emits a momentary `KEY_POWER` press and release in
+the same millisecond:
 
 ```
 35994ms event1 type=0x01 code=0x74(116) value=1 -> Power
 35994ms event1 type=0x01 code=0x74(116) value=0 -> Power
 ```
 
-So `Btn::Lid`, which slot models as a held state via `SW_LID`, cannot be driven
-from it directly: something has to turn edges into a state. Only one pulse has
-been captured so far, so it is not yet known whether both transitions emit one,
-or only the close, or only the open — which decides whether a toggle is safe or
-whether the state has to come from somewhere else. More lid cycles needed before
-writing any of it.
+Concluding from it that the lid had to be driven by edges would have been
+wrong, and would have rebuilt the same guesswork that made closing the lid shut
+the handheld down in the first place. More cycles showed there were no further
+events at all, and the state file turned up by searching sysfs for the chip name
+from the probe.
 
 ## Panel orientation
 

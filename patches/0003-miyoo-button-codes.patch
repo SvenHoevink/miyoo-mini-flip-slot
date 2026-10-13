@@ -1,5 +1,5 @@
 diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
-index 9f71f9d..b092769 100644
+index 9f71f9d..4032746 100644
 --- a/crates/slot/src/input/device.rs
 +++ b/crates/slot/src/input/device.rs
 @@ -46,9 +46,18 @@ impl DeviceInput {
@@ -66,6 +66,31 @@ index 9f71f9d..b092769 100644
                  _ => events.extend(to_raw(ev)),
              }
          }
+@@ -201,7 +238,24 @@ impl InputSource for DeviceInput {
+     }
+ }
+ 
++/// Where this device exposes its clamshell sensor.
++///
++/// slot looks for a `hallkey` under `/sys/class/power_supply`, and the Miyoo
++/// Mini Flip has no `power_supply` directory at all. Its hall sensor is a
++/// platform device instead, with the same one-byte state file under another
++/// name -- and the same convention, 1 open and 0 closed, confirmed by sampling
++/// it across a lid cycle.
++///
++/// Reading a state is also the only thing that can work here: the sensor emits
++/// no evdev events for a lid cycle (its one `KEY_POWER` pulse comes at boot),
++/// and the system suspends a moment after the lid shuts, so there is a single
++/// poll's worth of warning and nothing to count edges from.
++const HALL_FILES: [&str; 1] = ["/sys/devices/soc0/soc/soc:hall-mh248/hallvalue"];
++
+ fn find_hall(psy: &Path) -> Option<PathBuf> {
++    if let Some(p) = HALL_FILES.iter().map(Path::new).find(|p| p.is_file()) {
++        return Some(p.to_path_buf());
++    }
+     let mut supplies: Vec<PathBuf> = std::fs::read_dir(psy)
+         .ok()?
+         .filter_map(|e| e.ok())
 diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
 index 02cc4bb..c4de188 100644
 --- a/crates/slot/src/input/evdev.rs
