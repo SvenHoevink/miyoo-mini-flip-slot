@@ -197,7 +197,11 @@ tasks:
       # for Allium. The launcher that isn't in use simply ignores the other.
       - cp -R card/App {{.OUT}}/App
       - cp -R card/Apps {{.OUT}}/Apps
-      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh {{.OUT}}/System/
+      # Upstream's own card scripts first -- slot shells out to slotlink.sh and
+      # friends, and logs an error for each one it cannot find -- then ours on
+      # top, which replaces its launch_frontend.sh with the armv7 one.
+      - cp -R {{.UPSTREAM}}/card/System/. {{.OUT}}/System/
+      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/net-up.sh {{.OUT}}/System/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
       - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/*.sh {{.OUT}}/App/*/launch.sh {{.OUT}}/Apps/*/launch.sh

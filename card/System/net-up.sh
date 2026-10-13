@@ -50,35 +50,64 @@ if [ -r "$creds" ]; then
 	fi
 fi
 
-[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
+# Keep trying, rather than giving up. The first version made one attempt and
+# waited 45 s, which is enough when the radio is already associated but not from
+# a cold boot -- and when slot is the boot process there is no Allium menu to
+# run this from by hand, so a single failure means fetching the SD card. An
+# attempt costs nothing while it is idle, so it retries for as long as it takes.
+attempt=1
+while :; do
+	[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
 
-# An address, not the internet, and bounded so this can never look like a hang.
-addr=""
-n=0
-while [ $n -lt 45 ]; do
-	addr=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-	[ -n "$addr" ] && break
-	n=$((n + 1))
-	sleep 1
+	# Association first: it and DHCP fail for different reasons.
+	assoc=""
+	n=0
+	while [ $n -lt 25 ]; do
+		state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+		[ "$state" = "COMPLETED" ] && assoc=1 && break
+		essid=$(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p')
+		[ -n "$essid" ] && assoc=1 && break
+		n=$((n + 1))
+		sleep 1
+	done
+
+	# wifi-on.sh starts udhcpc before the link is up, so that attempt has
+	# already given up by now; ask again.
+	addr=""
+	if [ -n "$assoc" ]; then
+		udhcpc -i wlan0 -n -q -t 5 -T 2 -s /etc/init.d/udhcpc.script > /dev/null 2>&1
+		m=0
+		while [ $m -lt 20 ]; do
+			addr=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+			[ -n "$addr" ] && break
+			m=$((m + 1))
+			sleep 1
+		done
+	fi
+
+	if [ -n "$addr" ]; then
+		log "attempt $attempt: associated, address $addr"
+		break
+	fi
+
+	log "attempt $attempt: ${assoc:+associated, no lease}${assoc:-no association} after ${n}s"
+	[ "$attempt" = 1 ] && {
+		log "  driver module: $(grep -c 8188fu /proc/modules 2>/dev/null) (want 1)"
+		log "  supplicant: $(pgrep wpa_supplicant > /dev/null 2>&1 && echo running || echo no)"
+		log "  config: $(wc -c < "$conf" 2>/dev/null || echo 0) bytes"
+	}
+	sync
+	attempt=$((attempt + 1))
+	sleep 20
 done
 
-if [ -z "$addr" ]; then
-	log "wlan0 has no address after ${n}s"
-	log ""
-	log "  driver module: $(grep -c 8188fu /proc/modules 2>/dev/null) (want 1)"
-	log "  supplicant: $(pgrep wpa_supplicant > /dev/null 2>&1 && echo running || echo no)"
-	log "  config: $(wc -c < "$conf" 2>/dev/null || echo 0) bytes"
-	sync
-	exit 1
-fi
-
-log "address: $addr"
 # setsid so they outlive whatever started this.
 pgrep telnetd > /dev/null 2>&1 || setsid telnetd -l sh > /dev/null 2>&1 || telnetd -l sh > /dev/null 2>&1
-pgrep tcpsvd > /dev/null 2>&1 || setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
-log "telnet: $(pgrep telnetd > /dev/null 2>&1 && echo up || echo down)"
 # tcpsvd is the listener; ftpd is only spawned per connection, so looking for
 # ftpd reports "down" while FTP is serving perfectly well.
+pgrep tcpsvd > /dev/null 2>&1 || setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
+sleep 1
+log "telnet: $(pgrep telnetd > /dev/null 2>&1 && echo up || echo down)"
 log "ftp:    $(pgrep tcpsvd > /dev/null 2>&1 && echo up || echo down)"
 log ""
 log "on the computer:  export SLOT_DEVICE=$addr"
