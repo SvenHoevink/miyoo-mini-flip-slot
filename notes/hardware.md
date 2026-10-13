@@ -377,6 +377,21 @@ not run: GB and GBC are 160x144 inside the 240x160 buffer, so the source and
 picture rects are partial and the scale is 4.5x across, not 3x. The lookup only
 ever fits GBA.
 
+### The sprite path
+
+Measured at a fixed draw count, which is the only way these numbers mean
+anything:
+
+| | sprites at 186 draws |
+|---|---|
+| before | 12.0 ms |
+| after the divide and bounds checks came out | **9.7 ms** |
+
+About 19%, or 0.052 ms a draw. It does not touch gameplay — `sprites 0.0 over
+0 draws` there — and was never going to: the shelf and menus are what it is
+for. A 20.6 ms reading taken in between was a busier screen, not a regression,
+which is why the draw count is logged alongside now.
+
 ### NEON will not come for free here
 
 The horizontal scale makes the source read a **gather** — each output column
