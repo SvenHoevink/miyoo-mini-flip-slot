@@ -1969,10 +1969,10 @@ index 0000000..22c73ca
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..061b45f
+index 0000000..4d7a3bb
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,311 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2059,25 +2059,33 @@ index 0000000..061b45f
 +
 +/// src-over, both sides straight (non-premultiplied) alpha.
 +#[inline]
++/// Divide by 255, rounding, without dividing.
++///
++/// The blend did this three times per pixel and a divide is the most expensive
++/// thing in it; the sprite pass costs 12 ms a frame on a busy menu. Exact for
++/// every value a blend can produce, which the tests check exhaustively rather
++/// than by sampling.
++#[inline(always)]
++fn div255(x: u32) -> u32 {
++    let x = x + 128;
++    (x + (x >> 8)) >> 8
++}
++
++#[inline(always)]
 +fn blend(dst: &mut [u8], src: [u8; 4]) {
 +    let a = src[3] as u32;
 +    if a == 0 {
 +        return;
 +    }
 +    if a == 255 {
-+        dst[0] = src[0];
-+        dst[1] = src[1];
-+        dst[2] = src[2];
-+        dst[3] = 255;
++        dst[..4].copy_from_slice(&src);
 +        return;
 +    }
 +    let ia = 255 - a;
 +    for i in 0..3 {
-+        // +127 rounds instead of truncating, which keeps long fade animations
-+        // from settling a shade dark.
-+        dst[i] = ((src[i] as u32 * a + dst[i] as u32 * ia + 127) / 255) as u8;
++        dst[i] = div255(src[i] as u32 * a + dst[i] as u32 * ia) as u8;
 +    }
-+    dst[3] = (a + dst[3] as u32 * ia / 255).min(255) as u8;
++    dst[3] = (a + div255(dst[3] as u32 * ia)).min(255) as u8;
 +}
 +
 +#[inline]
@@ -2158,32 +2166,37 @@ index 0000000..061b45f
 +        let v = (py as f32 + 0.5 - y) / h;
 +        let sy = ((v * tex.h as f32) as i32).clamp(0, tex.h as i32 - 1) as usize;
 +        let src_row = sy * tw * 4;
-+        let mut di = (py as usize * dw + x0 as usize) * 4;
-+        for &c in col.iter().take(width) {
-+            let si = src_row + c as usize * 4;
-+            let a = tex.px[si + 3];
++        let dstart = (py as usize * dw + x0 as usize) * 4;
++
++        // Row slices and fixed-size reads, so the bounds checks fall away: this
++        // is four of them per pixel otherwise, and the sprite pass is the whole
++        // cost of a busy menu.
++        let Some(trow) = tex.px.get(src_row..src_row + tw * 4) else {
++            continue;
++        };
++        let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
++            continue;
++        };
++
++        for (d, &c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++            // SAFETY: `c` is a texel index clamped to tex.w - 1 when the column
++            // table was built, times four, and `trow` is one whole source row.
++            let s = unsafe { &*(trow.as_ptr().add(c as usize * 4) as *const [u8; 4]) };
++            let a = s[3];
 +            if a == 0 {
 +                // Cart art is mostly rounded corners and padding; skipping the
 +                // blend here is most of the saving on the shelf.
-+                di += 4;
 +                continue;
 +            }
-+            if plain && a == 255 {
-+                dst.px[di..di + 4].copy_from_slice(&tex.px[si..si + 4]);
-+                di += 4;
++            if plain {
++                if a == 255 {
++                    d.copy_from_slice(s);
++                } else {
++                    blend(d, *s);
++                }
 +                continue;
 +            }
-+            let mut s = [
-+                tex.px[si],
-+                tex.px[si + 1],
-+                tex.px[si + 2],
-+                a,
-+            ];
-+            if !plain {
-+                s = modulate(s, colour);
-+            }
-+            blend(&mut dst.px[di..di + 4], s);
-+            di += 4;
++            blend(d, modulate(*s, colour));
 +        }
 +    }
 +}
@@ -2230,6 +2243,44 @@ index 0000000..061b45f
 +            let s = modulate(tex.sample(u, v), colour);
 +            let i = dst.idx(px as u32, py as u32);
 +            blend(&mut dst.px[i..i + 4], s);
++        }
++    }
++}
++
++#[cfg(test)]
++mod blend_tests {
++    use super::{blend, div255};
++
++    /// The old blend divided by 255 after adding 127. Prove the replacement is
++    /// the same function over every value a blend can produce -- src * a +
++    /// dst * (255 - a) peaks at 255 * 255 -- rather than trusting the identity.
++    #[test]
++    fn div255_matches_the_division_everywhere() {
++        for x in 0..=(255u32 * 255 + 255) {
++            assert_eq!(div255(x), (x + 127) / 255, "div255({x})");
++        }
++    }
++
++    /// And the blend itself, against the arithmetic it replaced, for every
++    /// alpha and a spread of colours.
++    #[test]
++    fn blend_matches_the_old_arithmetic() {
++        for a in 0..=255u32 {
++            for s in (0..=255u32).step_by(17) {
++                for d in (0..=255u32).step_by(17) {
++                    let mut got = [d as u8; 4];
++                    blend(&mut got, [s as u8, s as u8, s as u8, a as u8]);
++
++                    let want = if a == 0 {
++                        d as u8
++                    } else if a == 255 {
++                        s as u8
++                    } else {
++                        ((s * a + d * (255 - a) + 127) / 255) as u8
++                    };
++                    assert_eq!(got[0], want, "a={a} s={s} d={d}");
++                }
++            }
 +        }
 +    }
 +}
