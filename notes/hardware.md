@@ -377,6 +377,22 @@ not run: GB and GBC are 160x144 inside the 240x160 buffer, so the source and
 picture rects are partial and the scale is 4.5x across, not 3x. The lookup only
 ever fits GBA.
 
+### What is left in the game pass: probably nothing cheap
+
+Per frame in play the backend writes the 1.38 MB of the framebuffer itself,
+which is the frame and cannot go away, plus about 829 KB into the `line`
+intermediate — one expanded row per *source* row, 144 of them for GB.
+
+That intermediate is worth keeping, not fusing away. It exists so each source
+row's gather happens once and is reused across the three-odd output rows that
+map to it, and so the NEON kernel reads linearly. Removing it would multiply the
+scattered reads by that factor and break the vectorised path.
+
+The canvas round trip is already gone: the game pass writes straight into the
+framebuffer when the display list is only the game, which the profile shows as
+`game N (inside out)`. Anyone looking at this again should profile *inside* the
+game pass, splitting expansion from scale, before changing anything.
+
 ### The sprite path
 
 Measured at a fixed draw count, which is the only way these numbers mean
