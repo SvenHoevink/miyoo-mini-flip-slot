@@ -611,10 +611,10 @@ index 0000000..cf46e75
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..5fb650f
+index 0000000..a65bb2f
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1478 @@
+@@ -0,0 +1,1492 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1058,6 +1058,11 @@ index 0000000..5fb650f
 +    /// budget on average; this says whether the stutters are the renderer.
 +    worst_us: u64,
 +    frame_us: u64,
++    /// Draws that took the row-reuse path in the sprite blit, and draws that
++    /// gathered per destination row instead. The reuse only pays scaling up, so
++    /// this says whether the shelf is even reaching it.
++    reused: u64,
++    gathered: u64,
 +    /// Sprites drawn in the window, so the sprite cost can be read per draw
 +    /// rather than per frame. Without it two captures of "the shelf" are not
 +    /// comparable: its cost scales with how many carts and labels are on
@@ -1102,6 +1107,11 @@ index 0000000..5fb650f
 +                2 => "separable",
 +                _ => "none",
 +            }
++        );
++        eprintln!(
++            "slot: soft: sprite rows reused on {} draws, gathered on {} (reuse only pays scaling up)",
++            self.reused / n.max(1),
++            self.gathered / n.max(1),
 +        );
 +        *self = Profile {
 +            path: self.path,
@@ -1374,9 +1384,13 @@ index 0000000..5fb650f
 +
 +    fn draw_sprites(&mut self, items: &[Draw]) {
 +        let t = std::time::Instant::now();
++        self.scratch.reused = 0;
++        self.scratch.direct = 0;
 +        self.draw_sprites_inner(items);
 +        if self.profiling {
 +            self.profile.draws += items.len() as u64;
++            self.profile.reused += self.scratch.reused as u64;
++            self.profile.gathered += self.scratch.direct as u64;
 +            { let us = t.elapsed().as_micros() as u64; self.profile.sprite_us += us; self.profile.frame_us += us; }
 +        }
 +    }
@@ -2095,10 +2109,10 @@ index 0000000..5fb650f
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..c32c06c
+index 0000000..72ee0b2
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,544 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2269,6 +2283,12 @@ index 0000000..c32c06c
 +pub struct Scratch {
 +    col: Vec<u32>,
 +    line: Vec<u8>,
++    /// Draws that took the row-reuse path, and draws that did not, since the
++    /// last read. The reuse only pays where a sprite is scaled *up*, and the
++    /// shelf's gain from it measured as nothing -- which it would, if the shelf
++    /// scales its box art down. Worth knowing before optimising it again.
++    pub reused: u32,
++    pub direct: u32,
 +}
 +
 +/// An axis-aligned textured rect, nearest-sampled.
@@ -2328,6 +2348,11 @@ index 0000000..c32c06c
 +    let reuse = h >= tex.h as f32;
 +    if reuse && scratch.line.len() != width * 4 {
 +        scratch.line.resize(width * 4, 0);
++    }
++    if reuse {
++        scratch.reused += 1;
++    } else {
++        scratch.direct += 1;
 +    }
 +    let mut built: Option<usize> = None;
 +    let mut opaque = false;
@@ -2673,10 +2698,47 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..7724105 100644
+index cada2b8..e9b713b 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
-@@ -128,7 +128,21 @@ pub fn run() {
+@@ -20,8 +20,18 @@ struct Pacer {
+     work: Duration,
+     works: [Duration; WORK_WINDOW],
+     next: usize,
++    /// Loop intervals, bucketed. `missed` only counts how many were over 25 ms,
++    /// which cannot tell a frame that waited a second blank from one that went
++    /// badly wrong -- and with `work` measuring 12.7 ms against a 16.77 ms
++    /// period, half the loop being over 25 ms should not happen at all.
++    seen: [u32; SEEN_BUCKETS],
+ }
+ 
++/// Upper edge of each bucket, in ms: under a period, about one period, about
++/// two, about three, and worse.
++const SEEN_EDGES: [u64; 4] = [14, 20, 27, 40];
++const SEEN_BUCKETS: usize = SEEN_EDGES.len() + 1;
++
+ const WORK_WINDOW: usize = 32;
+ 
+ impl Pacer {
+@@ -32,6 +42,7 @@ impl Pacer {
+             work: Duration::from_millis(4),
+             works: [Duration::from_millis(4); WORK_WINDOW],
+             next: 0,
++            seen: [0; SEEN_BUCKETS],
+         }
+     }
+ 
+@@ -50,6 +61,9 @@ impl Pacer {
+         let mut missed = false;
+         if let Some(last) = self.last_return {
+             let seen = now - last;
++            let ms = seen.as_millis() as u64;
++            let at = SEEN_EDGES.iter().position(|&e| ms < e).unwrap_or(SEEN_EDGES.len());
++            self.seen[at] += 1;
+             missed = seen > self.period.mul_f64(1.5);
+             if blocked && seen > Duration::from_millis(12) && seen < Duration::from_millis(22) {
+                 self.period = self.period.mul_f64(0.95) + seen.mul_f64(0.05);
+@@ -128,7 +142,21 @@ pub fn run() {
          .name("slot-bootlogo".into())
          .spawn(move || slot::bootlogo::refresh(&card));
      let mut drawn = false;
@@ -2699,7 +2761,7 @@ index cada2b8..7724105 100644
      let mut pacer = Pacer::new();
      let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
      loop {
-@@ -152,6 +166,15 @@ pub fn run() {
+@@ -152,6 +180,15 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
@@ -2715,3 +2777,18 @@ index cada2b8..7724105 100644
          let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
          if slot::latency::tracing() {
              frames += 1;
+@@ -159,10 +196,12 @@ pub fn run() {
+             early += u32::from(swap_took > pacer.period / 2);
+             if frames == 600 {
+                 eprintln!(
+-                    "slot: pace: 600 frames, {missed} missed a latch, {early} drawn early, work {:.1} ms, period {:.2} ms",
++                    "slot: pace: 600 frames, {missed} missed a latch, {early} drawn early, work {:.1} ms, period {:.2} ms, interval <14 {} <20 {} <27 {} <40 {} 40+ {}",
+                     pacer.work.as_secs_f64() * 1e3,
+-                    pacer.period.as_secs_f64() * 1e3
++                    pacer.period.as_secs_f64() * 1e3,
++                    pacer.seen[0], pacer.seen[1], pacer.seen[2], pacer.seen[3], pacer.seen[4],
+                 );
++                pacer.seen = [0; SEEN_BUCKETS];
+                 (frames, missed, early) = (0, 0, 0);
+             }
+         }
