@@ -26,10 +26,18 @@ log ""
 # otherwise has to be set up through Allium's own settings first.
 creds="$root/slot-wifi.txt"
 if [ -r "$creds" ]; then
-	ssid=$(sed -n '1p' "$creds" | tr -d '\r\n')
-	psk=$(sed -n '2p' "$creds" | tr -d '\r\n')
+	# Skip comments and blanks so the file can explain itself: the first real
+	# line is the network name, the second is the password.
+	real=$(grep -v '^[[:space:]]*#' "$creds" | grep -v '^[[:space:]]*$')
+	ssid=$(echo "$real" | sed -n '1p' | tr -d '\r')
+	psk=$(echo "$real" | sed -n '2p' | tr -d '\r')
 	if [ -n "$ssid" ]; then
-		log "writing $conf for network \"$ssid\""
+		if [ -n "$psk" ]; then
+			log "writing $conf for \"$ssid\" (with a password)"
+		else
+			log "writing $conf for \"$ssid\" as an OPEN network — no password"
+			log "was given on the second line, which is wrong for most networks"
+		fi
 		mkdir -p /appconfigs 2>/dev/null
 		{
 			echo "ctrl_interface=/var/run/wpa_supplicant"

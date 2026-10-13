@@ -228,10 +228,15 @@ On the handheld, once per boot, run **Apps → slot net**. It writes what happen
 to `slot-net.txt` at the card root, including the address `SLOT_DEVICE` wants,
 and diagnostics when the link does not come up.
 
-If WiFi has never been set up, put the network name on line 1 and the password
-on line 2 of **`slot-wifi.txt`** at the card root; the app writes
-`/appconfigs/wpa_supplicant.conf` from it. (Allium's own settings do the same
-job if you would rather not leave a password on the card.)
+If WiFi has never been set up, put the network name and the password on the
+first two non-comment lines of **`slot-wifi.txt`** at the card root; the app
+writes `/appconfigs/wpa_supplicant.conf` from it.
+
+This exists because **Allium's on-screen keyboard has no shift key**, so a
+network name containing capitals cannot be typed on the handheld at all — and
+SSIDs are case-sensitive, so the supplicant sits there looking for a network
+that does not exist. Setting it from the card sidesteps the keyboard entirely.
+Delete the file once WiFi works, so the password is not left on the card.
 
 It deliberately does **not** call Allium's `telnet-on.sh` and `ftp-on.sh`: both
 start with `wait-for-wifi.sh`, which pings `1.1.1.1` once a second for up to
