@@ -365,6 +365,56 @@ Ideas that do not involve killing it: find out whether Allium has a setting to
 disable its hotkey overlay, or whether its MENU handling can be suppressed per
 app from the pak's config.
 
+## Why gesture timers misfire: `advance` drops input during a rebuild
+
+Symptoms seen on the device: an 8.5 second hold of MENU producing no eject at
+all, ejects and quick menus resolving about 250 ms *after* the release rather
+than at the moment they are due, and the whole thing being intermittent.
+
+`Frontend::advance` is the cause, or at least a sufficient one:
+
+```rust
+let events = input.poll(now);
+if self.rebuild.is_some() {
+    return;                         // events discarded here
+}
+self.session.feed(events, now);     // and feed is what calls gestures.tick
+```
+
+While a label or face rebuild is running, input is polled and **thrown away**,
+and `Gestures::tick` never runs — so no hold timer advances and no press is
+recorded. A hold that spans a rebuild cannot eject, and the press that follows
+resolves against a stale clock.
+
+**Status: mechanism found, not confirmed active.** slot does not log rebuilds,
+so there is no evidence in the captured logs that one was running at the time.
+Confirming it is one `eprintln` on that early return, behind
+`SLOT_TRACE_LATENCY`.
+
+Ruled out along the way: the chord path (no SELECT events appear in any trace)
+and the double-tap path (the press in question came 671 ms after the previous
+tap, outside the 350 ms window). Both of those also clear `menu_down_at`, so
+they were worth eliminating.
+
+If it is confirmed, the fix is a judgement call rather than an obvious one.
+Upstream presumably intends input to be ignored while rebuilding; the harm here
+is that events are *discarded* rather than left queued, and that the timers stop.
+Rebuilds are also slower on this device than the hardware slot was written for.
+
+## Button bounce
+
+The polled GPIO emits spurious transitions. From the trace, three in a single
+millisecond:
+
+```
+9289ms  release
+9289ms  press
+9289ms  release
+```
+
+That alone can manufacture a double tap, which lands on the polaroids screen.
+Worth remembering before blaming gesture thresholds.
+
 ## Open problem: no battery sysfs
 
 ```
