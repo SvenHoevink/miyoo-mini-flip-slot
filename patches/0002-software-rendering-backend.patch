@@ -611,10 +611,10 @@ index 0000000..cf46e75
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..7965f23
+index 0000000..5fb650f
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1472 @@
+@@ -0,0 +1,1478 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1184,6 +1184,9 @@ index 0000000..7965f23
 +
 +pub struct Compositor {
 +    canvas: Image,
++    /// Column table and row line for the sprite blits, kept across calls and
++    /// across frames: ~190 draws a frame each allocated their own otherwise.
++    scratch: raster::Scratch,
 +    profile: Profile,
 +    profiling: bool,
 +    mount: Mount,
@@ -1223,6 +1226,7 @@ index 0000000..7965f23
 +        // signature matches the GL compositor.
 +        let mut me = Compositor {
 +            canvas: Image::new(OUT_W, OUT_H),
++            scratch: raster::Scratch::default(),
 +            profile: Profile::default(),
 +            profiling: Profile::on(),
 +            mount: Mount::from_env(),
@@ -1400,6 +1404,7 @@ index 0000000..7965f23
 +                            w,
 +                            h,
 +                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            &mut self.scratch,
 +                        );
 +                    }
 +                }
@@ -1422,6 +1427,7 @@ index 0000000..7965f23
 +                            h,
 +                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
 +                            turn,
++                            &mut self.scratch,
 +                        );
 +                    }
 +                }
@@ -2089,10 +2095,10 @@ index 0000000..7965f23
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..4d7a3bb
+index 0000000..c32c06c
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,533 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2254,14 +2260,46 @@ index 0000000..4d7a3bb
 +    }
 +}
 +
++/// Reusable per-call scratch for `blit`, owned by the compositor.
++///
++/// The column table used to be a `vec!` inside `blit`, which is an allocation
++/// and a float divide per column on every one of the shelf's ~190 draws a
++/// frame. `line` is what makes the row reuse below possible.
++#[derive(Default)]
++pub struct Scratch {
++    col: Vec<u32>,
++    line: Vec<u8>,
++}
++
 +/// An axis-aligned textured rect, nearest-sampled.
 +///
 +/// The shelf is several of these a frame, each covering a large part of the
-+/// canvas, so the per-pixel work matters as much as the game plane's. The
-+/// source column is computed once per column rather than per pixel, and the
-+/// two cases that dominate -- a fully transparent texel and a fully opaque one
-+/// at full alpha -- skip the blend entirely.
-+pub fn blit(dst: &mut Image, tex: &Image, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
++/// canvas, so the per-pixel work matters as much as the game plane's. Three
++/// things carry it:
++///
++/// - the source byte offset per destination column is computed once into
++///   `scratch.col`, so the inner loop has no float divide and no clamp;
++/// - where the sprite is scaled up, each *source* row is expanded once into
++///   `scratch.line` at destination width, with `colour` already folded in, and
++///   every destination row sharing that source row is then a sequential pass
++///   over it rather than a fresh gather. This is the same shape that took the
++///   game pass from 17.1 ms to 7.8, and for the same reason: the gather is what
++///   costs, not the arithmetic;
++/// - a line that came out fully opaque -- the wallpaper, and the solid middle
++///   of a cart -- makes each destination row a straight `copy_from_slice`.
++///
++/// Scaled *down*, no two destination rows share a source row, so the line would
++/// be pure overhead and the direct path is kept.
++pub fn blit(
++    dst: &mut Image,
++    tex: &Image,
++    x: f32,
++    y: f32,
++    w: f32,
++    h: f32,
++    colour: [f32; 4],
++    scratch: &mut Scratch,
++) {
 +    let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
 +        return;
 +    };
@@ -2271,52 +2309,98 @@ index 0000000..4d7a3bb
 +    let plain = colour == [1.0, 1.0, 1.0, 1.0];
 +    let width = (x1 - x0) as usize;
 +
-+    // Source texel per destination column, so the inner loop has no float
-+    // divide and no clamp.
-+    let mut col = vec![0u32; width];
-+    for (i, slot) in col.iter_mut().enumerate() {
++    // Source byte offset per destination column.
++    scratch.col.clear();
++    scratch.col.reserve(width);
++    for i in 0..width {
 +        let px = x0 + i as i32;
 +        let u = (px as f32 + 0.5 - x) / w;
-+        *slot = ((u * tex.w as f32) as i32).clamp(0, tex.w as i32 - 1) as u32;
++        let sx = ((u * tex.w as f32) as i32).clamp(0, tex.w as i32 - 1) as u32;
++        scratch.col.push(sx * 4);
 +    }
++    let col = &scratch.col;
 +
 +    let dw = dst.w as usize;
 +    let tw = tex.w as usize;
++    let row_bytes = tw * 4;
++
++    // Worth the line only when destination rows share source rows.
++    let reuse = h >= tex.h as f32;
++    if reuse && scratch.line.len() != width * 4 {
++        scratch.line.resize(width * 4, 0);
++    }
++    let mut built: Option<usize> = None;
++    let mut opaque = false;
++
 +    for py in y0..y1 {
 +        let v = (py as f32 + 0.5 - y) / h;
 +        let sy = ((v * tex.h as f32) as i32).clamp(0, tex.h as i32 - 1) as usize;
-+        let src_row = sy * tw * 4;
++        let src_row = sy * row_bytes;
 +        let dstart = (py as usize * dw + x0 as usize) * 4;
 +
 +        // Row slices and fixed-size reads, so the bounds checks fall away: this
 +        // is four of them per pixel otherwise, and the sprite pass is the whole
 +        // cost of a busy menu.
-+        let Some(trow) = tex.px.get(src_row..src_row + tw * 4) else {
-+            continue;
-+        };
-+        let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
++        let Some(trow) = tex.px.get(src_row..src_row + row_bytes) else {
 +            continue;
 +        };
 +
-+        for (d, &c) in drow.chunks_exact_mut(4).zip(col.iter()) {
-+            // SAFETY: `c` is a texel index clamped to tex.w - 1 when the column
-+            // table was built, times four, and `trow` is one whole source row.
-+            let s = unsafe { &*(trow.as_ptr().add(c as usize * 4) as *const [u8; 4]) };
-+            let a = s[3];
-+            if a == 0 {
-+                // Cart art is mostly rounded corners and padding; skipping the
-+                // blend here is most of the saving on the shelf.
++        if !reuse {
++            let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
 +                continue;
-+            }
-+            if plain {
-+                if a == 255 {
-+                    d.copy_from_slice(s);
-+                } else {
-+                    blend(d, *s);
++            };
++            for (d, &c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++                // SAFETY: `c` is a texel index clamped to tex.w - 1 when the
++                // column table was built, times four, and `trow` is one whole
++                // source row.
++                let s = unsafe { &*(trow.as_ptr().add(c as usize) as *const [u8; 4]) };
++                if s[3] == 0 {
++                    continue;
 +                }
++                if plain {
++                    if s[3] == 255 {
++                        d.copy_from_slice(s);
++                    } else {
++                        blend(d, *s);
++                    }
++                    continue;
++                }
++                blend(d, modulate(*s, colour));
++            }
++            continue;
++        }
++
++        if built != Some(sy) {
++            for (e, &c) in scratch.line.chunks_exact_mut(4).zip(col.iter()) {
++                // SAFETY: as above.
++                let s = unsafe { &*(trow.as_ptr().add(c as usize) as *const [u8; 4]) };
++                let s = if plain { *s } else { modulate(*s, colour) };
++                e.copy_from_slice(&s);
++            }
++            // One scan per source row buys the memcpy path below for every
++            // destination row that shares it.
++            opaque = scratch.line.chunks_exact(4).all(|p| p[3] == 255);
++            built = Some(sy);
++        }
++
++        let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
++            continue;
++        };
++        if opaque {
++            drow.copy_from_slice(&scratch.line);
++            continue;
++        }
++        for (d, s) in drow.chunks_exact_mut(4).zip(scratch.line.chunks_exact(4)) {
++            // Cart art is mostly rounded corners and padding; skipping the
++            // blend here is most of the saving on the shelf.
++            if s[3] == 0 {
 +                continue;
 +            }
-+            blend(d, modulate(*s, colour));
++            if s[3] == 255 {
++                d.copy_from_slice(s);
++                continue;
++            }
++            blend(d, [s[0], s[1], s[2], s[3]]);
 +        }
 +    }
 +}
@@ -2335,9 +2419,10 @@ index 0000000..4d7a3bb
 +    h: f32,
 +    colour: [f32; 4],
 +    turn: f32,
++    scratch: &mut Scratch,
 +) {
 +    if turn == 0.0 {
-+        blit(dst, tex, x, y, w, h, colour);
++        blit(dst, tex, x, y, w, h, colour, scratch);
 +        return;
 +    }
 +    let (sin, cos) = turn.sin_cos();
@@ -2363,6 +2448,149 @@ index 0000000..4d7a3bb
 +            let s = modulate(tex.sample(u, v), colour);
 +            let i = dst.idx(px as u32, py as u32);
 +            blend(&mut dst.px[i..i + 4], s);
++        }
++    }
++}
++
++#[cfg(test)]
++mod blit_tests {
++    use super::{blend, modulate, Image, Scratch};
++
++    /// `blit` as it was before the row line and the opaque memcpy: one gather
++    /// and one blend per destination pixel, no reuse, no special cases beyond
++    /// the fully transparent and fully opaque texel. The optimised version has
++    /// to agree with this exactly -- `task shot` cannot settle it, because the
++    /// frame it captures varies between two runs of identical code by more
++    /// pixels than this change moves.
++    fn reference(dst: &mut Image, tex: &Image, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
++        let Some((x0, y0, x1, y1)) = super::clip(dst, x, y, w, h) else {
++            return;
++        };
++        if tex.w == 0 || tex.h == 0 {
++            return;
++        }
++        let plain = colour == [1.0, 1.0, 1.0, 1.0];
++        for py in y0..y1 {
++            let v = (py as f32 + 0.5 - y) / h;
++            let sy = ((v * tex.h as f32) as i32).clamp(0, tex.h as i32 - 1) as u32;
++            for px in x0..x1 {
++                let u = (px as f32 + 0.5 - x) / w;
++                let sx = ((u * tex.w as f32) as i32).clamp(0, tex.w as i32 - 1) as u32;
++                let i = (sy as usize * tex.w as usize + sx as usize) * 4;
++                let s = [tex.px[i], tex.px[i + 1], tex.px[i + 2], tex.px[i + 3]];
++                if s[3] == 0 {
++                    continue;
++                }
++                let d = dst.idx(px as u32, py as u32);
++                if plain {
++                    if s[3] == 255 {
++                        dst.px[d..d + 4].copy_from_slice(&s);
++                    } else {
++                        blend(&mut dst.px[d..d + 4], s);
++                    }
++                } else {
++                    blend(&mut dst.px[d..d + 4], modulate(s, colour));
++                }
++            }
++        }
++    }
++
++    /// A texture with every alpha case in it: transparent, fully opaque, and a
++    /// spread in between, plus rows that are uniformly one of those so the
++    /// opaque-memcpy and skip paths both get exercised.
++    fn texture(w: u32, h: u32) -> Image {
++        let mut img = Image::new(w, h);
++        for ty in 0..h {
++            for tx in 0..w {
++                let i = (ty as usize * w as usize + tx as usize) * 4;
++                let a = match ty % 4 {
++                    0 => 255,
++                    1 => 0,
++                    2 => ((tx * 37 + ty * 11) % 256) as u8,
++                    _ => {
++                        if tx % 3 == 0 {
++                            0
++                        } else {
++                            255
++                        }
++                    }
++                };
++                img.px[i] = (tx * 7 + ty * 3) as u8;
++                img.px[i + 1] = (tx * 13 + ty * 5) as u8;
++                img.px[i + 2] = (tx * 29 + ty * 17) as u8;
++                img.px[i + 3] = a;
++            }
++        }
++        img
++    }
++
++    fn canvas(w: u32, h: u32) -> Image {
++        let mut img = Image::new(w, h);
++        for (i, b) in img.px.iter_mut().enumerate() {
++            *b = (i % 251) as u8;
++        }
++        img
++    }
++
++    #[test]
++    fn blit_matches_the_reference_at_every_scale() {
++        let tex = texture(13, 7);
++        // Upscales (where the row line pays), 1:1, downscales (where it is
++        // skipped), fractional offsets, and clipping off each edge.
++        let rects = [
++            (0.0, 0.0, 13.0, 7.0),
++            (0.0, 0.0, 39.0, 21.0),
++            (2.5, 1.5, 40.0, 30.0),
++            (1.0, 1.0, 60.0, 8.0),
++            (0.0, 0.0, 6.0, 3.0),
++            (3.0, 2.0, 7.5, 3.5),
++            (-5.0, -3.0, 30.0, 20.0),
++            (40.0, 28.0, 30.0, 20.0),
++            (0.3, 0.7, 48.0, 36.0),
++        ];
++        let colours = [
++            [1.0, 1.0, 1.0, 1.0],
++            [1.0, 1.0, 1.0, 0.5],
++            [0.5, 0.75, 0.25, 1.0],
++            [0.5, 0.75, 0.25, 0.4],
++        ];
++        let mut scratch = Scratch::default();
++        for (x, y, w, h) in rects {
++            for colour in colours {
++                let mut want = canvas(48, 36);
++                let mut got = canvas(48, 36);
++                reference(&mut want, &tex, x, y, w, h, colour);
++                super::blit(&mut got, &tex, x, y, w, h, colour, &mut scratch);
++                assert_eq!(
++                    got.px, want.px,
++                    "rect {:?} colour {colour:?}",
++                    (x, y, w, h)
++                );
++            }
++        }
++    }
++
++    /// The scratch is shared across calls and across frames, so a stale line or
++    /// column table from the previous draw must not leak into the next one.
++    /// Same draws, interleaved, through one scratch.
++    #[test]
++    fn a_shared_scratch_does_not_leak_between_draws() {
++        let a = texture(13, 7);
++        let b = texture(5, 11);
++        let mut scratch = Scratch::default();
++        let mut want = canvas(48, 36);
++        let mut got = canvas(48, 36);
++        let draws = [
++            (&a, 0.0f32, 0.0f32, 39.0f32, 21.0f32),
++            (&b, 4.0, 2.0, 40.0, 33.0),
++            (&a, 1.0, 1.0, 13.0, 7.0),
++            (&b, 0.0, 0.0, 8.0, 5.0),
++            (&a, 2.0, 3.0, 44.0, 30.0),
++        ];
++        for (tex, x, y, w, h) in draws {
++            reference(&mut want, tex, x, y, w, h, [1.0, 1.0, 1.0, 1.0]);
++            super::blit(&mut got, tex, x, y, w, h, [1.0, 1.0, 1.0, 1.0], &mut scratch);
++            assert_eq!(got.px, want.px, "after {}x{} at {x},{y}", tex.w, tex.h);
 +        }
 +    }
 +}
