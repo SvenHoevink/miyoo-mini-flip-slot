@@ -77,6 +77,12 @@ libmi_venc.so   libmi_wlan.so
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
 - `libmi_ao.so` — audio out, used by Allium via FFI.
+- **MI_AO cannot resample from the Game Boy's rate.** Its sample-rate enum is
+  literal Hz — 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+  96000 — with no 32768. `MI_AO_EnableReSmp` takes the same enum, so handing the
+  hardware resampler the core's rate is not possible; 32000 would be 2.4% out,
+  which is an audible pitch and speed error. The software resample in `emu.rs`
+  stays.
 - **Audio works through MI_AO.** Game sound and slot's own cartridge effects,
   no clicking. The cost is real: with audio dead the pacer reported work well
   under the period, and with it running it is **15.5 ms against 16.76 ms** —

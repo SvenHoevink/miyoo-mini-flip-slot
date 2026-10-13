@@ -550,10 +550,10 @@ index 0000000..a027cd1
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..22c73ca
+index 0000000..ca72703
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1413 @@
+@@ -0,0 +1,1420 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -990,6 +990,11 @@ index 0000000..22c73ca
 +    /// budget on average; this says whether the stutters are the renderer.
 +    worst_us: u64,
 +    frame_us: u64,
++    /// Sprites drawn in the window, so the sprite cost can be read per draw
++    /// rather than per frame. Without it two captures of "the shelf" are not
++    /// comparable: its cost scales with how many carts and labels are on
++    /// screen, which is exactly how an earlier sprite change went unjudgeable.
++    draws: u64,
 +    /// Whether the game went straight to the panel, skipping the canvas. When
 +    /// it did, `out` includes `game` rather than being separate work.
 +    direct: bool,
@@ -1016,12 +1021,13 @@ index 0000000..22c73ca
 +        let n = self.frames as u64;
 +        let ms = |v: u64| v as f64 / 1000.0 / n as f64;
 +        eprintln!(
-+            "slot: soft: clear {:.1} upload {:.1} game {:.1}{} sprites {:.1} out {:.1} ms/frame, worst {:.1}, game path {}",
++            "slot: soft: clear {:.1} upload {:.1} game {:.1}{} sprites {:.1} over {} draws, out {:.1} ms/frame, worst {:.1}, game path {}",
 +            ms(self.clear_us),
 +            ms(self.upload_us),
 +            ms(self.game_us),
 +            if self.direct { " (inside out)" } else { "" },
 +            ms(self.sprite_us),
++            self.draws / n,
 +            ms(self.out_us),
 +            self.worst_us as f64 / 1000.0,
 +            match self.path {
@@ -1281,6 +1287,7 @@ index 0000000..22c73ca
 +        let t = std::time::Instant::now();
 +        self.draw_sprites_inner(items);
 +        if self.profiling {
++            self.profile.draws += items.len() as u64;
 +            { let us = t.elapsed().as_micros() as u64; self.profile.sprite_us += us; self.profile.frame_us += us; }
 +        }
 +    }
