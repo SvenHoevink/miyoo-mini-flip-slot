@@ -1,5 +1,5 @@
 diff --git a/crates/slot-input/src/gesture.rs b/crates/slot-input/src/gesture.rs
-index a0837ab..86a84f0 100644
+index a0837ab..cfba5ba 100644
 --- a/crates/slot-input/src/gesture.rs
 +++ b/crates/slot-input/src/gesture.rs
 @@ -3,7 +3,19 @@ use crate::{Btn, Millis, RawEvent};
@@ -23,3 +23,29 @@ index a0837ab..86a84f0 100644
  pub const MENU_DOUBLE_TAP_MS: Millis = 350;
  pub const MENU_HOLD_MS: Millis = 1000;
  pub const FF_DOUBLE_TAP_MS: Millis = 250;
+@@ -294,7 +306,24 @@ impl Gestures {
+         };
+         let ejected = self.menu_eject_fired;
+         self.menu_eject_fired = false;
+-        let tapped = !ejected && now.saturating_sub(d) < MENU_TAP_MS;
++        let held = now.saturating_sub(d);
++        // Decide here, from how long the button was actually down, rather than
++        // relying on the hold timer in `tick` having fired. On this device it
++        // does not: an 8.5 s hold produced no eject at all, and both the ejects
++        // and the quick menus that did appear were logged ~250 ms *after* the
++        // release, which is what makes a menu seem to open while the button is
++        // still held -- it is the previous press resolving late.
++        //
++        // Short or long, the answer is settled by the release, and the two
++        // outcomes stay mutually exclusive.
++        if ejected {
++            return Vec::new();
++        }
++        if held >= MENU_HOLD_MS {
++            self.menu_last_tap = None;
++            return vec![Action::Eject];
++        }
++        let tapped = held < MENU_TAP_MS;
+         self.menu_last_tap = tapped.then_some(now);
+         match tapped {
+             true => vec![Action::QuickMenu],
