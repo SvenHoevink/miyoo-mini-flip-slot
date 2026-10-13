@@ -414,3 +414,31 @@ index aada45b..0b1eddf 100644
  }
  
  const MAX_WAIT: Duration = Duration::from_millis(50);
+diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
+index d9b2e62..1798025 100644
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -186,7 +186,22 @@ impl EmuHandle {
+         let worker_link = link.clone();
+         let join = std::thread::Builder::new()
+             .name("slot-emu".into())
+-            .spawn(move || worker.run(core, rom, ring, sav, resume, worker_link))
++            .spawn(move || {
++                // The core has a hard deadline -- a frame of audio every
++                // 16.7 ms, and nothing downstream can stretch it once the
++                // display stops driving it -- and on two cores it was the only
++                // hot thread without a priority, the audio sink and the input
++                // readers having both needed one here. Starved, it simply
++                // produces less audio than the sink consumes, which the ±0.5%
++                // of dynamic rate control cannot close.
++                //
++                // SAFETY: setpriority on the calling thread, 0 meaning "me".
++                #[cfg(target_os = "linux")]
++                unsafe {
++                    libc::setpriority(0, 0, -8);
++                }
++                worker.run(core, rom, ring, sav, resume, worker_link)
++            })
+             .ok();
+         if join.is_none() {
+             shared

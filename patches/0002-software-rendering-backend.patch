@@ -2445,7 +2445,7 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..5ed0931 100644
+index cada2b8..7724105 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
 @@ -128,7 +128,21 @@ pub fn run() {
@@ -2471,16 +2471,19 @@ index cada2b8..5ed0931 100644
      let mut pacer = Pacer::new();
      let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
      loop {
-@@ -152,7 +166,11 @@ pub fn run() {
+@@ -152,6 +166,15 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
--        let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
-+        // The swap is frame work too. This panel's pan ioctl is a page copy
-+        // costing several ms, and a pacer that does not know about it sleeps
-+        // before a frame that was always going to overrun -- two pacers in
-+        // series, which is how the in-game period drifted to 20 ms.
-+        let dropped = pacer.swapped(work + swap_took, swap_took > Duration::from_millis(1));
++        // `work` deliberately stops at the swap. It was briefly measured through
++        // it, on the theory that this panel's pan was a page copy -- it is not,
++        // it is a vblank wait, so that time is idle and counting it was wrong
++        // in a way worth naming: a frame that waits an extra blank reads as
++        // 33.5 ms of work, `work` is the window's max, and `period - (work +
++        // MARGIN)` then goes negative forever. The pacer stops sleeping
++        // entirely, the loop free-runs against MIN_FRAME at 83 Hz on a 60 Hz
++        // panel, and the core -- which has a real deadline -- is what loses the
++        // CPU. That showed up as a ring sitting permanently below its target.
+         let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
          if slot::latency::tracing() {
              frames += 1;
-             missed += u32::from(dropped);
