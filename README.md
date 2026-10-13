@@ -351,11 +351,19 @@ The button map is in `patches/0003`; the gestures are upstream's, from
 | gesture | action |
 |---|---|
 | **hold MENU ~1 s** | **eject the cart, back to the shelf** |
-| tap MENU | quick menu (brightness, volume) |
+| tap MENU | quick menu (brightness, volume) — **including in-game**, see below |
 | double-tap MENU | polaroids |
 | SELECT held, then MENU | game menu |
 | hold POWER ~1 s | power menu |
 | **START on the shelf, GBA cart selected** | **core picker: left = mGBA, right = gpSP** |
+
+**A menu tap works in-game here, unlike upstream.** slot reaches the quick menu
+only from the shelf; in-game the menu button belongs to the link menu, behind
+the select chord. This device has no link support, so that chord answers "no
+link support" and there was no way at all to reach brightness, volume or the
+screen settings without ejecting first. `patches/0007` opens the quick menu from
+a running game and returns to it on close. This is a deliberate divergence from
+upstream's UX, not a bug fix.
 
 **For GBA, pick gpSP.** mGBA has no GBA dynarec and interprets, while gpSP has
 an ARM JIT — the whole reason this port builds it. The choice is per game and

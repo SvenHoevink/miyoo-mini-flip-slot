@@ -1,0 +1,52 @@
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 9806492..849e048 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -271,6 +271,10 @@ pub struct App {
+     power_menu: Option<usize>,
+     power_menu_faces: Vec<(TexId, u32, u32)>,
+     core_picker: Option<CorePicker>,
++    /// The cart to go back to when the quick menu closes, when it was opened
++    /// from a running game rather than from the shelf. Closing otherwise drops
++    /// to the shelf, which would take the game away.
++    quick_from_play: Option<String>,
+     core_board_face: Option<TexId>,
+     core_lid_face: Option<TexId>,
+     core_faces_stem: Option<String>,
+@@ -396,6 +400,7 @@ impl App {
+             power_menu: None,
+             power_menu_faces: Vec::new(),
+             core_picker: None,
++            quick_from_play: None,
+             core_board_face: None,
+             core_lid_face: None,
+             core_faces_stem: None,
+@@ -1303,6 +1308,16 @@ impl App {
+                 }
+             }
+             Phase::QuickMenu { row } => self.quick_menu_input(row, action),
++            // A tap of menu while a game is running. Upstream leaves this to
++            // the `_` arm, so nothing happens: the quick menu is reachable only
++            // from the shelf, and in-game the menu button is for the link menu
++            // behind the select chord. This device has no link support, so
++            // without this there is no way to reach brightness, volume or the
++            // screen settings without ejecting the game first.
++            Phase::Playing { ref cart } if action == Action::QuickMenu => {
++                self.quick_from_play = Some(cart.clone());
++                self.open_quick_menu();
++            }
+             _ => {}
+         }
+     }
+@@ -1323,7 +1338,10 @@ impl App {
+             Action::GbaDown(Btn::B) | Action::QuickMenu => {
+                 self.phase = match row.parent() {
+                     Some(row) => Phase::QuickMenu { row },
+-                    None => Phase::Shelf,
++                    None => match self.quick_from_play.take() {
++                        Some(cart) => Phase::Playing { cart },
++                        None => Phase::Shelf,
++                    },
+                 };
+                 return;
+             }
