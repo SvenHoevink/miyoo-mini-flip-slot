@@ -354,11 +354,16 @@ Capturing `/dev/fb0` over the network and looking at it is what settled it,
 which is worth remembering as a diagnostic — `dd if=/dev/fb0` on the device,
 then `tools/fb2png.py`.
 
-`card/System/launch_frontend.sh` stops `alliumd` for the session and restores it
-on the way out, including on a crash, since it is also what returns the handheld
-to its launcher. On the Anbernic handhelds slot is the launcher and owns input
-outright, so this gives it the same footing rather than changing how slot
-behaves.
+**Do not kill `alliumd`.** Stopping it for the session did clear the overlay,
+but launching a game then shut the handheld down hard, three times out of four.
+Reverted. `alliumd` is started by `/customer/main` and something evidently
+depends on it staying alive; whatever that is needs understanding before this is
+tried again. A clumsy menu button is a much better problem than a device that
+cuts power mid-session.
+
+Ideas that do not involve killing it: find out whether Allium has a setting to
+disable its hotkey overlay, or whether its MENU handling can be suppressed per
+app from the pak's config.
 
 ## Open problem: no battery sysfs
 
