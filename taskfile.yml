@@ -132,6 +132,36 @@ tasks:
       - task: verify:arm
         vars: {FILE: vendor-miyoo/mgba_libretro.so}
 
+  shim:
+    desc: >-
+      Build System/libslotao.so, the MI_AO audio shim. slot dlopens it the same
+      way it dlopens libasound, so the cargo build needs no C toolchain and no
+      vendor SDK
+    deps: [image]
+    status:
+      - test -f vendor-miyoo/libslotao.so
+      - test vendor-miyoo/libslotao.so -nt shim/slotao.c
+    cmds:
+      - mkdir -p third-party vendor-miyoo
+      # The Miyoo SDK sysroot, for mi_ao.h and libmi_ao. Same tarball Allium
+      # uses, from shauninman's toolchain-buildroot.
+      - test -d third-party/my283 || { curl -fsSL -o third-party/my283.tar.xz https://github.com/shauninman/miyoomini-toolchain-buildroot/raw/main/support/my283.tar.xz && tar -xJf third-party/my283.tar.xz -C third-party/; }
+      - task: sh
+        vars:
+          CMD: >-
+            ${CROSS_COMPILE}gcc -shared -fPIC -O2
+            -march=armv7ve -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard
+            -I third-party/my283/usr/include
+            -o vendor-miyoo/libslotao.so shim/slotao.c
+            -L third-party/my283/usr/lib
+            -lmi_ao -lmi_sys -lcam_os_wrapper
+      - task: verify:arm
+        vars: {FILE: vendor-miyoo/libslotao.so}
+      - task: sh
+        vars:
+          CMD: >-
+            ${CROSS_COMPILE}nm -D --defined-only vendor-miyoo/libslotao.so | grep -c slotao_
+
   cores:
     desc: Build both libretro cores for armv7
     cmds:
@@ -177,7 +207,7 @@ tasks:
 
   dist:
     desc: Assemble the copy-to-SD-card tree, OUT defaults to ./dist
-    deps: [cores, build]
+    deps: [cores, shim, build]
     vars:
       OUT: '{{.OUT | default "dist"}}'
     cmds:
@@ -204,6 +234,7 @@ tasks:
       - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/net-up.sh {{.OUT}}/System/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
+      - cp vendor-miyoo/libslotao.so {{.OUT}}/System/
       - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/*.sh {{.OUT}}/App/*/launch.sh {{.OUT}}/Apps/*/launch.sh
       # GPL-3.0: ship the licence texts and the cores' corresponding source refs.
       - cp -R {{.UPSTREAM}}/licenses {{.OUT}}/System/licenses
@@ -344,9 +375,10 @@ tasks:
 
   deploy:
     desc: >-
-      Push the built frontend and cores to the handheld over Allium's FTP,
-      instead of moving the SD card. Needs SLOT_DEVICE set
-    deps: [device:check, build]
+      Push the built frontend, the audio shim and the card scripts to the
+      handheld over Allium's FTP, instead of moving the SD card. Needs
+      SLOT_DEVICE set
+    deps: [device:check, shim, build]
     cmds:
       # Upload beside the live binary, then rename over it. FTP truncates on
       # open, so writing straight to System/slot pulls the pages out from under
@@ -360,6 +392,7 @@ tasks:
       - curl -sS -T card/System/launch_frontend.sh "{{.FTP}}/System/launch_frontend.sh"
       - curl -sS -T card/System/probe.sh "{{.FTP}}/System/probe.sh"
       - curl -sS -T card/System/net-up.sh "{{.FTP}}/System/net-up.sh"
+      - curl -sS -T vendor-miyoo/libslotao.so "{{.FTP}}/System/libslotao.so"
       - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
 
   deploy:cores:

@@ -1,0 +1,374 @@
+diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
+index b9d1a71..7fa2cb4 100644
+--- a/crates/slot/src/audio/alsa.rs
++++ b/crates/slot/src/audio/alsa.rs
+@@ -78,7 +78,28 @@ impl Alsa {
+         }
+     }
+ 
+-    fn open_pcm(&self, rate: u32) -> Result<*mut c_void, AudioError> {
++    /// Rates to fall back to when the device will not take the core's own.
++    ///
++    /// The Miyoo Mini Flip's ALSA runs at 48 kHz and its alsa-lib has no plug
++    /// plugin -- `plug:default` and `plughw:0,0` do not open at all, and on
++    /// `hw:0,0` the soft_resample flag cannot save us: "Rate doesn't match
++    /// (requested 32768Hz, get 48000Hz)". Opening at a rate the hardware does
++    /// support costs nothing, because slot already resamples the core's output
++    /// to the device rate in `emu.rs`; it only has to be told which rate won.
++    const FALLBACK_RATES: [u32; 2] = [48_000, 44_100];
++
++    fn open_pcm(&self, rate: u32) -> Result<(*mut c_void, u32), AudioError> {
++        let mut last = AudioError::NoDevice;
++        for try_rate in std::iter::once(rate).chain(Self::FALLBACK_RATES) {
++            match self.open_pcm_at(try_rate) {
++                Ok(pcm) => return Ok((pcm, try_rate)),
++                Err(e) => last = e,
++            }
++        }
++        Err(last)
++    }
++
++    fn open_pcm_at(&self, rate: u32) -> Result<*mut c_void, AudioError> {
+         let mut last = AudioError::NoDevice;
+         for name in DEVICES {
+             let Ok(cname) = CString::new(name) else {
+@@ -196,23 +217,30 @@ struct Playback {
+     pcm: Option<*mut c_void>,
+     rate: u32,
+     failing: bool,
++    /// Whether the first write error has been reported. A Cell because the
++    /// write path takes &self.
++    said_write_error: std::cell::Cell<bool>,
+ }
+ 
+ fn play(ring: &Arc<Ring>, sample_rate: u32) -> Result<Playback, AudioError> {
+     let alsa = Alsa::load()?;
+-    let pcm = match alsa.open_pcm(sample_rate) {
+-        Ok(pcm) => Some(pcm),
++    let (pcm, rate) = match alsa.open_pcm(sample_rate) {
++        Ok((pcm, rate)) => (Some(pcm), rate),
+         Err(e) => {
+             eprintln!("slot: audio: {e}, retrying");
+-            None
++            (None, sample_rate)
+         }
+     };
+-    ring.reopen(sample_rate);
++    // The rate the device accepted, not the one we asked for: emu.rs builds its
++    // resampler from whatever the ring reports, so this is what makes a device
++    // that will not run at the core's rate work at all.
++    ring.reopen(rate);
+     Ok(Playback {
+         alsa,
+         pcm,
+-        rate: sample_rate,
++        rate,
+         failing: pcm.is_none(),
++        said_write_error: std::cell::Cell::new(false),
+     })
+ }
+ 
+@@ -230,9 +258,16 @@ impl Playback {
+                     eprintln!("slot: audio released after silence");
+                 }
+                 (None, true) => match self.alsa.open_pcm(self.rate) {
+-                    Ok(pcm) => {
++                    Ok((pcm, rate)) => {
+                         eprintln!("slot: audio reopened at {:.1} ms", crate::boot_time::ms());
+                         self.pcm = Some(pcm);
++                        // A reopen can land on a different rate than the first
++                        // open did, and the ring has to follow or the resampler
++                        // in emu.rs converts to the wrong target.
++                        if rate != self.rate {
++                            self.rate = rate;
++                            ring.reopen(rate);
++                        }
+                         self.failing = false;
+                     }
+                     Err(e) => {
+@@ -256,6 +291,9 @@ impl Playback {
+     }
+ 
+     fn write(&self, pcm: *mut c_void, buf: &[i16]) -> bool {
++        // Bounded so a genuinely wedged device cannot spin here forever.
++        const INTERRUPT_RETRIES: u32 = 64;
++        let mut retries = 0u32;
+         let mut written = 0;
+         while written < PERIOD_FRAMES {
+             let at = written * CHANNELS as usize;
+@@ -267,7 +305,39 @@ impl Playback {
+                 )
+             };
+             if frames < 0 {
++                // Say what the write actually failed with, once. The recover
++                // path below reports its own error and that turned out to be
++                // -512 persistently, which is not the interrupted-syscall case
++                // it looks like -- so the useful number is this one.
++                if !self.said_write_error.get() {
++                    self.said_write_error.set(true);
++                    eprintln!(
++                        "slot: audio: writei failed: {} ({frames})",
++                        self.alsa.message(frames as c_int)
++                    );
++                }
++                // -512 is ERESTARTSYS and -4 is EINTR: a blocking write that a
++                // signal interrupted.
++                if frames == -512 || frames == -4 {
++                    retries += 1;
++                    if retries > INTERRUPT_RETRIES {
++                        eprintln!("slot: audio: write interrupted {retries} times, giving up");
++                        return false;
++                    }
++                    continue;
++                }
+                 let err = unsafe { (self.alsa.recover)(pcm, frames as c_int, 1) };
++                if err == -512 || err == -4 {
++                    // recover() can be interrupted the same way the write was,
++                    // and this driver returns ERESTARTSYS from it too. Nothing
++                    // is wrong with the stream; try again.
++                    retries += 1;
++                    if retries > INTERRUPT_RETRIES {
++                        eprintln!("slot: audio: recover interrupted {retries} times, giving up");
++                        return false;
++                    }
++                    continue;
++                }
+                 if err < 0 {
+                     eprintln!("slot: audio: {}", self.alsa.message(err));
+                     return false;
+diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
+new file mode 100644
+index 0000000..bce10a3
+--- /dev/null
++++ b/crates/slot/src/audio/miao.rs
+@@ -0,0 +1,201 @@
++//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
++//!
++//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
++//! and at 48 kHz every write fails with `snd_pcm_recover` returning -512
++//! (ERESTARTSYS) persistently. The vendor's own stack goes through MI_AO.
++//!
++//! The vendor structs are reached through `libslotao.so`, a small C shim built
++//! against the Miyoo SDK headers (see `shim/slotao.c` in the port), rather than
++//! by describing `MI_AUDIO_Attr_t` in Rust where a wrong field offset would be
++//! silent memory corruption. It is `dlopen`ed exactly as libasound is, so the
++//! build needs no C toolchain and no vendor SDK.
++//!
++//! Unlike the ALSA sink this never releases the device on silence. Doing so is
++//! what produced a click every three seconds on this hardware, since each open
++//! and close pops the amplifier, and MI_AO is content to sit idle.
++
++use std::ffi::c_void;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{mpsc, Arc};
++use std::thread::JoinHandle;
++
++use libloading::{Library, Symbol};
++
++use super::ring::Ring;
++use super::sink::{AudioError, AudioSink};
++
++/// The rate the codec runs at. MI_AO's sample-rate enum has no 32768 entry, so
++/// the core's rate cannot be handed over directly; slot's own resampler in
++/// `emu.rs` converts to whatever the ring reports, which is set to this.
++const DEVICE_HZ: u32 = 48_000;
++const CHANNELS: u32 = 2;
++const PERIOD_FRAMES: usize = 512;
++/// Long enough that a late frame does not tear the stream, short enough that a
++/// wedged device does not hang the audio thread forever.
++const WRITE_TIMEOUT_MS: i32 = 200;
++
++const LIB_NAMES: [&str; 2] = ["libslotao.so", "/mnt/SDCARD/System/libslotao.so"];
++
++type Open = unsafe extern "C" fn(u32, u32, u32) -> i32;
++type Write = unsafe extern "C" fn(*const c_void, u32, u32, i32) -> i32;
++type Close = unsafe extern "C" fn();
++
++struct Shim {
++    open: Open,
++    write: Write,
++    close: Close,
++    _lib: Library,
++}
++
++impl Shim {
++    fn load() -> Result<Self, AudioError> {
++        let mut last = String::new();
++        for name in LIB_NAMES {
++            match unsafe { Library::new(name) } {
++                Ok(lib) => {
++                    macro_rules! sym {
++                        ($n:literal) => {{
++                            let s: Symbol<_> = unsafe { lib.get(concat!($n, "\0").as_bytes()) }
++                                .map_err(|e| AudioError::Device(format!("{}: {e}", $n)))?;
++                            unsafe { *s }
++                        }};
++                    }
++                    let open = sym!("slotao_open");
++                    let write = sym!("slotao_write");
++                    let close = sym!("slotao_close");
++                    return Ok(Shim {
++                        open,
++                        write,
++                        close,
++                        _lib: lib,
++                    });
++                }
++                Err(e) => last = format!("{name}: {e}"),
++            }
++        }
++        Err(AudioError::Device(last))
++    }
++}
++
++pub struct MiAoSink {
++    ring: Arc<Ring>,
++    device: Option<Device>,
++}
++
++struct Device {
++    stop: Arc<AtomicBool>,
++    join: JoinHandle<()>,
++}
++
++impl MiAoSink {
++    pub fn new() -> Self {
++        MiAoSink {
++            ring: Arc::new(Ring::new(0)),
++            device: None,
++        }
++    }
++
++    /// Whether the shim is present at all, so the caller can fall back to ALSA
++    /// without the cost of starting a thread that is only going to fail.
++    pub fn available() -> bool {
++        LIB_NAMES
++            .iter()
++            .any(|n| unsafe { Library::new(n) }.is_ok())
++    }
++
++    fn stop(&mut self) {
++        if let Some(d) = self.device.take() {
++            d.stop.store(true, Ordering::Relaxed);
++            let _ = d.join.join();
++        }
++    }
++}
++
++impl Default for MiAoSink {
++    fn default() -> Self {
++        MiAoSink::new()
++    }
++}
++
++impl Drop for MiAoSink {
++    fn drop(&mut self) {
++        self.stop();
++    }
++}
++
++impl AudioSink for MiAoSink {
++    fn open(&mut self, _sample_rate: u32) -> Result<(), AudioError> {
++        self.stop();
++        let ring = self.ring.clone();
++        let stop = Arc::new(AtomicBool::new(false));
++        let flag = stop.clone();
++        let (ready_tx, ready_rx) = mpsc::channel();
++
++        let join = std::thread::Builder::new()
++            .name("slot-audio-miao".into())
++            .spawn(move || {
++                let shim = match Shim::load() {
++                    Ok(s) => s,
++                    Err(e) => {
++                        let _ = ready_tx.send(Err(e));
++                        return;
++                    }
++                };
++                // SAFETY: the shim keeps its own "already open" state, and the
++                // only caller of these is this thread.
++                let err =
++                    unsafe { (shim.open)(DEVICE_HZ, CHANNELS, PERIOD_FRAMES as u32) };
++                if err != 0 {
++                    let _ = ready_tx.send(Err(AudioError::Config(format!(
++                        "MI_AO open: error {err}"
++                    ))));
++                    return;
++                }
++                // The ring, and so the resampler in emu.rs, follows the codec.
++                ring.reopen(DEVICE_HZ);
++                eprintln!("slot: audio MI_AO at {DEVICE_HZ} Hz");
++                let _ = ready_tx.send(Ok(()));
++
++                let mut buf = vec![0i16; PERIOD_FRAMES * CHANNELS as usize];
++                let mut complained = false;
++                while !flag.load(Ordering::Relaxed) {
++                    ring.fill(&mut buf);
++                    // SAFETY: buf holds PERIOD_FRAMES frames of CHANNELS i16s.
++                    let err = unsafe {
++                        (shim.write)(
++                            buf.as_ptr() as *const c_void,
++                            PERIOD_FRAMES as u32,
++                            CHANNELS,
++                            WRITE_TIMEOUT_MS,
++                        )
++                    };
++                    if err != 0 && !complained {
++                        complained = true;
++                        eprintln!("slot: audio: MI_AO send: error {err}");
++                    }
++                }
++                // SAFETY: closing what this thread opened.
++                unsafe { (shim.close)() };
++            })
++            .map_err(|e| AudioError::Device(e.to_string()))?;
++
++        match ready_rx.recv() {
++            Ok(Ok(())) => {
++                self.device = Some(Device { stop, join });
++                Ok(())
++            }
++            Ok(Err(e)) => {
++                let _ = join.join();
++                Err(e)
++            }
++            Err(_) => {
++                let _ = join.join();
++                Err(AudioError::NoDevice)
++            }
++        }
++    }
++
++    fn ring(&self) -> Arc<Ring> {
++        self.ring.clone()
++    }
++}
+diff --git a/crates/slot/src/audio/mod.rs b/crates/slot/src/audio/mod.rs
+index b841d5f..d393527 100644
+--- a/crates/slot/src/audio/mod.rs
++++ b/crates/slot/src/audio/mod.rs
+@@ -1,4 +1,5 @@
+ mod alsa;
++mod miao;
+ #[cfg(feature = "host")]
+ mod host;
+ mod ring;
+@@ -9,6 +10,7 @@ mod stub;
+ pub mod volume;
+ 
+ pub use alsa::AlsaSink;
++pub use miao::MiAoSink;
+ #[cfg(feature = "host")]
+ pub use host::HostAudio;
+ pub use ring::{ring_capacity, Ring};
+@@ -37,5 +39,10 @@ pub fn open_sink() -> Box<dyn AudioSink> {
+ 
+ #[cfg(not(feature = "host"))]
+ pub fn open_sink() -> Box<dyn AudioSink> {
++    // MI_AO where the shim is installed, which is the vendor's own path and the
++    // only one that plays on the Miyoo Mini Flip; ALSA everywhere else.
++    if MiAoSink::available() {
++        return Box::new(MiAoSink::new());
++    }
+     Box::new(AlsaSink::new())
+ }
