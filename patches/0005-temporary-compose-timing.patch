@@ -73,3 +73,24 @@ index f7f35e9..3c6d84d 100644
      }
  
      pub fn drive_emulator(&mut self) {
+diff --git a/crates/slot/src/session.rs b/crates/slot/src/session.rs
+index af87947..35daad7 100644
+--- a/crates/slot/src/session.rs
++++ b/crates/slot/src/session.rs
+@@ -158,6 +158,16 @@ impl Session {
+             actions.extend(self.gestures.feed(ev, now));
+         }
+         actions.extend(self.gestures.tick(now));
++        // Temporary, while the menu button is being sorted out: the input trace
++        // shows the events arriving, but not what the gesture engine made of
++        // them, which is where the behaviour is actually going wrong.
++        if crate::latency::tracing() {
++            for action in &actions {
++                if !matches!(action, Action::GbaDown(_) | Action::GbaUp(_)) {
++                    eprintln!("slot: gesture: {now}ms {action:?}");
++                }
++            }
++        }
+         for action in actions {
+             self.act(action);
+         }

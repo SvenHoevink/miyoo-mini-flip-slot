@@ -1,0 +1,20 @@
+diff --git a/crates/slot-input/src/gesture.rs b/crates/slot-input/src/gesture.rs
+index a0837ab..a56ae20 100644
+--- a/crates/slot-input/src/gesture.rs
++++ b/crates/slot-input/src/gesture.rs
+@@ -294,7 +294,14 @@ impl Gestures {
+         };
+         let ejected = self.menu_eject_fired;
+         self.menu_eject_fired = false;
+-        let tapped = !ejected && now.saturating_sub(d) < MENU_TAP_MS;
++        // A release that did not already eject is a tap, however long it was
++        // held. Comparing against MENU_TAP_MS instead left a dead zone between
++        // 250 ms and the 1 s hold where the button did nothing whatsoever: on
++        // this device a deliberate press measures around 380 ms, between the
++        // polled GPIO and a frame of quantisation, so the dead zone is where
++        // most presses landed. Short means "not long enough to eject", which is
++        // also what the hold is actually competing with.
++        let tapped = !ejected && now.saturating_sub(d) < MENU_HOLD_MS;
+         self.menu_last_tap = tapped.then_some(now);
+         match tapped {
+             true => vec![Action::QuickMenu],
