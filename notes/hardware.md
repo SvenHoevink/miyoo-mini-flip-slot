@@ -179,6 +179,22 @@ slot: boot: first frame at 511.6 ms
 So: no backlight control found, no battery (below), no rumble motor, but `rtc0`
 is present. First frame in ~0.5 s on real hardware.
 
+## Frame budget, measured on the device
+
+`SLOT_TRACE_LATENCY=1` in the card's launch script writes a per-frame breakdown
+to `slot.log`. From the first run with a game going:
+
+```
+read>pad 18.3  pad>emu 0.3  emu>pub 10.1  pub>take 1.5  take>swapped 55.0  (swap 16.2)  total 85.4 ms
+read>pad 23.6  pad>emu 0.3  emu>pub 14.1  pub>take 1.6  take>swapped 50.9  (swap  7.0)  total 90.5 ms
+read>pad 39.0  pad>emu 6.8  emu>pub  9.6  pub>take 1.5  take>swapped 49.1  (swap  6.8)  total 106.0 ms
+```
+
+`take>swapped` is this backend — the rasteriser plus the output blit — and at
+**~50 ms against a 16.7 ms budget** it is the whole problem. The emulator core
+(`emu>pub`) runs in 10-16 ms and the panel swap in 3-16 ms, so neither is
+anywhere near the limit. Optimise the renderer, not the cores.
+
 ## Open problem: no battery sysfs
 
 ```
