@@ -205,7 +205,19 @@ Progress, p50 of `take>swapped`:
 | + per-stage profiling | the game pass is 32 of the 47 ms |
 | + flat column table, no per-pixel checks | 34.5 (game 32.6 -> 21.0) |
 | + source row expanded once per source row | 26.5 (game 17.1, upload 0.4) |
-| + NEON kernel for the row scale | to be measured |
+| + NEON kernel for the row scale | 25.6 (**game 17.1 -> 7.8**) |
+| + cached column table and scratch | to be measured |
+
+With gpSP the stages add up to about 12.4 ms (clear 1.4, upload 0.3, game 7.8,
+sprites 0.0, out 2.9) and slot's own pacer agrees: `work 12.7 ms, period
+16.76 ms`, the first time work has fit inside the period. It reads as mostly
+smooth with occasional stutters, which is a variance problem rather than a
+throughput one — hence caching the column table (2160 `sin()` calls a frame)
+and the two scratch buffers that were being heap-allocated every frame.
+
+`take>swapped` still reads ~25 ms against stages that sum to 12.4, and that is
+not reconciled. The pacer's `work` number suggests the difference is waiting
+rather than work, but it has not been proven either way.
 
 The frame upload was the ~10 ms that the stage timings could not account for:
 it converted 38,400 pixels one three-byte copy at a time, before any of the

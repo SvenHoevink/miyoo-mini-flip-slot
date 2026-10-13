@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..fe21fde
+index 0000000..8dd4f85
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1028 @@
+@@ -0,0 +1,1104 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -590,6 +590,62 @@ index 0000000..fe21fde
 +    img: Image,
 +}
 +
++/// One destination column: which source texel it reads, and the three x factors
++/// in 8.8 fixed point (256 where the picture rect does not cover it, so the hot
++/// loop needs no branch).
++#[derive(Clone, Copy)]
++struct Col {
++    off: u32,
++    k: [u16; 3],
++}
++
++/// What the column table depends on. Rebuilding it costs 2160 sin() calls, and
++/// none of this changes while a game is running, so it is rebuilt only when one
++/// of these does rather than every frame.
++#[derive(Clone, Copy, PartialEq)]
++struct ColKey {
++    x0: i32,
++    width: usize,
++    rx: u32,
++    rw: u32,
++    src: [u32; 4],
++    pic: [u32; 4],
++    lcd: bool,
++    img_w: u32,
++}
++
++#[allow(clippy::too_many_arguments)]
++fn build_col(
++    out: &mut Vec<Col>,
++    width: usize,
++    x0: i32,
++    rx: f32,
++    rw: f32,
++    sw: f32,
++    src: [f32; 4],
++    pic: [f32; 4],
++    lcd: bool,
++    img_w: u32,
++) {
++    for i in 0..width {
++        let px = x0 + i as i32;
++        let u = src[0] + (px as f32 + 0.5 - rx) / rw * src[2];
++        let texel = ((u * sw) as i32).clamp(0, img_w as i32 - 1) as u32;
++        let inside = u >= pic[0] && u < pic[2];
++        let mut k = [256u16; 3];
++        if lcd && inside {
++            let fx = (u * sw).fract();
++            for (c, k) in k.iter_mut().enumerate() {
++                // The canvas is in panel order, so byte 0 is blue.
++                let o = LCD_OFFSETS[2 - c];
++                let v = (BRIGHTEN_LCD + (2.0 * PI * fx + o).sin()) / (BRIGHTEN_LCD + 1.0);
++                *k = (v * 256.0).round().clamp(0.0, 65535.0) as u16;
++            }
++        }
++        out.push(Col { off: texel * 4, k });
++    }
++}
++
 +/// The game plane: a 240x160 frame plus everything `GAME_FRAG` needs.
 +struct Game {
 +    /// Source frame as RGBA, converted once on upload from the core's XRGB8888.
@@ -599,6 +655,12 @@ index 0000000..fe21fde
 +    pic: [f32; 4],
 +    src: [f32; 4],
 +    fbo_scale: [f32; 2],
++    /// Scratch that would otherwise be heap-allocated twice a frame. Two
++    /// allocations per frame is a poor way to spend a 16 ms budget, and the
++    /// jitter shows up as stutter rather than as a worse average.
++    col: Vec<Col>,
++    col_key: Option<ColKey>,
++    line: Vec<u16>,
 +}
 +
 +impl Game {
@@ -610,6 +672,9 @@ index 0000000..fe21fde
 +            pic: WHOLE_TEXTURE,
 +            src: WHOLE_TEXTURE,
 +            fbo_scale: [1.0, 1.0],
++            col: Vec::new(),
++            col_key: None,
++            line: Vec::new(),
 +        }
 +    }
 +
@@ -629,7 +694,7 @@ index 0000000..fe21fde
 +    }
 +
 +    /// Returns 1 if the 3x lookup ran, 2 for the separable fallback.
-+    fn draw(&self, dst: &mut Image, tex: Option<&Image>) -> u8 {
++    fn draw(&mut self, dst: &mut Image, tex: Option<&Image>) -> u8 {
 +        let img = tex.unwrap_or(&self.frame);
 +        let (rx, ry, rw, rh) = screen_rect(self.power);
 +        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
@@ -662,28 +727,28 @@ index 0000000..fe21fde
 +        // texel within its row, and the three x factors in 8.8 fixed point
 +        // (256 where the picture rect does not cover this column, so the inner
 +        // loop has no branch and no second lookup).
-+        struct Col {
-+            off: u32,
-+            k: [u16; 3],
++        let bits = |v: [f32; 4]| v.map(f32::to_bits);
++        let key = ColKey {
++            x0,
++            width,
++            rx: rx.to_bits(),
++            rw: rw.to_bits(),
++            src: bits(src),
++            pic: bits(self.pic),
++            lcd,
++            img_w: img.w,
++        };
++        if self.col_key != Some(key) {
++            self.col.clear();
++            self.col.reserve(width);
++            build_col(&mut self.col, width, x0, rx, rw, sw, src, self.pic, lcd, img.w);
++            self.col_key = Some(key);
 +        }
-+        let mut col = Vec::with_capacity(width);
-+        for i in 0..width {
-+            let px = x0 + i as i32;
-+            let u = src[0] + (px as f32 + 0.5 - rx) / rw * src[2];
-+            let texel = ((u * sw) as i32).clamp(0, img.w as i32 - 1) as u32;
-+            let inside = u >= self.pic[0] && u < self.pic[2];
-+            let mut k = [256u16; 3];
-+            if lcd && inside {
-+                let fx = (u * sw).fract();
-+                for (c, k) in k.iter_mut().enumerate() {
-+                    // The canvas is in panel order, so byte 0 is blue.
-+                    let o = LCD_OFFSETS[2 - c];
-+                    let v = (BRIGHTEN_LCD + (2.0 * PI * fx + o).sin()) / (BRIGHTEN_LCD + 1.0);
-+                    *k = (v * 256.0).round().clamp(0.0, 65535.0) as u16;
-+                }
-+            }
-+            col.push(Col { off: texel * 4, k });
++        let col = &self.col;
++        if self.line.len() != width * 4 {
++            self.line.resize(width * 4, 0);
 +        }
++        let line = &mut self.line;
 +
 +        let dw = dst.w as usize;
 +        let row_bytes = img.w as usize * 4;
@@ -695,7 +760,6 @@ index 0000000..fe21fde
 +        // Every output row is then a linear multiply by the row's own factor,
 +        // with no gather left in it, which is both ~3x less scatter-reading and
 +        // a shape the compiler can actually do something with.
-+        let mut line = vec![0u16; width * 4];
 +        let mut built: Option<(usize, bool)> = None;
 +
 +        for py in y0..y1 {
@@ -784,6 +848,10 @@ index 0000000..fe21fde
 +    game_us: u64,
 +    sprite_us: u64,
 +    out_us: u64,
++    /// The worst single frame in the window. The median says whether we are in
++    /// budget on average; this says whether the stutters are the renderer.
++    worst_us: u64,
++    frame_us: u64,
 +    /// 0 none, 1 the 3x lookup, 2 the separable fallback.
 +    path: u8,
 +}
@@ -795,20 +863,22 @@ index 0000000..fe21fde
 +        std::env::var_os("SLOT_TRACE_LATENCY").is_some_and(|v| v != "0")
 +    }
 +
-+    fn tick(&mut self) {
++    fn tick(&mut self, frame_us: u64) {
 +        self.frames += 1;
++        self.worst_us = self.worst_us.max(frame_us);
 +        if self.frames < REPORT_EVERY {
 +            return;
 +        }
 +        let n = self.frames as u64;
 +        let ms = |v: u64| v as f64 / 1000.0 / n as f64;
 +        eprintln!(
-+            "slot: soft: clear {:.1} upload {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, game path {}",
++            "slot: soft: clear {:.1} upload {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, worst {:.1}, game path {}",
 +            ms(self.clear_us),
 +            ms(self.upload_us),
 +            ms(self.game_us),
 +            ms(self.sprite_us),
 +            ms(self.out_us),
++            self.worst_us as f64 / 1000.0,
 +            match self.path {
 +                1 => "3x-lut",
 +                2 => "separable",
@@ -884,6 +954,8 @@ index 0000000..fe21fde
 +}
 +
 +/// The reference the NEON kernel is tested against, and the fallback off-device.
++/// On arm it is reachable only from the tests, which is the point of it.
++#[allow(dead_code)]
 +fn scale_row_scalar(dst: &mut [u8], line: &[u16], yk: u16) {
 +    let n = dst.len().min(line.len());
 +    for i in 0..n {
@@ -951,7 +1023,7 @@ index 0000000..fe21fde
 +        let t = std::time::Instant::now();
 +        self.game.upload(xrgb8888);
 +        if self.profiling {
-+            self.profile.upload_us += t.elapsed().as_micros() as u64;
++            { let us = t.elapsed().as_micros() as u64; self.profile.upload_us += us; self.profile.frame_us += us; }
 +        }
 +    }
 +
@@ -959,7 +1031,7 @@ index 0000000..fe21fde
 +        let t = std::time::Instant::now();
 +        let path = self.game.draw(&mut self.canvas, None);
 +        if self.profiling {
-+            self.profile.game_us += t.elapsed().as_micros() as u64;
++            { let us = t.elapsed().as_micros() as u64; self.profile.game_us += us; self.profile.frame_us += us; }
 +            self.profile.path = path;
 +        }
 +    }
@@ -975,7 +1047,7 @@ index 0000000..fe21fde
 +                    let t = std::time::Instant::now();
 +                    let path = self.game.draw(&mut self.canvas, None);
 +                    if self.profiling {
-+                        self.profile.game_us += t.elapsed().as_micros() as u64;
++                        { let us = t.elapsed().as_micros() as u64; self.profile.game_us += us; self.profile.frame_us += us; }
 +                        self.profile.path = path;
 +                    }
 +                }
@@ -1012,7 +1084,7 @@ index 0000000..fe21fde
 +        let t = std::time::Instant::now();
 +        self.draw_sprites_inner(items);
 +        if self.profiling {
-+            self.profile.sprite_us += t.elapsed().as_micros() as u64;
++            { let us = t.elapsed().as_micros() as u64; self.profile.sprite_us += us; self.profile.frame_us += us; }
 +        }
 +    }
 +
@@ -1154,7 +1226,7 @@ index 0000000..fe21fde
 +        self.canvas
 +            .fill([b(BACKDROP[0]), b(BACKDROP[1]), b(BACKDROP[2]), 255]);
 +        if self.profiling {
-+            self.profile.clear_us += t.elapsed().as_micros() as u64;
++            { let us = t.elapsed().as_micros() as u64; self.profile.clear_us += us; self.profile.frame_us += us; }
 +        }
 +    }
 +
@@ -1173,8 +1245,12 @@ index 0000000..fe21fde
 +        let t = std::time::Instant::now();
 +        self.output_frame(window);
 +        if self.profiling {
-+            self.profile.out_us += t.elapsed().as_micros() as u64;
-+            self.profile.tick();
++            let us = t.elapsed().as_micros() as u64;
++            self.profile.out_us += us;
++            // Everything this backend did for this frame.
++            let frame = self.profile.frame_us + us;
++            self.profile.frame_us = 0;
++            self.profile.tick(frame);
 +        }
 +    }
 +
@@ -1466,7 +1542,7 @@ index 0000000..fe21fde
 +
 +    #[test]
 +    fn the_separable_path_matches_the_mask_in_floats() {
-+        let g = gb_game();
++        let mut g = gb_game();
 +        let mut canvas = Image::new(OUT_W, OUT_H);
 +        let path = g.draw(&mut canvas, None);
 +        assert_eq!(path, 2, "this shape must not take the 3x lookup");
@@ -1501,7 +1577,7 @@ index 0000000..fe21fde
 +    /// out-of-bounds offset would fault here rather than on the handheld.
 +    #[test]
 +    fn it_stays_inside_the_source_for_every_pixel() {
-+        let g = gb_game();
++        let mut g = gb_game();
 +        let mut canvas = Image::new(OUT_W, OUT_H);
 +        g.draw(&mut canvas, None);
 +        assert!(canvas.px.iter().any(|&b| b != 0));
