@@ -77,6 +77,16 @@ libmi_venc.so   libmi_wlan.so
 - `libmi_gfx.so` — the SigmaStar 2D blitter. Candidate for hardware-accelerating
   the blit and scale once a CPU rasteriser works.
 - `libmi_ao.so` — audio out, used by Allium via FFI.
+- **MI_AO is the path that works, and the audio server owns it.** The vendor
+  stack goes through MI_AO, and with the server running slot's
+  `MI_AO_SetPubAttr` returns `0xa0052009` — decoded with the SDK's own macro
+  (`MI_ERR_ID | module<<16 | level<<12 | errid`) that is errid 9,
+  `E_MI_ERR_NOT_PERM`, "try to change static attribute". Only one of them can
+  configure the device, so the boot hook skips the server when `.slot-boot` is
+  set.
+- **The click every three seconds was not the server's absence.** It was slot's
+  ALSA sink: `RELEASE_AFTER` drops the device after three seconds of silence and
+  the amplifier pops each time it reopens. The MI_AO sink never releases.
 - **The driver leaks `ERESTARTSYS`.** `snd_pcm_writei` and `snd_pcm_recover`
   both return `-512` when a signal interrupts them, which `snd_strerror` renders
   as "Unknown error 512". It is kernel-internal and should never reach

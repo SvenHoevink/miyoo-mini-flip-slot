@@ -53,17 +53,16 @@ fi
 
 # use audioserver to prevent pop-noise
 #
-# This was skipped under slot for a while, to free the PCM that the server holds
-# open -- slot could not open any device while it was running. That did let slot
-# open plug:default at 48 kHz, and it still produced no sound: every write
-# failed and snd_pcm_recover returned -512 persistently, not as the interrupted
-# syscall it resembles. What it did produce was a click every three seconds,
-# which is exactly what the server is here to prevent.
+# Skipped when slot is booting, because the server owns MI_AO: it configures the
+# device and holds it, so slot's MI_AO_SetPubAttr comes back E_MI_ERR_NOT_PERM,
+# "try to change static attribute". Only one of them can have it.
 #
-# So it stays. Direct ALSA looks like a dead end on this device; Allium's own
-# apps go through the server, and teaching slot to do the same is the route if
-# sound is wanted. See notes/hardware.md.
-if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ]; then
+# The click every three seconds that this caused the first time round was not
+# the server's absence as such -- it was slot's ALSA sink releasing the device
+# after three seconds of silence and popping the amplifier each time it
+# reopened. The MI_AO sink never releases, so that should not recur. If it does,
+# the server goes back and audio stays unsolved.
+if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ] && [ ! -f "$ROOT"/.slot-boot ]; then
     "$ROOT"/.tmp_update/script/start_audioserver.sh
 fi
 
