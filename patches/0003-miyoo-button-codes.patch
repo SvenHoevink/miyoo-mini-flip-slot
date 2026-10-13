@@ -1,5 +1,5 @@
 diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
-index 9f71f9d..a99494e 100644
+index 9f71f9d..b092769 100644
 --- a/crates/slot/src/input/device.rs
 +++ b/crates/slot/src/input/device.rs
 @@ -46,9 +46,18 @@ impl DeviceInput {
@@ -22,21 +22,42 @@ index 9f71f9d..a99494e 100644
              if let Err(e) = spawned {
                  eprintln!("slot: input {name}: {e}");
              }
-@@ -86,7 +95,12 @@ fn quicken_poll(sys: &Path, node: &Path) {
+@@ -86,7 +95,33 @@ fn quicken_poll(sys: &Path, node: &Path) {
      }
  }
  
 -fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
++/// Ask the scheduler to favour this thread.
++///
++/// The input readers do almost nothing but block on a read, yet on a two-core
++/// device with a render loop and an emulator thread they can be left unscheduled
++/// for over a second: the trace shows repeats arriving every 50 ms and then a
++/// 1.28 s gap with twenty-two of them delivered at once. Gestures are timed from
++/// when events are *processed*, so a stall that falls between a press and its
++/// release turns a tap into a 250-1000 ms press, which is slot's dead zone
++/// between "tap" and "hold" -- the button then appears to do nothing at all.
++///
++/// Niceness is the portable lever here; it needs no privileges to lower within
++/// the default range and cannot hurt if the kernel ignores it.
++fn favour_this_thread() {
++    const PRIO_PROCESS: libc::c_int = 0;
++    // SAFETY: setpriority on the calling thread, 0 meaning "me".
++    unsafe {
++        libc::setpriority(PRIO_PROCESS as u32, 0, -10);
++    }
++}
++
 +fn read_node(
 +    node: &Path,
 +    queue: &Mutex<Vec<RawEvent>>,
 +    trace: Option<&Trace>,
 +    hall_node: bool,
 +) {
++    favour_this_thread();
      let label = node
          .file_name()
          .map(|n| n.to_string_lossy().into_owned())
-@@ -120,6 +134,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
+@@ -120,6 +155,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
              }
              match ev.kind {
                  EV_ABS => events.extend(hat.feed(ev)),
