@@ -310,6 +310,11 @@ The button map is in `patches/0003`; the gestures are upstream's, from
 | double-tap MENU | polaroids |
 | SELECT held, then MENU | game menu |
 | hold POWER ~1 s | power menu |
+| **START on the shelf, GBA cart selected** | **core picker: left = mGBA, right = gpSP** |
+
+**For GBA, pick gpSP.** mGBA has no GBA dynarec and interprets, while gpSP has
+an ARM JIT — the whole reason this port builds it. The choice is per game and
+is kept in `Config/selected_core.txt`.
 
 slot boots straight into whatever cart was last seated — that is intended, not
 a fault: the cart is remembered in `Config/slot.state` and re-seated at startup,

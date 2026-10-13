@@ -520,10 +520,10 @@ index 0000000..01d482e
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..7ccfe59
+index 0000000..1498a5e
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,912 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -619,17 +619,13 @@ index 0000000..7ccfe59
 +        if xrgb8888.len() < want {
 +            return;
 +        }
-+        // XRGB8888 is B, G, R, X in memory on little-endian, which is already
-+        // the order the canvas and the panel use: only the alpha needs setting.
-+        for (dst, src) in self
-+            .frame
-+            .px
-+            .chunks_exact_mut(4)
-+            .zip(xrgb8888[..want].chunks_exact(4))
-+        {
-+            dst[..3].copy_from_slice(&src[..3]);
-+            dst[3] = 255;
-+        }
++        // XRGB8888 is B, G, R, X in memory on little-endian, which is exactly
++        // the order the canvas and the panel use. Nothing reads this image's
++        // alpha -- the game plane writes opaque pixels and the output sets 255
++        // itself -- so the whole frame is one copy rather than 38,400 three-byte
++        // ones. That was several ms a frame and did not show up in the profile
++        // because it happens before the parts that were being timed.
++        self.frame.px[..want].copy_from_slice(&xrgb8888[..want]);
 +    }
 +
 +    /// Returns 1 if the 3x lookup ran, 2 for the separable fallback.
@@ -782,6 +778,7 @@ index 0000000..7ccfe59
 +struct Profile {
 +    frames: u32,
 +    clear_us: u64,
++    upload_us: u64,
 +    game_us: u64,
 +    sprite_us: u64,
 +    out_us: u64,
@@ -804,8 +801,9 @@ index 0000000..7ccfe59
 +        let n = self.frames as u64;
 +        let ms = |v: u64| v as f64 / 1000.0 / n as f64;
 +        eprintln!(
-+            "slot: soft: clear {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, game path {}",
++            "slot: soft: clear {:.1} upload {:.1} game {:.1} sprites {:.1} out {:.1} ms/frame, game path {}",
 +            ms(self.clear_us),
++            ms(self.upload_us),
 +            ms(self.game_us),
 +            ms(self.sprite_us),
 +            ms(self.out_us),
@@ -879,7 +877,11 @@ index 0000000..7ccfe59
 +    }
 +
 +    pub fn upload_game(&mut self, xrgb8888: &[u8]) {
++        let t = std::time::Instant::now();
 +        self.game.upload(xrgb8888);
++        if self.profiling {
++            self.profile.upload_us += t.elapsed().as_micros() as u64;
++        }
 +    }
 +
 +    pub fn draw_game(&mut self) {
