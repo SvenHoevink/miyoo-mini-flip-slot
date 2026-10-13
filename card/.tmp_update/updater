@@ -52,7 +52,16 @@ else
 fi
 
 # use audioserver to prevent pop-noise
-if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ]; then
+#
+# Not when slot is taking over: the audio server holds the PCM open, and slot
+# then fails to open any of plug:default, default, plughw:0,0 or hw:0,0 --
+# "Device or resource busy" is what its log shows. Allium's own apps go through
+# the server; slot talks to ALSA directly, as it does on the Anbernic machines.
+#
+# The cost is the pop on open that the server exists to avoid. If that turns out
+# to be worse than no sound at all, put it back and teach slot to use the server
+# instead.
+if [ -f "$ROOT"/.tmp_update/script/start_audioserver.sh ] && [ ! -f "$ROOT"/.slot-boot ]; then
     "$ROOT"/.tmp_update/script/start_audioserver.sh
 fi
 

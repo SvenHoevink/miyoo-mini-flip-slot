@@ -55,9 +55,18 @@ fi
 # a cold boot -- and when slot is the boot process there is no Allium menu to
 # run this from by hand, so a single failure means fetching the SD card. An
 # attempt costs nothing while it is idle, so it retries for as long as it takes.
+# How early this runs matters: at boot the radio may not be ready when
+# wifi-on.sh insmods the driver, which would explain cold boots failing while
+# the same script works by hand from a menu later on.
+log "uptime at start: $(cut -d" " -f1 /proc/uptime 2>/dev/null)s"
+log "wlan0 before wifi-on: $(ifconfig wlan0 > /dev/null 2>&1 && echo present || echo absent)"
+log "module before wifi-on: $(grep -c 8188fu /proc/modules 2>/dev/null)"
+log ""
+
 attempt=1
 while :; do
 	[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
+	log "attempt $attempt at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s: wlan0 $(ifconfig wlan0 > /dev/null 2>&1 && echo present || echo ABSENT), module $(grep -c 8188fu /proc/modules 2>/dev/null)"
 
 	# Association first: it and DHCP fail for different reasons.
 	assoc=""
@@ -90,12 +99,18 @@ while :; do
 		break
 	fi
 
-	log "attempt $attempt: ${assoc:+associated, no lease}${assoc:-no association} after ${n}s"
-	[ "$attempt" = 1 ] && {
-		log "  driver module: $(grep -c 8188fu /proc/modules 2>/dev/null) (want 1)"
-		log "  supplicant: $(pgrep wpa_supplicant > /dev/null 2>&1 && echo running || echo no)"
+	log "  ${assoc:+associated but no lease}${assoc:-no association} after ${n}s"
+	log "  supplicant: $(pgrep wpa_supplicant > /dev/null 2>&1 && echo running || echo NOT running)"
+	log "  wpa_state: $(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')"
+	# Only on the first two attempts, so the file stays readable: is the network
+	# even visible? This radio is 2.4 GHz only.
+	if [ "$attempt" -le 2 ]; then
 		log "  config: $(wc -c < "$conf" 2>/dev/null || echo 0) bytes"
-	}
+		log "  networks in range:"
+		iwlist wlan0 scan 2>/dev/null | sed -n 's/.*ESSID:"\(.*\)"/    \1/p' | sort -u | head -12 >> "$out"
+		log "  driver messages:"
+		dmesg 2>/dev/null | grep -iE "8188|wlan|wifi" | tail -6 >> "$out"
+	fi
 	sync
 	attempt=$((attempt + 1))
 	sleep 15

@@ -30,6 +30,10 @@ export SLOT_FB_ROTATE=180
 #                         because slot paces itself and waiting here too cost
 #                         most of the frame budget
 
+# TEMPORARY, to capture how the clamshell hall sensor signals open and close so
+# the lid can be wired to Btn::Lid. Writes input-trace.log; remove once mapped.
+export SLOT_TRACE_INPUT=1
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
