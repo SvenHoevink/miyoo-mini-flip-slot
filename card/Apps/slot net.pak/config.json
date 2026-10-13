@@ -1,0 +1,5 @@
+{
+	"label": "slot net",
+	"launch": "launch.sh",
+	"description": "WiFi, telnet and FTP on, for deploying without the SD card"
+}

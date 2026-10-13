@@ -224,9 +224,14 @@ task deploy:cores    # push the libretro cores too, which rarely change
 task log             # pull slot.log back and print the last stage/frame lines
 ```
 
-On the handheld, once per boot: turn WiFi on, then FTP on (and telnet, for a
-shell). The `device:check` step fails with a clear message rather than a curl
-error when either is missing.
+On the handheld, once per boot, run **Apps → slot net**: it calls Allium's own
+`wifi-on`, `telnet-on` and `ftp-on`, then writes the device's address to
+`slot-net.txt` at the card root, which is what `SLOT_DEVICE` wants. WiFi itself
+has to be configured in Allium's settings once beforehand, since
+`wait-for-wifi.sh` only waits for a link it already knows how to make.
+
+The `device:check` step fails with a clear message rather than a curl error
+when the handheld is not listening.
 
 A telnet shell is also the quickest way to try something without a rebuild —
 `SLOT_FB_VSYNC=1 sh /mnt/SDCARD/System/launch_frontend.sh`, for instance.

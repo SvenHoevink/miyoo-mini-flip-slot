@@ -198,10 +198,10 @@ index 988bb8c..ca19343 100644
          unsafe {
 diff --git a/crates/slot-gfx/src/soft/fb.rs b/crates/slot-gfx/src/soft/fb.rs
 new file mode 100644
-index 0000000..e569bad
+index 0000000..a027cd1
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/fb.rs
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,346 @@
 +//! A `Surface` over `/dev/fb0` for devices with no GPU.
 +//!
 +//! The Miyoo Mini Flip's SigmaStar SSD202D has no 3D core and no libEGL, so the
@@ -339,6 +339,8 @@ index 0000000..e569bad
 +    synthetic: bool,
 +    /// Block in `swap` until the panel latches. Off by default; see `swap`.
 +    wait_vsync: bool,
++    /// Whether the one-off note about which swap path is in use has been made.
++    said_path: bool,
 +}
 +
 +fn ioctl<T>(fd: RawFd, req: libc::c_ulong, arg: &mut T) -> std::io::Result<()> {
@@ -435,6 +437,7 @@ index 0000000..e569bad
 +            back: 0,
 +            synthetic: std::env::var_os("SLOT_FB_SIZE").is_some(),
 +            wait_vsync: std::env::var("SLOT_FB_VSYNC").as_deref() == Ok("1"),
++            said_path: false,
 +        };
 +        // Start on a cleared screen rather than whatever the launcher left.
 +        me.clear();
@@ -508,9 +511,23 @@ index 0000000..e569bad
 +        // the blocking behaviour if a panel turns out to need it.
 +        var.activate = if self.wait_vsync { 0x200 } else { 0x0 };
 +        if let Err(e) = ioctl(fd, FBIOPAN_DISPLAY, &mut var) {
-+            // Some SigmaStar kernels only accept the pan through PUT_VSCREENINFO.
++            // Some SigmaStar kernels only accept the pan through PUT_VSCREENINFO,
++            // which is a full mode set and much more expensive. Say so once:
++            // which of these runs is worth knowing when the swap is costing most
++            // of the frame.
++            if !self.said_path {
++                self.said_path = true;
++                eprintln!("slot: fb: pan rejected ({e}), falling back to PUT_VSCREENINFO");
++            }
 +            ioctl(fd, FBIOPUT_VSCREENINFO, &mut var)
 +                .map_err(|_| GfxError::Context(format!("FBIOPAN_DISPLAY: {e}")))?;
++        } else if !self.said_path {
++            self.said_path = true;
++            eprintln!(
++                "slot: fb: FBIOPAN_DISPLAY ok, {} pages, vsync wait {}",
++                self.pages,
++                if self.wait_vsync { "on" } else { "off" }
++            );
 +        }
 +
 +        self.back = (self.back + 1) % self.pages;
