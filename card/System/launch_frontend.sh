@@ -26,24 +26,18 @@ export SLOT_FB_ROTATE=180
 #                         timings, into slot.log
 #   SLOT_TRACE_INPUT=1    every input event and how it mapped, into
 #                         input-trace.log, plus a survey of the input nodes
+#   SLOT_TRACE=1          the audio ring every so often, as
+#                         "queued/target, N dropped, M starved"
+#
+# All three are off now that the pacing is settled, and they are not free: each
+# writes to the card from inside the frame loop, SLOT_TRACE_LATENCY once per
+# frame and SLOT_TRACE_INPUT once per event. Turn on only the one being read.
+#
+# Two more that change behaviour rather than reporting it:
 #   SLOT_FB_VSYNC=1       block in the page flip until the panel latches; off
 #                         because slot paces itself and waiting here too cost
 #                         most of the frame budget
-#   SLOT_FB_PAGES=1       give up the page flip and draw at the scanout; the
-#                         driver's pan costs 6.6 ms a frame on this panel
-
-# TEMPORARY, to capture how the clamshell hall sensor signals open and close so
-# the lid can be wired to Btn::Lid. Writes input-trace.log; remove once mapped.
-export SLOT_TRACE_INPUT=1
-
-# TEMPORARY, to confirm whether the audio retry churn is what slowed gameplay.
-export SLOT_TRACE_LATENCY=1
-
-# TEMPORARY, for the audio stutter: makes slot report the ring every so often as
-# "queued/target, N dropped, M starved". Starved is the number that says the
-# ring ran dry, which is what a stutter is; dropped says the sink is not
-# keeping up. Remove once the audio is settled.
-export SLOT_TRACE=1
+#   SLOT_FB_PAGES=1       give up the page flip and draw at the scanout
 
 # The driver's FBIOPAN_DISPLAY measured 6.6 ms a frame here -- the shape of a
 # whole-page copy, not a latch -- which with 13.4 ms of real work put the
