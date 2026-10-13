@@ -477,6 +477,22 @@ framebuffer when the display list is only the game, which the profile shows as
 `game N (inside out)`. Anyone looking at this again should profile *inside* the
 game pass, splitting expansion from scale, before changing anything.
 
+### `task shot` is not deterministic, so it cannot prove pixel-identity
+
+Two runs of **identical code** differ: 873 pixels across 69 rows, in the same
+small band on each page (rows ~246-266 of each). Something in the captured
+frame varies with timing. So "verify renderer changes pixel-identical with
+`task shot`" only holds for changes larger than that noise floor -- the sprite
+blit rewrite moved 639 pixels, fewer than the noise, and the screenshot could
+not tell the two apart.
+
+Use a reference implementation in a unit test instead, as
+`raster::blit_tests` does: the old straightforward loop kept beside the
+optimised one and compared over every scale, both colour paths, fractional
+offsets and clipping. That is deterministic and it is what `blend_tests`
+already did for the divide. `task shot` remains the right tool for *seeing*
+what is drawn, which is what it was built for.
+
 ### The sprite path
 
 Measured at a fixed draw count, which is the only way these numbers mean
