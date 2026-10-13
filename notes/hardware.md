@@ -354,16 +354,29 @@ Capturing `/dev/fb0` over the network and looking at it is what settled it,
 which is worth remembering as a diagnostic — `dd if=/dev/fb0` on the device,
 then `tools/fb2png.py`.
 
-**Do not kill `alliumd`.** Stopping it for the session did clear the overlay,
-but launching a game then shut the handheld down hard, three times out of four.
-Reverted. `alliumd` is started by `/customer/main` and something evidently
-depends on it staying alive; whatever that is needs understanding before this is
-tried again. A clumsy menu button is a much better problem than a device that
-cuts power mid-session.
+**Do not kill `alliumd`** — and the reason turned out to be mundane. The card's
+boot hook, `.tmp_update/updater`, ends like this:
 
-Ideas that do not involve killing it: find out whether Allium has a setting to
-disable its hotkey overlay, or whether its MENU handling can be suppressed per
-app from the pak's config.
+```sh
+RUST_LOG=info "$ROOT"/.allium/bin/alliumd >"$ROOT"/allium.log 2>&1
+...
+else
+    while true; do
+        reboot
+        sleep 10
+    done
+fi
+```
+
+Killing `alliumd` makes that script continue past the launcher and hit the
+reboot loop. The "hard shutdown when launching a game" was the handheld being
+told to reboot, not a power fault or a watchdog.
+
+The right way to have the machine to ourselves is to boot slot *instead of*
+Allium, from that same hook. See "Booting straight into slot" in the README:
+a `.slot-boot` file at the card root selects it, deleting the file undoes it
+from any computer, and if slot exits the script falls through to Allium rather
+than to the reboot loop.
 
 ## Why gesture timers misfire: `advance` drops input during a rebuild
 

@@ -369,6 +369,36 @@ and the next boot lands on the shelf.
 On this device MENU is `KEY_ESC`, A is `KEY_SPACE`, B is `KEY_LEFTCTRL` — see
 `notes/hardware.md` for the full table.
 
+## Booting straight into slot, without Allium
+
+slot wants the handheld to itself — on the Anbernic machines it *is* the
+launcher — and under Allium the daemon keeps running underneath and claims the
+MENU button, drawing a hotkeys overlay over the game.
+
+The card's boot hook is `.tmp_update/updater`, which the stock firmware runs: it
+sets up the backlight PWM and the LCD, detects the model, starts the audio
+server, and ends by running `alliumd`. `card/.tmp_update/updater` is that file
+with one block added before the `alliumd` line:
+
+```sh
+if [ -f "$ROOT"/.slot-boot ]; then
+    SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
+fi
+```
+
+**To turn it on:** create an empty `.slot-boot` at the card root.
+**To turn it off:** delete that file. It needs no shell and no telnet — any
+computer with the card in it will do, which is the point of gating it on a file.
+
+If slot exits or fails to start, execution falls through to Allium below, so a
+bad build cannot leave a handheld that will not boot. The original is kept on
+the card as `.tmp_update/updater.allium-orig`.
+
+**Never kill `alliumd` instead.** The boot hook ends with a `while true; do
+reboot; done` for when the launcher exits, so killing it makes the handheld
+reboot — which is exactly what happened when it was tried, and it looked like a
+power fault rather than a script doing as it was told.
+
 ## Caveats worth reading before you copy
 
 - **Keep a backup of the card.** Nothing here deletes, but the stock firmware
