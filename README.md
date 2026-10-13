@@ -386,8 +386,22 @@ if [ -f "$ROOT"/.slot-boot ]; then
 fi
 ```
 
-**To turn it on:** create an empty `.slot-boot` at the card root.
-**To turn it off:** delete that file. It needs no shell and no telnet — any
+Booting slot means no Allium, and Allium was what brought up WiFi, telnet and
+FTP — without which the only way to put a new build on the handheld is to carry
+the card to a computer. So the hook starts the network itself, in the background
+so it never delays the frontend, when a `.slot-net` file is present.
+`System/net-up.sh` does that work and is shared with the **slot net** app.
+
+```sh
+task boot:install        # put the hook on the card (once; it is boot-critical,
+                         # so `dist` and `deploy` never touch it)
+task boot:slot           # .slot-boot + .slot-net: slot boots, network comes up
+task boot:allium         # back to Allium
+```
+
+**To turn it on by hand:** create an empty `.slot-boot` at the card root, and
+`.slot-net` alongside it for the network.
+**To turn it off:** delete `.slot-boot`. It needs no shell and no telnet — any
 computer with the card in it will do, which is the point of gating it on a file.
 
 If slot exits or fails to start, execution falls through to Allium below, so a

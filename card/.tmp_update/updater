@@ -84,6 +84,13 @@ show -c
 # back. If slot exits or fails, execution falls through to Allium below rather
 # than leaving a dead handheld.
 if [ -f "$ROOT"/.slot-boot ]; then
+    # Booting slot means no Allium, and Allium is what used to bring up WiFi,
+    # telnet and FTP -- without which the only way to put a new build on the
+    # handheld is to carry the card to a computer. So start the network here,
+    # in the background so it never delays the frontend, when .slot-net asks.
+    if [ -f "$ROOT"/.slot-net ]; then
+        "$ROOT"/System/net-up.sh "$ROOT" "$ROOT"/slot-net.txt &
+    fi
     SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
 fi
 

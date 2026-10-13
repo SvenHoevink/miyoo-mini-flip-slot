@@ -347,6 +347,7 @@ tasks:
       - curl -sS -T target-miyoo/rust/{{.TARGET}}/device/slot "{{.FTP}}/System/slot"
       - curl -sS -T card/System/launch_frontend.sh "{{.FTP}}/System/launch_frontend.sh"
       - curl -sS -T card/System/probe.sh "{{.FTP}}/System/probe.sh"
+      - curl -sS -T card/System/net-up.sh "{{.FTP}}/System/net-up.sh"
       - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
 
   deploy:cores:
@@ -365,6 +366,34 @@ tasks:
       vars: [CMD]
     cmds:
       - sh tools/device-sh.sh {{.DEVICE}} '{{.CMD}}'
+
+  boot:install:
+    desc: >-
+      Install the card's boot hook so slot can start instead of Allium. Kept out
+      of `dist` and `deploy` on purpose: it is boot-critical, and a routine copy
+      should never touch it
+    deps: [device:check]
+    cmds:
+      - curl -sS -T card/.tmp_update/updater "{{.FTP}}/.tmp_update/updater.slot"
+      - >-
+        sh tools/device-sh.sh {{.DEVICE}}
+        'cd /mnt/SDCARD/.tmp_update; [ -f updater.allium-orig ] || cp updater updater.allium-orig;
+        cp updater.slot updater; chmod 755 updater; rm -f updater.slot; grep -c slot-boot updater'
+      - 'echo "installed (a count of 2 above is right). Allium still boots until .slot-boot exists"'
+
+  boot:slot:
+    desc: Boot into slot from now on, with the network up alongside it
+    deps: [device:check]
+    cmds:
+      - sh tools/device-sh.sh {{.DEVICE}} 'touch /mnt/SDCARD/.slot-boot /mnt/SDCARD/.slot-net; ls /mnt/SDCARD/.slot-boot /mnt/SDCARD/.slot-net'
+      - 'echo "slot boots next time. task boot:allium undoes it, as does deleting .slot-boot from any computer"'
+
+  boot:allium:
+    desc: Go back to booting Allium
+    deps: [device:check]
+    cmds:
+      - sh tools/device-sh.sh {{.DEVICE}} 'rm -f /mnt/SDCARD/.slot-boot; echo removed'
+      - 'echo "Allium boots next time"'
 
   stop:
     desc: >-
