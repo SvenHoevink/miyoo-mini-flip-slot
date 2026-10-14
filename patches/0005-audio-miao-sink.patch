@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..2e4ccec
+index 0000000..7e73c86
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,452 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -347,18 +347,19 @@ index 0000000..2e4ccec
 +                    .ok()
 +                    .and_then(|v| v.trim().parse::<i32>().ok())
 +                    .filter(|n| (0..=128).contains(n))
-+                    // Off by default. Throttling the codec's queue is the only
-+                    // way to control the 352 ms it otherwise holds, and it does
-+                    // remove the lag -- but throughput then pins at 43,008
-+                    // frames a second against the 48,000 the codec is
-+                    // configured for, the ring backs up, push_blocking stalls
-+                    // the core, and the result is choppy. That 43,008 is a
-+                    // throughput this loop achieved, not a drain rate the codec
-+                    // imposed: nothing counted the loop's own pass rate or the
-+                    // core's production while it was happening, and the
-+                    // counters below exist to tell those apart. Unthrottled is
-+                    // laggy and clean; that is the better default until it is.
-+                    .unwrap_or(0);
++                    // Five periods, 53 ms. On by default now that the drain
++                    // it used to cause is understood and fixed -- it was the
++                    // byte count below being read as periods, not the codec --
++                    // because MI_AO otherwise holds 341 ms and that is audible
++                    // as the sound running behind the picture.
++                    //
++                    // Measured on the device at this value: 48,036 frames/s
++                    // against the 48,000 configured, the queue never below
++                    // 35 ms of its 53, the ring on its target, 0 core stalls,
++                    // 0 dropped, 0 starved, 0 send errors. SLOTAO_QUEUE=0
++                    // restores the unthrottled path if MI_AO ever stops
++                    // answering QueryChnStat.
++                    .unwrap_or(5);
 +                let want_frames = want as usize * PERIOD_FRAMES;
 +                // SAFETY: the shim is loaded and the channel is open.
 +                let queued = || unsafe { (shim.queued)() };
@@ -403,7 +404,15 @@ index 0000000..2e4ccec
 +                    // the line read "low 2147483647 of 0" -- i32::MAX dressed
 +                    // up as a measurement, which is the last thing this file
 +                    // needs more of.
-+                    if want > 0 && said.elapsed() >= std::time::Duration::from_secs(5) {
++                    //
++                    // And behind SLOT_TRACE, now that the throttle is the
++                    // default: `want > 0` alone would put two lines every five
++                    // seconds into the card's log for every session forever.
++                    // The ring's trace is gated the same way.
++                    if want > 0
++                        && crate::session::trace()
++                        && said.elapsed() >= std::time::Duration::from_secs(5)
++                    {
 +                        // Print the elapsed time and divide by it rather than
 +                        // assuming the window is the 5 s it asked for: the
 +                        // sleeps in this loop are the thing under suspicion, so

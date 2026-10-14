@@ -373,18 +373,51 @@ tasks:
           exit 1
         fi
         base=${want%.*}
-        echo "looking for the handheld on $base.0/24..." >&2
-        # A TCP connect per host, in parallel, with a short timeout. nc is the
-        # right tool but is not always installed, hence the bash redirect.
-        for i in $(seq 1 254); do
-          (
-            if timeout 1 bash -c "exec 3<>/dev/tcp/$base.$i/21" 2>/dev/null; then
-              echo "$base.$i"
-            fi
-          ) &
+        # A sweep of 254 hosts in parallel takes about a second, which is the
+        # trap: it is a snapshot dressed up as a search. The handheld needs
+        # ~85 s from cold to get through the DHCP and the two dropped
+        # handshakes its radio does before COMPLETED, and a sweep run inside
+        # that window finds nothing and looks conclusive. It did exactly that
+        # once, and the empty result was then reported as "the device is not on
+        # the network" while it was seconds from associating.
+        #
+        # So sweep repeatedly for SLOT_WAIT_S (default 150, past the 85) and
+        # stop at the first answer.
+        limit={{.WAIT_S}}
+        [ "$limit" -lt 150 ] && limit=150
+        echo "looking for the handheld on $base.0/24, for up to ${limit}s..." >&2
+        waited=0
+        while :; do
+          # A TCP connect per host, in parallel, with a short timeout. nc is
+          # the right tool but is not always installed, hence the bash
+          # redirect. The whole group is redirected, not `wait`: the children
+          # inherit the group's stdout and `wait` has none of their output.
+          {
+            for i in $(seq 1 254); do
+              (
+                if timeout 1 bash -c "exec 3<>/dev/tcp/$base.$i/21" 2>/dev/null; then
+                  echo "$base.$i"
+                fi
+              ) &
+            done
+            wait
+          } > /tmp/slot-sweep.$$ 2>/dev/null
+          if [ -s /tmp/slot-sweep.$$ ]; then
+            cat /tmp/slot-sweep.$$
+            rm -f /tmp/slot-sweep.$$
+            break
+          fi
+          rm -f /tmp/slot-sweep.$$
+          if [ "$waited" -ge "$limit" ]; then
+            echo "nothing answered FTP in ${waited}s." >&2
+            echo "the handheld brings FTP up itself at boot (.tmp_update/updater, .slot-net)," >&2
+            echo "so if it is on and still absent, check the radio: slot-net.txt on the card." >&2
+            exit 1
+          fi
+          sleep 5
+          waited=$((waited + 6))
         done
-        wait
-      - 'echo "any address above answers FTP; the handheld also writes its own into slot-net.txt on the card" >&2'
+      - 'echo "the address above answers FTP; the handheld also writes its own into slot-net.txt on the card" >&2'
 
   device:check:
     desc: >-

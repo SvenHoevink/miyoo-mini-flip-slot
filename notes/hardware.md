@@ -150,7 +150,7 @@ boot like this one could never finish; leaving an attempt in progress alone is
 what lets it through. One success earlier was not proof -- this is the first
 boot that showed the failure and the recovery in the same log.
 
-## MI_AO ignores `u32FrmNum`: the codec holds 352 ms unless you hold it down
+## MI_AO ignores `u32FrmNum`: the codec holds 341 ms unless you hold it down
 
 Measured by filling it -- writes return while there is room and block when
 there is not, so the periods accepted before the first slow write are the
@@ -160,10 +160,12 @@ depth:
 slot: audio: MI_AO took 33 periods of 512 before blocking, 352 ms of hardware buffer
 ```
 
-**Asked for two periods. Got thirty-three.** `MI_AUDIO_Attr_t.u32FrmNum` is
+**Asked for two periods. Got thirty-three.** (Thirty-two of queue plus the one
+in flight: `QueryChnStat` later put `u32ChnTotalNum` at 65536 bytes, exactly 32
+periods, 341 ms. The two measurements agree.) `MI_AUDIO_Attr_t.u32FrmNum` is
 advisory at best on this stack, so any latency figure computed from it is
 fiction. And `Ring::fill` pads with silence rather than waiting, so the sink
-races ahead and keeps all 352 ms of it full: that is the sound running behind
+races ahead and keeps all 341 ms of it full: that is the sound running behind
 the picture, and it is most of what the "starved" counter counts.
 
 A whole evening of latency tuning went into the half of the budget that was
@@ -172,52 +174,97 @@ underneath unmeasured. The tell was there: 67 ms of real reduction that nobody
 could hear.
 
 `MI_AO_QueryChnStat` gives `u32ChnTotalNum` / `u32ChnFreeNum` / `u32ChnBusyNum`,
-and busy is the queue. The sink now writes only while busy is under
-`SLOTAO_QUEUE` periods (3, about 32 ms) and lets the codec drain otherwise,
-which puts the depth back under our control.
+and busy is the queue -- **in bytes**, see below. The sink writes only while it
+is under `SLOTAO_QUEUE` periods (5, about 53 ms) and lets the codec drain
+otherwise, which puts the depth back under our control.
 
 **The lesson, again: on this device, measure the buffer, do not configure it.**
 
-### Throttling it works, and runs into an unexplained 43,008 frames a second
+### `MI_AO_QueryChnStat` answers in bytes, which is where the 43,008 came from
 
-`SLOTAO_QUEUE=N` holds the queue at N periods by querying `u32ChnBusyNum` and
-writing only while it is short. It does what it is meant to: the lag goes, and
-the sound sits with the picture.
+`SLOTAO_QUEUE=N` holds the queue at N periods and does what it is meant to: the
+lag goes and the sound sits with the picture. For a while it also made the sound
+choppy, and the throughput pinned at **43,008 frames a second** against the
+48,000 the codec is configured for. That number was read as the codec draining
+10% slow. It was not; it was a unit mismatch in our own code.
 
-But with it on, the sink's throughput pins at **43,008 frames a second** against
-the 48,000 the codec is configured for -- and at *exactly* that figure with
-512-frame periods (84/s) and with 128-frame periods (336/s), a 4x change in
-granularity for an identical frame rate. Since each pass tops the queue up to a
-target, our drain rate is the codec's consumption, so the codec appears to be
-consuming about 10% slower than its configured rate.
+**The counts are bytes.** Logged on the device (2026-10-14, the counters are in
+the sink's 5 s trace):
 
-What that costs: production backs up, the ring fills to capacity, and
-`push_blocking` stalls the emulator -- `Ring::stalls` climbing past 3,000 in a
-session, the core held near 51 Hz, and the codec still reaching 0 in every
-window. Audible as chop.
+```
+slot: audio: codec chan total 65536 free 57216 busy 8320
+```
 
-Ruled out along the way:
+`u32ChnTotalNum` is **65536 bytes** -- 32 periods of 2048 (512 frames, stereo,
+16-bit), **341 ms**, which is the depth `u32FrmNum` asked for 2 of and got 32
+of. Busy counts of 8320, 2560 and 648 are 4.06, 1.25 and 0.32 periods, so they
+are plainly not a period count.
 
-- **write cadence** -- the 4x period change proved it, since the frame rate did
-  not move;
+`slotao_queued()` returned that byte count and the throttle compared it against
+`SLOTAO_QUEUE` **as periods**. Any audio at all in the codec is "5 or more", so
+the throttle only wrote once the queue had run completely dry, then dumped the
+whole target in one burst. A sawtooth from 53 ms to zero every 59.5 ms:
+
+```
+53.3 ms of audio per burst / (53.3 + ~6 ms before a pass notices) = 89.6%
+48000 x 0.896 = 43,008
+```
+
+The ~6 ms is a pass noticing on the next 10 ms tick -- `CONFIG_HZ` is 100 -- so
+the arithmetic ties the figure to this kernel's tick, not to the codec. It was
+stable to four figures because the duty cycle is.
+
+Measured with the bug in place, at `SLOTAO_QUEUE=5`, 512-frame periods:
+
+| | |
+|---|---|
+| throughput | 43,008 frames/s (420 periods per 5 s, in bursts of 5) |
+| codec queue floor | 0 bytes, every window |
+| passes | 100/s, exactly -- the loop's cadence was never the problem |
+| ring | 4000-6400 against a 3200 target, `0 starved` |
+| core stalls | 2,888 and climbing |
+
+And after converting the byte count to frames and throttling on those:
+
+| | |
+|---|---|
+| throughput | **48,036 frames/s** |
+| codec queue floor | 1704-1776 frames of 2560, i.e. 35 ms of its 53 |
+| ring | 1748-2905, on its target |
+| core stalls | **0** |
+| dropped / starved / send errors | 0 / 0 / 0 |
+| latency | ~47 ms in the codec + ~52 ms in the ring, about 100 ms, from ~420 |
+
+Confirmed by ear on the handheld: no lag, no chop. So the throttle is **on by
+default** at five periods, and `SLOTAO_QUEUE=0` restores the unthrottled path.
+
+Fast-forward is the one transient left: `FfStart` drives the ring down to
+~150 frames with a few hundred "ring short" passes in that window, and the
+throttle correctly declines to write what the ring cannot fill rather than
+padding silence. Output stays at 48,137 frames/s through it, `0 starved`, and
+it recovers within two windows.
+
+Ruled out along the way, and still ruled out:
+
 - **the audio thread starving the core** -- sleeping every pass instead of only
   the empty ones changed nothing;
-- **the ring being too shallow** -- it reports 0 starved throughout; the
-  deficit had moved downstream of it, which is what made the ring numbers
-  misleading for most of an evening;
+- **the ring being too shallow** -- it reported 0 starved throughout; the
+  deficit was downstream of it, which is what made the ring numbers misleading
+  for most of an evening;
 - **the rate enum** -- `MI_AUDIO_SampleRate_e` is literal Hz
-  (`E_MI_AUDIO_SAMPLE_RATE_48000 = 48000`), so 48000 is a valid value and is
-  what is being set.
+  (`E_MI_AUDIO_SAMPLE_RATE_48000 = 48000`), so 48000 is valid and is what is
+  set. The codec's pitch was always correct, which should have been taken as
+  proof it really did consume 48,000 frames a second.
 
-So the throttle is **off by default** (`SLOTAO_QUEUE` unset or 0) and the sink
-writes unthrottled: laggy and clean, which beats clean-rate and choppy.
-Confirmed on the device -- ring sitting on its 3200 target, `0 core stalls`,
-starvation frozen at its startup figure, and smooth audio about 350 ms behind.
-`PERIOD_FRAMES` is back to 512 with it; 128 existed only to give the throttle
-granularity. Next
-thing to chase is the 43,008 itself -- whether `u32ChnBusyNum` counts what it
-appears to, and what `MI_AO_QueryChnStat` reports for total and free alongside
-it, before anything else is built on top.
+What was *wrongly* ruled out, and the lesson in it: **write cadence**, on the
+grounds that changing the period size 512 -> 128 left the frames/s identical. An
+identical figure across a 4x granularity change is not an exoneration, it is a
+clue that the mechanism is indifferent to granularity -- which a duty cycle set
+by the 10 ms tick is. The test was run, the result was recorded correctly, and
+the inference went the wrong way for a session.
+
+`PERIOD_FRAMES` is 512. 128 existed only to give the throttle granularity it did
+not need.
 
 ## Overwriting a dlopen'ed library under a running slot is a crash
 

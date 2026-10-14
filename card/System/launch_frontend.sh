@@ -55,15 +55,17 @@ export SLOT_FB_ROTATE=180
 # audio pitch are right and the cost is judder rather than slow motion.
 export SLOT_DRIVE_EMU=0
 
-# Audio: upstream's ring depth, and the codec queue throttle left off.
+# Audio: upstream's ring depth, and the codec queue throttle on by default in
+# the binary (SLOTAO_QUEUE, five 512-frame periods, 53 ms).
 #
 # MI_AO ignores the buffer depth in its attributes -- asked for two periods it
-# accepted 33, which is 352 ms -- and that is the audio lag. SLOTAO_QUEUE=N
-# holds the queue down by querying it instead, which does remove the lag, but
-# it also pins the drain at 43,008 frames a second against the 48,000 the codec
-# is set to, identically at 512- and 128-frame periods. The ring then backs up
-# and stalls the core, and the result is choppy. Laggy and clean beats that
-# until the 43,008 is understood. notes/hardware.md has the numbers.
+# accepted 32, which is 341 ms -- and that was the audio lag. The throttle
+# queries the queue instead and tops it up to a target, which held the whole
+# pipeline at ~100 ms, measured. It used to make the sound choppy as well, and
+# that turned out to be MI_AO_QueryChnStat answering in *bytes* where the
+# throttle read periods: any audio at all counted as "5 or more", so it only
+# wrote once the codec had run completely dry. notes/hardware.md has the
+# numbers. SLOTAO_QUEUE=0 goes back to unthrottled and laggy if ever needed.
 export SLOT_RING_FRAMES=8
 
 # A cart that crashes its core soft-bricks the handheld: the seated cart is
