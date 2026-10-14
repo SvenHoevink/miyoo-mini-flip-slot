@@ -105,6 +105,37 @@ int slotao_queued(void) {
 	return (int)st.u32ChnBusyNum;
 }
 
+// The whole channel state, rather than just the busy count.
+//
+// Only u32ChnBusyNum was ever read, and a count with no denominator cannot be
+// checked against anything: u32FrmNum already proved this stack will accept a
+// number and then do something else entirely. total says what depth the queue
+// really has -- 33 periods, measured, against the 4 asked for -- and free says
+// whether busy and total are even in the units we write in.
+//
+// Returns 0 on success, or the MI error code; -1 if the channel is not open.
+int slotao_stat(unsigned int *total, unsigned int *freed, unsigned int *busy) {
+	if (!opened) {
+		return -1;
+	}
+	MI_AO_ChnState_t st;
+	memset(&st, 0, sizeof(st));
+	MI_S32 err = MI_AO_QueryChnStat(AO_DEV, AO_CHN, &st);
+	if (err != 0) {
+		return err;
+	}
+	if (total != NULL) {
+		*total = st.u32ChnTotalNum;
+	}
+	if (freed != NULL) {
+		*freed = st.u32ChnFreeNum;
+	}
+	if (busy != NULL) {
+		*busy = st.u32ChnBusyNum;
+	}
+	return 0;
+}
+
 // `frames` is sample frames, not bytes. Blocks up to timeout_ms.
 int slotao_write(const void *data, unsigned int frames, unsigned int channels, int timeout_ms) {
 	if (!opened) {

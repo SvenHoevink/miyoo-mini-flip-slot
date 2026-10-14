@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..d3aedef
+index 0000000..a302993
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,418 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -188,12 +188,17 @@ index 0000000..d3aedef
 +type Write = unsafe extern "C" fn(*const c_void, u32, u32, i32) -> i32;
 +type Close = unsafe extern "C" fn();
 +type Queued = unsafe extern "C" fn() -> i32;
++type Stat = unsafe extern "C" fn(*mut u32, *mut u32, *mut u32) -> i32;
 +
 +struct Shim {
 +    open: Open,
 +    write: Write,
 +    close: Close,
 +    queued: Queued,
++    /// Optional: a card carrying an older `libslotao.so` than this binary has
++    /// no `slotao_stat`, and a missing diagnostic must not cost the device its
++    /// audio -- `sym!` fails the whole load.
++    stat: Option<Stat>,
 +    _lib: Library,
 +}
 +
@@ -214,11 +219,15 @@ index 0000000..d3aedef
 +                    let write = sym!("slotao_write");
 +                    let close = sym!("slotao_close");
 +                    let queued = sym!("slotao_queued");
++                    let stat = unsafe { lib.get::<Stat>(b"slotao_stat\0") }
++                        .map(|s| *s)
++                        .ok();
 +                    return Ok(Shim {
 +                        open,
 +                        write,
 +                        close,
 +                        queued,
++                        stat,
 +                        _lib: lib,
 +                    });
 +                }
@@ -338,13 +347,15 @@ index 0000000..d3aedef
 +                    .filter(|n| (0..=128).contains(n))
 +                    // Off by default. Throttling the codec's queue is the only
 +                    // way to control the 352 ms it otherwise holds, and it does
-+                    // remove the lag -- but it also pins the drain at 43,008
++                    // remove the lag -- but throughput then pins at 43,008
 +                    // frames a second against the 48,000 the codec is
-+                    // configured for, identically at 512- and 128-frame
-+                    // periods, which is unexplained. The ring then backs up,
-+                    // push_blocking stalls the core, and the result is choppy.
-+                    // Unthrottled is laggy and clean; that is the better
-+                    // default until the 43,008 is understood.
++                    // configured for, the ring backs up, push_blocking stalls
++                    // the core, and the result is choppy. That 43,008 is a
++                    // throughput this loop achieved, not a drain rate the codec
++                    // imposed: nothing counted the loop's own pass rate or the
++                    // core's production while it was happening, and the
++                    // counters below exist to tell those apart. Unthrottled is
++                    // laggy and clean; that is the better default until it is.
 +                    .unwrap_or(0);
 +                // SAFETY: the shim is loaded and the channel is open.
 +                let queued = || unsafe { (shim.queued)() };
@@ -356,14 +367,31 @@ index 0000000..d3aedef
 +
 +                // What this loop actually does, since the ring's own trace
 +                // says 0 starved and the chop is therefore downstream of it.
-+                // The three things I cannot currently see: whether the codec's
++                // The three things I could not see before: whether the codec's
 +                // queue reaches 0 (a real hole in the output), how often a pass
 +                // writes nothing, and whether SendFrame is failing -- only the
 +                // first failure is ever reported.
++                //
++                // `passes` and `wrote_max` are here to settle the 43,008: the
++                // throttle's throughput was 84 periods a second at 512 frames
++                // and 336 at 128, the same frames a second from a 4x
++                // granularity change, which was read as a property of the codec
++                // because the loop's own rate was never counted. 84 passes a
++                // second -- a "2 ms" sleep landing on a 12 ms tick, this
++                // kernel's CONFIG_HZ being 100 -- gives both figures from one
++                // period per pass and four per pass. So measure the pass rate
++                // against the elapsed time, and the periods a pass actually
++                // manages, before believing anything about the codec's drain.
 +                let mut low = i32::MAX;
 +                let mut empty = 0u32;
 +                let mut errs = 0u32;
 +                let mut wrote_total = 0u64;
++                let mut passes = 0u64;
++                let mut wrote_max = 0i32;
++                // Times a top-up stopped early because the ring could not fill
++                // another period. If this is large the shortfall is production,
++                // upstream of the sink, and the codec is innocent.
++                let mut ring_short = 0u32;
 +                let mut said = std::time::Instant::now();
 +
 +                while !flag.load(Ordering::Relaxed) {
@@ -373,12 +401,38 @@ index 0000000..d3aedef
 +                    // up as a measurement, which is the last thing this file
 +                    // needs more of.
 +                    if want > 0 && said.elapsed() >= std::time::Duration::from_secs(5) {
++                        // Print the elapsed time and divide by it rather than
++                        // assuming the window is the 5 s it asked for: the
++                        // sleeps in this loop are the thing under suspicion, so
++                        // a rate derived from a nominal window would be begging
++                        // the question.
++                        let secs = said.elapsed().as_secs_f64();
 +                        eprintln!(
-+                            "slot: audio: codec queue low {low} of {want}, {empty} empty passes, {errs} send errors, {wrote_total} periods written"
++                            "slot: audio: codec queue low {low} of {want}, {passes} passes in {secs:.2}s ({:.0}/s), {wrote_total} periods written ({:.0} frames/s, max {wrote_max}/pass), {ring_short} ring short, {empty} empty passes, {errs} send errors",
++                            passes as f64 / secs,
++                            wrote_total as f64 * PERIOD_FRAMES as f64 / secs,
 +                        );
++                        // What the queue's units and real depth are. busy is
++                        // all the throttle reads, and a count without its
++                        // denominator cannot be checked against anything.
++                        if let Some(stat) = shim.stat {
++                            let (mut t, mut f, mut b) = (0u32, 0u32, 0u32);
++                            // SAFETY: three live out-pointers; the shim writes
++                            // each only on success.
++                            let err = unsafe { stat(&mut t, &mut f, &mut b) };
++                            if err == 0 {
++                                eprintln!(
++                                    "slot: audio: codec chan total {t} free {f} busy {b}"
++                                );
++                            } else {
++                                eprintln!("slot: audio: codec chan stat: error {err}");
++                            }
++                        }
 +                        (low, empty, errs, wrote_total) = (i32::MAX, 0, 0, 0);
++                        (passes, wrote_max, ring_short) = (0, 0, 0);
 +                        said = std::time::Instant::now();
 +                    }
++                    passes += 1;
 +                    // Hold the codec's queue near the target: without it the
 +                    // sink races ahead and the 352 ms buffer stays full, which
 +                    // is the sound running behind the picture.
@@ -420,6 +474,7 @@ index 0000000..d3aedef
 +                        let mut wrote = 0;
 +                        for _ in 0..(want - q).min(want) {
 +                            if ring.queued_frames() < PERIOD_FRAMES {
++                                ring_short += 1;
 +                                break;
 +                            }
 +                            wrote += 1;
@@ -442,6 +497,7 @@ index 0000000..d3aedef
 +                            }
 +                        }
 +                        wrote_total += wrote as u64;
++                        wrote_max = wrote_max.max(wrote);
 +                        if wrote == 0 {
 +                            empty += 1;
 +                        }
@@ -606,25 +662,21 @@ index aada45b..9e71727 100644
          self.overruns.store(0, Ordering::Relaxed);
          self.underruns.store(0, Ordering::Relaxed);
 diff --git a/crates/slot/src/drc.rs b/crates/slot/src/drc.rs
-index 1114105..e1a54c2 100644
+index 1114105..3db2fef 100644
 --- a/crates/slot/src/drc.rs
 +++ b/crates/slot/src/drc.rs
-@@ -9,6 +9,18 @@ pub fn drc_ratio(queued_frames: usize, target_frames: usize) -> f64 {
+@@ -9,6 +9,14 @@ pub fn drc_ratio(queued_frames: usize, target_frames: usize) -> f64 {
      ratio.clamp(1.0 - MAX_CORRECTION, 1.0 + MAX_CORRECTION)
  }
  
 +/// Where dynamic rate control holds the ring, as a fraction of its capacity.
 +///
-+/// Upstream holds it at half, which makes the ring's occupancy and its headroom
-+/// the same number. That is fine where the sink drains steadily. The MI_AO sink
-+/// does not: it writes only while the codec's queue is under target and sleeps
-+/// otherwise, so the ring fills between bursts -- measured at 2573 frames
-+/// against a 3200 capacity -- and `push_blocking` then stalls the emulator
-+/// waiting for room. The core sat at 51 Hz, 10% short on audio, with the ring
-+/// reporting no starvation at all because the deficit had moved to the codec.
-+///
-+/// A quarter keeps the occupancy, and so the latency, where it was while giving
-+/// the ring three times the headroom before it can block the core.
++/// Upstream's half, deliberately: a quarter was tried, to give `push_blocking`
++/// three times the headroom before a full ring could stall the emulator with
++/// the MI_AO throttle on, and it changed nothing audible. The ring was the
++/// symptom. With the throttle on the ring sat near full and the core near
++/// 51 Hz, but cutting the target only moved where the surplus waited -- the
++/// shortfall is still unexplained, and `notes/audio-handoff.md` has it.
  pub fn drc_target(capacity_frames: usize) -> usize {
      capacity_frames / 2
  }
