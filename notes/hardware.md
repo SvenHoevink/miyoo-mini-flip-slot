@@ -118,6 +118,64 @@ libmi_venc.so   libmi_wlan.so
   so the library and the PCM are both there and something else was holding the
   device. An `MI_AO` sink may still be wanted, but it is not forced.
 
+## MI_AO ignores `u32FrmNum`: the codec holds 352 ms unless you hold it down
+
+Measured by filling it -- writes return while there is room and block when
+there is not, so the periods accepted before the first slow write are the
+depth:
+
+```
+slot: audio: MI_AO took 33 periods of 512 before blocking, 352 ms of hardware buffer
+```
+
+**Asked for two periods. Got thirty-three.** `MI_AUDIO_Attr_t.u32FrmNum` is
+advisory at best on this stack, so any latency figure computed from it is
+fiction. And `Ring::fill` pads with silence rather than waiting, so the sink
+races ahead and keeps all 352 ms of it full: that is the sound running behind
+the picture, and it is most of what the "starved" counter counts.
+
+A whole evening of latency tuning went into the half of the budget that was
+visible -- the ring's DRC target, cut from 100 ms to 33 -- while this sat
+underneath unmeasured. The tell was there: 67 ms of real reduction that nobody
+could hear.
+
+`MI_AO_QueryChnStat` gives `u32ChnTotalNum` / `u32ChnFreeNum` / `u32ChnBusyNum`,
+and busy is the queue. The sink now writes only while busy is under
+`SLOTAO_QUEUE` periods (3, about 32 ms) and lets the codec drain otherwise,
+which puts the depth back under our control.
+
+**The lesson, again: on this device, measure the buffer, do not configure it.**
+
+## Overwriting a dlopen'ed library under a running slot is a crash
+
+`crash/exits.log` had 16 crashes in one evening, 15 of them SIGSEGV or SIGBUS in
+`slot-audio-miao`, each one minutes after a deploy. They were not an audio bug.
+`task deploy` staged the main binary as `slot.new` and renamed it -- FTP
+truncates on open, and a rename is atomic -- but pushed `libslotao.so` straight
+over the live file, which the audio thread has `dlopen`ed and mapped. Truncating
+a mapped file under a running process is SIGBUS in whichever thread touches the
+missing pages.
+
+The shim and both cores are now staged and renamed like the binary. The signal
+to notice sooner: a crash *thread* that matches whatever was just deployed, and
+a crash *time* that matches the deploy rather than anything the user did.
+
+## mGBA crashes on an MBC2 cart with no save RAM
+
+```
+SIGSEGV in thread slot-emu, Kirby's Pinball Land DX (GBC)
+pc mgba_libretro.so+0x491c8  _GBMBC2Read
+lr mgba_libretro.so+0x4c6a0  GBLoad8
+```
+
+0.9 s after the first frame, reproducible on that cart. Note what the load did
+*not* log: no `emu: save ram` line, where a cart with SRAM logs one (Alleyway
+DX: `save ram, 8192 bytes`). An MBC2 mapper read with no save RAM behind it.
+
+This is inside the core, not the port -- there is nothing on our side of the
+seam to fix, and GBC cannot fall back to gpSP, which only supports GBA. Worth
+re-testing against a newer mGBA at the next core bump.
+
 ## The lid: poll `hallvalue`, there are no events
 
 **Resolved.** The clamshell sensor is a platform device and exposes its state at

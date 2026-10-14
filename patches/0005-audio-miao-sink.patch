@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..ba3d57a
+index 0000000..19a49bc
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,248 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -183,11 +183,13 @@ index 0000000..ba3d57a
 +type Open = unsafe extern "C" fn(u32, u32, u32) -> i32;
 +type Write = unsafe extern "C" fn(*const c_void, u32, u32, i32) -> i32;
 +type Close = unsafe extern "C" fn();
++type Queued = unsafe extern "C" fn() -> i32;
 +
 +struct Shim {
 +    open: Open,
 +    write: Write,
 +    close: Close,
++    queued: Queued,
 +    _lib: Library,
 +}
 +
@@ -207,10 +209,12 @@ index 0000000..ba3d57a
 +                    let open = sym!("slotao_open");
 +                    let write = sym!("slotao_write");
 +                    let close = sym!("slotao_close");
++                    let queued = sym!("slotao_queued");
 +                    return Ok(Shim {
 +                        open,
 +                        write,
 +                        close,
++                        queued,
 +                        _lib: lib,
 +                    });
 +                }
@@ -313,46 +317,39 @@ index 0000000..ba3d57a
 +
 +                let mut buf = vec![0i16; PERIOD_FRAMES * CHANNELS as usize];
 +
-+                // How deep is the hardware actually? `u32FrmNum` in the attr
-+                // asks for a depth, and nothing says MI_AO honours a small one.
-+                // It matters because it is half the audio latency, and cutting
-+                // the ring's share from 100 ms to 33 ms was barely audible --
-+                // which is what a large fixed component downstream would look
-+                // like.
++                // The codec's queue is the latency, and it has to be held
++                // down rather than configured: `u32FrmNum` asked for two
++                // periods and this stack accepted 33 of them, 352 ms, which it
++                // then kept full because `Ring::fill` pads with silence instead
++                // of waiting. Every latency figure before this was measured on
++                // the ring alone and missed it.
 +                //
-+                // Measured by filling it: writes return immediately while there
-+                // is room and block once there is not, so the number accepted
-+                // before the first slow write is the depth. Silence, at
-+                // startup, costing only what it reports.
-+                {
-+                    let mut periods = 0u32;
-+                    while periods < 64 {
-+                        let t = std::time::Instant::now();
-+                        // SAFETY: as the writes below.
-+                        let err = unsafe {
-+                            (shim.write)(
-+                                buf.as_ptr() as *const c_void,
-+                                PERIOD_FRAMES as u32,
-+                                CHANNELS,
-+                                WRITE_TIMEOUT_MS,
-+                            )
-+                        };
-+                        if err != 0 {
-+                            break;
-+                        }
-+                        periods += 1;
-+                        if t.elapsed() > std::time::Duration::from_millis(4) {
-+                            break;
-+                        }
-+                    }
-+                    let ms = periods as f64 * PERIOD_FRAMES as f64 * 1000.0 / DEVICE_HZ as f64;
-+                    eprintln!(
-+                        "slot: audio: MI_AO took {periods} periods of {PERIOD_FRAMES} before blocking, {ms:.0} ms of hardware buffer"
-+                    );
-+                }
++                // So write only while the codec is short, and let it drain to
++                // the target otherwise. `SLOTAO_QUEUE` tunes the depth in
++                // periods; three is ~32 ms at 512 frames and 48 kHz.
++                let want = std::env::var("SLOTAO_QUEUE")
++                    .ok()
++                    .and_then(|v| v.trim().parse::<i32>().ok())
++                    .filter(|n| (1..=32).contains(n))
++                    .unwrap_or(3);
++                // SAFETY: the shim is loaded and the channel is open.
++                let queued = || unsafe { (shim.queued)() };
++                eprintln!(
++                    "slot: audio: MI_AO queue target {want} periods, {:.0} ms; it reports {} now",
++                    want as f64 * PERIOD_FRAMES as f64 * 1000.0 / DEVICE_HZ as f64,
++                    queued()
++                );
 +
 +                let mut complained = false;
 +                while !flag.load(Ordering::Relaxed) {
++                    // Hold the codec's queue at the target. Without this the
++                    // sink races ahead and the 352 ms buffer stays full, which
++                    // is heard as the sound running behind the picture.
++                    let q = queued();
++                    if q >= want {
++                        std::thread::sleep(std::time::Duration::from_millis(2));
++                        continue;
++                    }
 +                    ring.fill(&mut buf);
 +                    // SAFETY: buf holds PERIOD_FRAMES frames of CHANNELS i16s.
 +                    let err = unsafe {

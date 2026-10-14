@@ -394,15 +394,30 @@ tasks:
       - curl -sS -T card/System/net-up.sh "{{.FTP}}/System/net-up.sh"
       - curl -sS -T card/System/coresave-miyoo.sh "{{.FTP}}/System/coresave-miyoo.sh"
       - curl -sS -T card/System/coresave.sh "{{.FTP}}/System/coresave.sh" 2>/dev/null || true
-      - curl -sS -T vendor-miyoo/libslotao.so "{{.FTP}}/System/libslotao.so"
+      # Same staging as the binary, and for the same reason: FTP truncates on
+      # open, and this library is dlopen'ed -- so writing straight over it pulls
+      # the mapped pages out from under the running audio thread. That is
+      # SIGBUS/SIGSEGV in slot-audio-miao, and it accounted for 15 of the 16
+      # crashes in crash/exits.log before anyone noticed, every one of them
+      # blamed on the audio work going on at the time.
+      - curl -sS -T vendor-miyoo/libslotao.so "{{.FTP}}/System/libslotao.so.new"
+      - >-
+        sh tools/device-sh.sh {{.DEVICE}}
+        'cd /mnt/SDCARD/System && [ -s libslotao.so.new ] && mv libslotao.so.new libslotao.so && echo renamed || echo "upload incomplete, left libslotao.so alone"'
       - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
 
   deploy:cores:
     desc: Push the two libretro cores as well, which rarely change
     deps: [device:check, cores]
     cmds:
-      - curl -sS -T vendor-miyoo/gpsp_libretro.so "{{.FTP}}/System/gpsp_libretro.so"
-      - curl -sS -T vendor-miyoo/mgba_libretro.so "{{.FTP}}/System/mgba_libretro.so"
+      # Staged and renamed, like the binary and the shim: these are dlopen'ed,
+      # so truncating one under a running slot is a crash in slot-emu.
+      - curl -sS -T vendor-miyoo/gpsp_libretro.so "{{.FTP}}/System/gpsp_libretro.so.new"
+      - curl -sS -T vendor-miyoo/mgba_libretro.so "{{.FTP}}/System/mgba_libretro.so.new"
+      - >-
+        sh tools/device-sh.sh {{.DEVICE}}
+        'cd /mnt/SDCARD/System; for c in gpsp mgba; do
+        [ -s $c\_libretro.so.new ] && mv $c\_libretro.so.new $c\_libretro.so && echo "renamed $c" || echo "upload incomplete, left $c alone"; done'
 
   sh:device:
     desc: >-

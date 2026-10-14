@@ -86,6 +86,25 @@ int slotao_resample_from(unsigned int in_rate) {
 	return MI_AO_EnableReSmp(AO_DEV, AO_CHN, (MI_AUDIO_SampleRate_e)in_rate);
 }
 
+// Periods the codec still has to play, or -1 if it will not say.
+//
+// This is the only handle on audio latency that works. u32FrmNum asks for a
+// buffer depth and this stack ignores it: asked for 2 periods it accepted 33,
+// 352 ms, and because the sink pads with silence rather than waiting it kept
+// that full. Querying the queue and writing only when it is shallow puts the
+// depth back under our control.
+int slotao_queued(void) {
+	if (!opened) {
+		return -1;
+	}
+	MI_AO_ChnState_t st;
+	memset(&st, 0, sizeof(st));
+	if (MI_AO_QueryChnStat(AO_DEV, AO_CHN, &st) != 0) {
+		return -1;
+	}
+	return (int)st.u32ChnBusyNum;
+}
+
 // `frames` is sample frames, not bytes. Blocks up to timeout_ms.
 int slotao_write(const void *data, unsigned int frames, unsigned int channels, int timeout_ms) {
 	if (!opened) {
