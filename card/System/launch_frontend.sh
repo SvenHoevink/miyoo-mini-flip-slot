@@ -71,6 +71,30 @@ export SLOTAO_QUEUE=3
 # once the latency is settled.
 export SLOT_TRACE=1
 
+# A cart that crashes its core soft-bricks the handheld: the seated cart is
+# re-inserted on every boot, the core segfaults, slot dies before it can clear
+# the cart, and since slot is the boot process there is no shelf to escape to.
+# Kirby's Pinball Land DX does exactly this -- SIGSEGV in mGBA's _GBMBC2Read --
+# and getting out of it needed FTP and a hand-edited Config/slot.state.
+#
+# So: drop a guard before launching and clear it once slot has survived a while.
+# Finding it still there at boot means the last launch did not survive its first
+# seconds, and the seated cart is the likeliest reason, so it is unseated and
+# the handheld comes up on the shelf.
+guard="$SD/Config/.slot-launching"
+if [ -f "$guard" ]; then
+	sed -i -e 's/^cart=.*/cart=/' -e 's/^cart_platform=.*/cart_platform=/' \
+		"$SD/Config/slot.state" 2>/dev/null
+	rm -f "$guard"
+	echo "slot: last launch did not survive; unseated the cart" >> "$SD/slot-launch.txt"
+fi
+: > "$guard"
+sync
+# Long enough to be past loading a core and showing a frame, short enough that
+# a deliberate power-off mid-game does not usually trip it -- and tripping it
+# only costs starting at the shelf.
+( sleep 25; rm -f "$guard" ) &
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
