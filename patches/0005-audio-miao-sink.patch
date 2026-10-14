@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..3b936bc
+index 0000000..d07cd70
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,308 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -378,10 +378,12 @@ index 0000000..3b936bc
 +                        // cushion is there to cover a short ring, and it only
 +                        // works if we let it drain instead of filling it with
 +                        // zeros.
++                        let mut wrote = 0;
 +                        for _ in 0..(want - q).min(want) {
 +                            if ring.queued_frames() < PERIOD_FRAMES {
 +                                break;
 +                            }
++                            wrote += 1;
 +                            ring.fill(&mut buf);
 +                            // SAFETY: buf holds PERIOD_FRAMES frames.
 +                            let err = unsafe {
@@ -396,6 +398,15 @@ index 0000000..3b936bc
 +                                complained = true;
 +                                eprintln!("slot: audio: MI_AO send: error {err}");
 +                            }
++                        }
++                        // Wrote nothing: the codec wants more and the ring has
++                        // not got a period yet. Without this the loop spins,
++                        // hammering QueryChnStat on two cores at a raised
++                        // priority, and starves the emulator and the renderer
++                        // -- which sounds like the distortion it is meant to be
++                        // avoiding.
++                        if wrote == 0 {
++                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                        }
 +                        continue;
 +                    }
