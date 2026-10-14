@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..c601cd1
+index 0000000..3b936bc
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,297 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -366,8 +366,22 @@ index 0000000..c601cd1
 +                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                            continue;
 +                        }
-+                        // Everything that drained, in one pass.
++                        // Everything that drained, in one pass -- but only
++                        // as far as the ring can actually supply.
++                        //
++                        // `Ring::fill` pads with silence rather than waiting,
++                        // so writing a period the ring cannot fill puts a hole
++                        // in the stream. A top-up of up to `want` periods is
++                        // 2560 frames against a ring target of 1600, so the
++                        // burst outran the ring and the padding was audible as
++                        // crackle. The codec is already holding ~53 ms; that
++                        // cushion is there to cover a short ring, and it only
++                        // works if we let it drain instead of filling it with
++                        // zeros.
 +                        for _ in 0..(want - q).min(want) {
++                            if ring.queued_frames() < PERIOD_FRAMES {
++                                break;
++                            }
 +                            ring.fill(&mut buf);
 +                            // SAFETY: buf holds PERIOD_FRAMES frames.
 +                            let err = unsafe {
