@@ -280,7 +280,7 @@ The shim and both cores are now staged and renamed like the binary. The signal
 to notice sooner: a crash *thread* that matches whatever was just deployed, and
 a crash *time* that matches the deploy rather than anything the user did.
 
-## mGBA crashes on an MBC2 cart with no save RAM
+## mGBA used to crash on an MBC2 cart: a use-after-free in the core (fixed)
 
 ```
 SIGSEGV in thread slot-emu, Kirby's Pinball Land DX (GBC)
@@ -288,13 +288,48 @@ pc mgba_libretro.so+0x491c8  _GBMBC2Read
 lr mgba_libretro.so+0x4c6a0  GBLoad8
 ```
 
-0.9 s after the first frame, reproducible on that cart. Note what the load did
-*not* log: no `emu: save ram` line, where a cart with SRAM logs one (Alleyway
-DX: `save ram, 8192 bytes`). An MBC2 mapper read with no save RAM behind it.
+0.9 s after the first frame, reproducible on that cart. Fixed by
+`cores/mgba/patches/gb-mbc2-sram-bank.patch`; the cart plays and no new entry
+has appeared in `crash/exits.log` since (2026-10-14).
 
-This is inside the core, not the port -- there is nothing on our side of the
-seam to fix, and GBC cannot fall back to gpSP, which only supports GBA. Worth
-re-testing against a newer mGBA at the next core bump.
+The cart header is innocent: type `0x06`, MBC2+BATTERY, RAM size byte `0x00`,
+which is what the spec requires for MBC2 because its 512x4 bits of RAM live
+inside the mapper rather than in a RAM chip. `GBMBCInit` duly sets
+`sramSize = 0x100`.
+
+That is smaller than the 8 KB bank size `GBMBCSwitchSramBank` is written
+around, so every path through its bounds check failed and it returned **without
+assigning `sramBank`**. `GBLoadSave` reaches it immediately after
+`GBSramDeinit`, which frees the SRAM and leaves `sramBank` pointing into the
+freed mapping -- so nothing re-pointed it, `GBMBCReset` having run before the
+save was loaded, and `_GBMBC2Read` indexes `sramBank` directly because
+`directSramAccess` is false for MBC2. First save read after boot, freed memory.
+
+MBC7 (`0x100`) and TAMA5 (`0x20`) take the same early return. Their read
+handlers go to mapper registers rather than `sramBank`, so they do not fault,
+but their bank pointer was equally wrong.
+
+`mgba-emu/mgba` master already carries this fix and `libretro/mgba` has not
+rebased onto it -- the bug is in our pinned `e31759b2` (2026-08-05) and in
+libretro HEAD `7a12d6d4` alike, so **bumping `MGBA_COMMIT` would not have fixed
+it.** The patch follows upstream's shape so it fails to apply once libretro
+picks the fix up, which is the signal to delete it.
+
+The lesson for the port: "it is inside the core, past the seam" was true about
+the location and wrong about it being out of reach. Core patches now have a
+home at `cores/mgba/patches/`, applied after upstream slot's and hashed into
+the build stamp.
+
+### Still open: MBC2 saves probably do not persist
+
+The load still logs no `emu: save ram` line where an MBC1 cart does
+(Alleyway DX: `save ram, 8192 bytes`). That is not the crash -- it is mGBA's
+libretro layer deferring `core->reset()` to the first `retro_run`
+(`_doDeferredSetup`, "need to defer resetting the core on start so drivers are
+initialized"), so `retro_get_memory_size(RETRO_MEMORY_SAVE_RAM)` returns
+`gb->sramSize`, which is still 0 when slot asks. Unverified, but it implies
+Kirby's high scores are lost on exit. Check whether slot can re-query the size
+after the first frame before building anything.
 
 ## The lid: poll `hallvalue`, there are no events
 
