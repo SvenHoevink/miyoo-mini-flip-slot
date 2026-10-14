@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..19a49bc
+index 0000000..c601cd1
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,283 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -327,11 +327,12 @@ index 0000000..19a49bc
 +                // So write only while the codec is short, and let it drain to
 +                // the target otherwise. `SLOTAO_QUEUE` tunes the depth in
 +                // periods; three is ~32 ms at 512 frames and 48 kHz.
++                let mut complained = false;
 +                let want = std::env::var("SLOTAO_QUEUE")
 +                    .ok()
 +                    .and_then(|v| v.trim().parse::<i32>().ok())
 +                    .filter(|n| (1..=32).contains(n))
-+                    .unwrap_or(3);
++                    .unwrap_or(5);
 +                // SAFETY: the shim is loaded and the channel is open.
 +                let queued = || unsafe { (shim.queued)() };
 +                eprintln!(
@@ -340,14 +341,48 @@ index 0000000..19a49bc
 +                    queued()
 +                );
 +
-+                let mut complained = false;
 +                while !flag.load(Ordering::Relaxed) {
-+                    // Hold the codec's queue at the target. Without this the
++                    // Hold the codec's queue near the target: without it the
 +                    // sink races ahead and the 352 ms buffer stays full, which
-+                    // is heard as the sound running behind the picture.
++                    // is the sound running behind the picture.
++                    //
++                    // Top the queue *up* to the target rather than writing one
++                    // period per wake-up. The first attempt did the latter and
++                    // sounded far worse than the lag it fixed: a period is
++                    // 10.7 ms of audio and CONFIG_HZ here is 100, so a "2 ms"
++                    // sleep is a 10 ms one, and one period per 10 ms is the
++                    // codec's own drain rate with no slack at all -- every
++                    // hiccup became an underrun. Topping up decouples
++                    // throughput from the timer: each pass writes however many
++                    // periods actually drained, so a late wake-up is made good
++                    // by a longer write rather than lost.
++                    //
++                    // A negative answer means the channel will not say, and
++                    // then the old unthrottled behaviour is the safe one: lag
++                    // beats silence.
 +                    let q = queued();
-+                    if q >= want {
-+                        std::thread::sleep(std::time::Duration::from_millis(2));
++                    if q >= 0 {
++                        if q >= want {
++                            std::thread::sleep(std::time::Duration::from_millis(2));
++                            continue;
++                        }
++                        // Everything that drained, in one pass.
++                        for _ in 0..(want - q).min(want) {
++                            ring.fill(&mut buf);
++                            // SAFETY: buf holds PERIOD_FRAMES frames.
++                            let err = unsafe {
++                                (shim.write)(
++                                    buf.as_ptr() as *const c_void,
++                                    PERIOD_FRAMES as u32,
++                                    CHANNELS,
++                                    WRITE_TIMEOUT_MS,
++                                )
++                            };
++                            if err != 0 && !complained {
++                                complained = true;
++                                eprintln!("slot: audio: MI_AO send: error {err}");
++                            }
++                        }
 +                        continue;
 +                    }
 +                    ring.fill(&mut buf);

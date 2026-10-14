@@ -65,7 +65,10 @@ export SLOT_DRIVE_EMU=0
 # codec's queue is now held down by querying it instead, SLOTAO_QUEUE periods
 # of 512 frames. Three is ~32 ms.
 export SLOT_RING_FRAMES=4
-export SLOTAO_QUEUE=3
+# Five periods, ~53 ms. The queue is topped up to this each pass rather than
+# written one period at a time, which is what made the first attempt sound
+# worse than the lag it replaced.
+export SLOTAO_QUEUE=5
 
 # TEMPORARY, one run: the queue target line and the ring's own numbers. Remove
 # once the latency is settled.
