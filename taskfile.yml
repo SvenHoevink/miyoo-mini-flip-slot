@@ -346,6 +346,40 @@ tasks:
             cargo test -p slot-gfx -p slot-power --lib --target {{.TARGET}}
             --no-default-features --features software
 
+  device:find:
+    desc: >-
+      Find the handheld on the local /24 by its FTP port. Its address is DHCP
+      and does move -- a whole round of "the device is off the network" was
+      really the device sitting on a different address
+    cmds:
+      - |
+        set -eu
+        # The handheld's /24, taken from SLOT_DEVICE -- which is the last
+        # address it had, and DHCP moves it within that subnet rather than off
+        # it. Deliberately not this machine's own link subnet: it is on
+        # 10.200.0.0/24 and reaches the handheld through a router, so a scan of
+        # the local link finds nothing and every probe times out instead of
+        # refusing. That is what made an earlier sweep look conclusive when it
+        # was simply looking in the wrong place.
+        want="{{.DEVICE}}"
+        if [ -z "$want" ]; then
+          echo "set SLOT_DEVICE to any address on the handheld's subnet, e.g. SLOT_DEVICE=192.168.1.1" >&2
+          exit 1
+        fi
+        base=${want%.*}
+        echo "looking for the handheld on $base.0/24..." >&2
+        # A TCP connect per host, in parallel, with a short timeout. nc is the
+        # right tool but is not always installed, hence the bash redirect.
+        for i in $(seq 1 254); do
+          (
+            if timeout 1 bash -c "exec 3<>/dev/tcp/$base.$i/21" 2>/dev/null; then
+              echo "$base.$i"
+            fi
+          ) &
+        done
+        wait
+      - 'echo "any address above answers FTP; the handheld also writes its own into slot-net.txt on the card" >&2'
+
   device:check:
     desc: >-
       Wait for the handheld to answer on FTP, up to SLOT_WAIT_S seconds
@@ -365,6 +399,7 @@ tasks:
             echo "no FTP on {{.DEVICE}}:21 after ${waited}s." >&2
             echo "wake the handheld and run Apps > slot net; it loses the link when it sleeps." >&2
             echo "to wait for it instead: SLOT_WAIT_S=120 task <whatever>" >&2
+            echo "the address is DHCP and does move -- 'task device:find' looks for it." >&2
             exit 1
           fi
           [ "$waited" = 0 ] && echo "waiting for {{.DEVICE}} to answer..." >&2

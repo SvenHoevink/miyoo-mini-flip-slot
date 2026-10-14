@@ -118,6 +118,38 @@ libmi_venc.so   libmi_wlan.so
   so the library and the PCM are both there and something else was holding the
   device. An `MI_AO` sink may still be wanted, but it is not forced.
 
+## The handheld's address moves, and it is not on this machine's subnet
+
+It was 192.168.1.135 for a whole session and then came up on **192.168.1.145**.
+DHCP, and nothing pins it. An evening ended with "the device is off the
+network" when it was simply answering somewhere else.
+
+Two things made that worse than it needed to be:
+
+- A port sweep of 192.168.1.0/24 from the build host found nothing and looked
+  conclusive. **This machine is on 10.200.0.0/24** and reaches the handheld
+  through a router, so every probe timed out rather than being refused, and a
+  silent sweep means nothing there. `task device:find` now takes the subnet
+  from `SLOT_DEVICE` instead of the local link.
+- `net-up.sh` already writes the address it got into `slot-net.txt` at the card
+  root, with a ready-made `export SLOT_DEVICE=...` line. That file is the
+  answer whenever the handheld seems missing, and it is readable from the Mac
+  with the card in it even when nothing is on the network.
+
+### WiFi: the retry recovers now, but the radio is still flaky
+
+```
+0s DISCONNECTED -> 2s ASSOCIATING -> 3s 4WAY_HANDSHAKE -> 8s SCANNING   (dropped)
+19s ASSOCIATING -> 20s 4WAY_HANDSHAKE -> 25s SCANNING                   (dropped)
+49s ASSOCIATING -> 50s COMPLETED
+```
+
+Two dropped four-way handshakes and then success, 50 s from a cold boot. The
+old retry loop called `wifi-on.sh` every attempt and tore the chip down, so a
+boot like this one could never finish; leaving an attempt in progress alone is
+what lets it through. One success earlier was not proof -- this is the first
+boot that showed the failure and the recovery in the same log.
+
 ## MI_AO ignores `u32FrmNum`: the codec holds 352 ms unless you hold it down
 
 Measured by filling it -- writes return while there is room and block when
