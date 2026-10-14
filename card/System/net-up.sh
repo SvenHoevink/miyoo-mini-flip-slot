@@ -63,19 +63,51 @@ log "wlan0 before wifi-on: $(ifconfig wlan0 > /dev/null 2>&1 && echo present || 
 log "module before wifi-on: $(grep -c 8188fu /proc/modules 2>/dev/null)"
 log ""
 
+# Measured on the device: the retry loop used to call wifi-on.sh on *every*
+# attempt, and wifi-on.sh tears the chip down -- "rtl8188fu_hal_deinit",
+# "CardDisableRTL8188FU" in the driver messages. Three attempts logged
+# wpa_state SCANNING, then ASSOCIATING, then 4WAY_HANDSHAKE: it was getting
+# further each time and being reset before it could finish. So the radio is
+# only brought up when it is actually down, and an attempt that is making
+# progress is left to make it.
 attempt=1
 while :; do
-	[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
-	log "attempt $attempt at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s: wlan0 $(ifconfig wlan0 > /dev/null 2>&1 && echo present || echo ABSENT), module $(grep -c 8188fu /proc/modules 2>/dev/null)"
+	if ! ifconfig wlan0 > /dev/null 2>&1 || ! pgrep wpa_supplicant > /dev/null 2>&1; then
+		[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
+		log "attempt $attempt at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s: brought the radio up, wlan0 $(ifconfig wlan0 > /dev/null 2>&1 && echo present || echo ABSENT), module $(grep -c 8188fu /proc/modules 2>/dev/null)"
+	else
+		# Already up and supplicant running: nudge it rather than reset it.
+		wpa_cli -i wlan0 reassociate > /dev/null 2>&1
+		log "attempt $attempt at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s: radio already up, reassociating"
+	fi
 
-	# Association first: it and DHCP fail for different reasons.
+	# Association first: it and DHCP fail for different reasons. 90 s, not 45:
+	# a 4-way handshake from cold was still in progress when the old limit cut
+	# it off. Each state change is logged, so a capture shows the progression
+	# rather than just where it happened to be when the clock ran out.
 	assoc=""
 	n=0
-	while [ $n -lt 45 ]; do
+	last=""
+	while [ $n -lt 90 ]; do
 		state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+		if [ "$state" != "$last" ]; then
+			log "    ${n}s: ${state:-unknown}"
+			# 4WAY_HANDSHAKE falling back to scanning or disconnected is what a
+			# wrong pre-shared key looks like from here.
+			case "$last:$state" in
+				4WAY_HANDSHAKE:SCANNING|4WAY_HANDSHAKE:DISCONNECTED)
+					log "    handshake dropped -- if this repeats, check the key in slot-wifi.txt" ;;
+			esac
+			last="$state"
+		fi
 		[ "$state" = "COMPLETED" ] && assoc=1 && break
-		essid=$(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p')
-		[ -n "$essid" ] && assoc=1 && break
+		# Only as a fallback, where wpa_cli says nothing at all: a configured
+		# ESSID shows up here before the handshake finishes, so trusting it
+		# while the supplicant is mid-connect declares success too early.
+		if [ -z "$state" ]; then
+			essid=$(iwconfig wlan0 2>/dev/null | sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p')
+			[ -n "$essid" ] && assoc=1 && break
+		fi
 		n=$((n + 1))
 		sleep 1
 	done

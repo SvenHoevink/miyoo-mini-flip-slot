@@ -611,10 +611,10 @@ index 0000000..cf46e75
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..a65bb2f
+index 0000000..c67eefe
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1492 @@
+@@ -0,0 +1,1505 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1058,6 +1058,9 @@ index 0000000..a65bb2f
 +    /// budget on average; this says whether the stutters are the renderer.
 +    worst_us: u64,
 +    frame_us: u64,
++    /// Rects, which turned out to be almost all of the shelf's draws: the
++    /// reuse counters below only cover the textured ones.
++    rects: u64,
 +    /// Draws that took the row-reuse path in the sprite blit, and draws that
 +    /// gathered per destination row instead. The reuse only pays scaling up, so
 +    /// this says whether the shelf is even reaching it.
@@ -1109,7 +1112,8 @@ index 0000000..a65bb2f
 +            }
 +        );
 +        eprintln!(
-+            "slot: soft: sprite rows reused on {} draws, gathered on {} (reuse only pays scaling up)",
++            "slot: soft: {} rects, textured rows reused on {} draws, gathered on {} (reuse only pays scaling up)",
++            self.rects / n.max(1),
 +            self.reused / n.max(1),
 +            self.gathered / n.max(1),
 +        );
@@ -1399,7 +1403,16 @@ index 0000000..a65bb2f
 +        for item in items {
 +            match *item {
 +                Draw::Rect { x, y, w, h, colour } => {
-+                    raster::fill_rect(&mut self.canvas, x, y, w, h, raster::to_storage(colour))
++                    self.profile.rects += 1;
++                    raster::fill_rect(
++                        &mut self.canvas,
++                        x,
++                        y,
++                        w,
++                        h,
++                        raster::to_storage(colour),
++                        &mut self.scratch,
++                    )
 +                }
 +                Draw::Tex {
 +                    x,
@@ -2109,10 +2122,10 @@ index 0000000..a65bb2f
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..72ee0b2
+index 0000000..c46720d
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,544 @@
+@@ -0,0 +1,658 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2260,16 +2273,58 @@ index 0000000..72ee0b2
 +
 +/// A solid rect. `Draw::Rect` in GL is the 1x1 white texture times `u_colour`,
 +/// so this is the same thing without the multiply.
-+pub fn fill_rect(dst: &mut Image, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
++///
++/// This is where the shelf's time actually goes. It reports ~193 draws a frame
++/// and only seven of them are textured, so the other ~186 are rects -- and this
++/// was computing `idx` and taking a bounds-checked four-byte slice per pixel,
++/// with no shortcut for the two cases a UI is mostly made of. Now: a
++/// transparent rect returns, an opaque one builds one row and memcpy's it, and
++/// the general case walks row slices so the per-pixel bounds checks fall away.
++pub fn fill_rect(
++    dst: &mut Image,
++    x: f32,
++    y: f32,
++    w: f32,
++    h: f32,
++    colour: [f32; 4],
++    scratch: &mut Scratch,
++) {
 +    let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
 +        return;
 +    };
 +    // `colour` arrives already in storage order from the caller.
 +    let src = modulate([255, 255, 255, 255], colour);
++    if src[3] == 0 {
++        return;
++    }
++    let dw = dst.w as usize;
++    let width = (x1 - x0) as usize;
++
++    if src[3] == 255 {
++        // One row of the colour, then a memcpy per scanline.
++        let want = width * 4;
++        if scratch.line.len() != want {
++            scratch.line.resize(want, 0);
++        }
++        for p in scratch.line.chunks_exact_mut(4) {
++            p.copy_from_slice(&src);
++        }
++        for py in y0..y1 {
++            let start = (py as usize * dw + x0 as usize) * 4;
++            if let Some(drow) = dst.px.get_mut(start..start + want) {
++                drow.copy_from_slice(&scratch.line);
++            }
++        }
++        return;
++    }
++
 +    for py in y0..y1 {
-+        for px in x0..x1 {
-+            let i = dst.idx(px as u32, py as u32);
-+            blend(&mut dst.px[i..i + 4], src);
++        let start = (py as usize * dw + x0 as usize) * 4;
++        let Some(drow) = dst.px.get_mut(start..start + width * 4) else {
++            continue;
++        };
++        for d in drow.chunks_exact_mut(4) {
++            blend(d, src);
 +        }
 +    }
 +}
@@ -2555,6 +2610,78 @@ index 0000000..72ee0b2
 +            *b = (i % 251) as u8;
 +        }
 +        img
++    }
++
++    /// `fill_rect` as it was: `idx` and a bounds-checked slice per pixel, one
++    /// blend each, no transparent or opaque shortcut.
++    fn fill_reference(dst: &mut Image, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) {
++        let Some((x0, y0, x1, y1)) = super::clip(dst, x, y, w, h) else {
++            return;
++        };
++        let src = modulate([255, 255, 255, 255], colour);
++        for py in y0..y1 {
++            for px in x0..x1 {
++                let i = dst.idx(px as u32, py as u32);
++                blend(&mut dst.px[i..i + 4], src);
++            }
++        }
++    }
++
++    /// Rects are ~186 of the shelf's ~193 draws, so this is the hot one.
++    #[test]
++    fn fill_rect_matches_the_reference() {
++        let rects = [
++            (0.0f32, 0.0f32, 48.0f32, 36.0f32),
++            (2.5, 1.5, 20.0, 10.0),
++            (0.3, 0.7, 47.4, 35.2),
++            (-5.0, -3.0, 30.0, 20.0),
++            (40.0, 28.0, 30.0, 20.0),
++            (10.0, 10.0, 1.0, 1.0),
++            (10.0, 10.0, 0.0, 5.0),
++            (5.0, 5.0, 13.5, 7.5),
++        ];
++        // Fully transparent, fully opaque, and a spread between, since each
++        // takes a different path now.
++        let alphas = [0.0, 0.004, 0.25, 0.5, 0.75, 0.996, 1.0];
++        let mut scratch = Scratch::default();
++        for (x, y, w, h) in rects {
++            for a in alphas {
++                for rgb in [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.2, 0.6, 0.9]] {
++                    let colour = [rgb[0], rgb[1], rgb[2], a];
++                    let mut want = canvas(48, 36);
++                    let mut got = canvas(48, 36);
++                    fill_reference(&mut want, x, y, w, h, colour);
++                    super::fill_rect(&mut got, x, y, w, h, colour, &mut scratch);
++                    assert_eq!(
++                        got.px, want.px,
++                        "rect {:?} colour {colour:?}",
++                        (x, y, w, h)
++                    );
++                }
++            }
++        }
++    }
++
++    /// A rect and a textured draw share `scratch.line`, so the one must not
++    /// leave the other reading its leftovers.
++    #[test]
++    fn rects_and_blits_share_a_scratch_safely() {
++        let tex = texture(13, 7);
++        let mut scratch = Scratch::default();
++        let mut want = canvas(48, 36);
++        let mut got = canvas(48, 36);
++        for i in 0..6 {
++            let a = if i % 2 == 0 { 1.0 } else { 0.5 };
++            let colour = [1.0, 0.5, 0.25, a];
++            let (x, y, w, h) = (i as f32, 2.0, 30.0 - i as f32, 20.0);
++            fill_reference(&mut want, x, y, w, h, colour);
++            super::fill_rect(&mut got, x, y, w, h, colour, &mut scratch);
++            assert_eq!(got.px, want.px, "rect {i}");
++
++            reference(&mut want, &tex, 1.0, 1.0, 39.0, 21.0, [1.0, 1.0, 1.0, 1.0]);
++            super::blit(&mut got, &tex, 1.0, 1.0, 39.0, 21.0, [1.0, 1.0, 1.0, 1.0], &mut scratch);
++            assert_eq!(got.px, want.px, "blit after rect {i}");
++        }
 +    }
 +
 +    #[test]
