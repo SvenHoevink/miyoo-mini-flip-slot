@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..d07cd70
+index 0000000..4439116
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,333 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -341,7 +341,26 @@ index 0000000..d07cd70
 +                    queued()
 +                );
 +
++                // What this loop actually does, since the ring's own trace
++                // says 0 starved and the chop is therefore downstream of it.
++                // The three things I cannot currently see: whether the codec's
++                // queue reaches 0 (a real hole in the output), how often a pass
++                // writes nothing, and whether SendFrame is failing -- only the
++                // first failure is ever reported.
++                let mut low = i32::MAX;
++                let mut empty = 0u32;
++                let mut errs = 0u32;
++                let mut wrote_total = 0u64;
++                let mut said = std::time::Instant::now();
++
 +                while !flag.load(Ordering::Relaxed) {
++                    if said.elapsed() >= std::time::Duration::from_secs(5) {
++                        eprintln!(
++                            "slot: audio: codec queue low {low} of {want}, {empty} empty passes, {errs} send errors, {wrote_total} periods written"
++                        );
++                        (low, empty, errs, wrote_total) = (i32::MAX, 0, 0, 0);
++                        said = std::time::Instant::now();
++                    }
 +                    // Hold the codec's queue near the target: without it the
 +                    // sink races ahead and the 352 ms buffer stays full, which
 +                    // is the sound running behind the picture.
@@ -362,6 +381,7 @@ index 0000000..d07cd70
 +                    // beats silence.
 +                    let q = queued();
 +                    if q >= 0 {
++                        low = low.min(q);
 +                        if q >= want {
 +                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                            continue;
@@ -394,11 +414,15 @@ index 0000000..d07cd70
 +                                    WRITE_TIMEOUT_MS,
 +                                )
 +                            };
-+                            if err != 0 && !complained {
-+                                complained = true;
-+                                eprintln!("slot: audio: MI_AO send: error {err}");
++                            if err != 0 {
++                                errs += 1;
++                                if !complained {
++                                    complained = true;
++                                    eprintln!("slot: audio: MI_AO send: error {err}");
++                                }
 +                            }
 +                        }
++                        wrote_total += wrote as u64;
 +                        // Wrote nothing: the codec wants more and the ring has
 +                        // not got a period yet. Without this the loop spins,
 +                        // hammering QueryChnStat on two cores at a raised
@@ -406,6 +430,7 @@ index 0000000..d07cd70
 +                        // -- which sounds like the distortion it is meant to be
 +                        // avoiding.
 +                        if wrote == 0 {
++                            empty += 1;
 +                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                        }
 +                        continue;
