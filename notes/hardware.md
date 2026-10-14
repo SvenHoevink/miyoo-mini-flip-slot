@@ -178,6 +178,43 @@ which puts the depth back under our control.
 
 **The lesson, again: on this device, measure the buffer, do not configure it.**
 
+### Throttling it works, and runs into an unexplained 43,008 frames a second
+
+`SLOTAO_QUEUE=N` holds the queue at N periods by querying `u32ChnBusyNum` and
+writing only while it is short. It does what it is meant to: the lag goes, and
+the sound sits with the picture.
+
+But with it on, the sink's throughput pins at **43,008 frames a second** against
+the 48,000 the codec is configured for -- and at *exactly* that figure with
+512-frame periods (84/s) and with 128-frame periods (336/s), a 4x change in
+granularity for an identical frame rate. Since each pass tops the queue up to a
+target, our drain rate is the codec's consumption, so the codec appears to be
+consuming about 10% slower than its configured rate.
+
+What that costs: production backs up, the ring fills to capacity, and
+`push_blocking` stalls the emulator -- `Ring::stalls` climbing past 3,000 in a
+session, the core held near 51 Hz, and the codec still reaching 0 in every
+window. Audible as chop.
+
+Ruled out along the way:
+
+- **write cadence** -- the 4x period change proved it, since the frame rate did
+  not move;
+- **the audio thread starving the core** -- sleeping every pass instead of only
+  the empty ones changed nothing;
+- **the ring being too shallow** -- it reports 0 starved throughout; the
+  deficit had moved downstream of it, which is what made the ring numbers
+  misleading for most of an evening;
+- **the rate enum** -- `MI_AUDIO_SampleRate_e` is literal Hz
+  (`E_MI_AUDIO_SAMPLE_RATE_48000 = 48000`), so 48000 is a valid value and is
+  what is being set.
+
+So the throttle is **off by default** (`SLOTAO_QUEUE` unset or 0) and the sink
+writes unthrottled: laggy and clean, which beats clean-rate and choppy. Next
+thing to chase is the 43,008 itself -- whether `u32ChnBusyNum` counts what it
+appears to, and what `MI_AO_QueryChnStat` reports for total and free alongside
+it, before anything else is built on top.
+
 ## Overwriting a dlopen'ed library under a running slot is a crash
 
 `crash/exits.log` had 16 crashes in one evening, 15 of them SIGSEGV or SIGBUS in

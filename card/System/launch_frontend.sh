@@ -55,31 +55,20 @@ export SLOT_FB_ROTATE=180
 # audio pitch are right and the cost is judder rather than slow motion.
 export SLOT_DRIVE_EMU=0
 
-# Audio latency is the ring's DRC target plus MI_AO's hardware buffer. The
-# defaults in the code are 67 ms + 43 ms = 110 ms, which was still audibly
-# behind the picture with no stutter at all -- so there is margin to spend.
-# Audio latency is the ring's DRC target plus whatever the codec still holds.
-# SLOTAO_FRAMES is gone from here because it does nothing: MI_AO ignores the
-# buffer depth in its attributes -- asked for two periods it accepted 33, which
-# is 352 ms, and it was heard as the sound running behind the picture. The
-# codec's queue is now held down by querying it instead, SLOTAO_QUEUE periods
-# of 512 frames. Three is ~32 ms.
-# Capacity, not occupancy: the DRC target is a quarter of this now, so eight
-# frames is a 133 ms ring held at 33 ms, with 100 ms of headroom before a full
-# ring can stall the emulator in push_blocking. Latency is unchanged.
+# Audio: upstream's ring depth, and the codec queue throttle left off.
+#
+# MI_AO ignores the buffer depth in its attributes -- asked for two periods it
+# accepted 33, which is 352 ms -- and that is the audio lag. SLOTAO_QUEUE=N
+# holds the queue down by querying it instead, which does remove the lag, but
+# it also pins the drain at 43,008 frames a second against the 48,000 the codec
+# is set to, identically at 512- and 128-frame periods. The ring then backs up
+# and stalls the core, and the result is choppy. Laggy and clean beats that
+# until the 43,008 is understood. notes/hardware.md has the numbers.
 export SLOT_RING_FRAMES=8
-# Twenty periods of 128 frames, ~53 ms -- the same depth as before, counted in
-# the finer periods the throttle now uses.
-export SLOTAO_QUEUE=20
 
-# TEMPORARY, one run: the queue target line and the ring's own numbers. Remove
-# once the latency is settled.
+# TEMPORARY, one run: confirms the sink is back to the unthrottled path and the
+# ring sits on its target with no core stalls. Remove once seen.
 export SLOT_TRACE=1
-
-# TEMPORARY, with it: the core is running at ~51 Hz, not 59.73, which is the
-# whole audio shortfall. This says what a core frame costs and where the emu
-# thread's time goes.
-export SLOT_TRACE_LATENCY=1
 
 # A cart that crashes its core soft-bricks the handheld: the seated cart is
 # re-inserted on every boot, the core segfaults, slot dies before it can clear
