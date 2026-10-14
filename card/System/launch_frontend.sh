@@ -68,10 +68,9 @@ export SLOT_DRIVE_EMU=0
 # frames is a 133 ms ring held at 33 ms, with 100 ms of headroom before a full
 # ring can stall the emulator in push_blocking. Latency is unchanged.
 export SLOT_RING_FRAMES=8
-# Five periods, ~53 ms. The queue is topped up to this each pass rather than
-# written one period at a time, which is what made the first attempt sound
-# worse than the lag it replaced.
-export SLOTAO_QUEUE=5
+# Twenty periods of 128 frames, ~53 ms -- the same depth as before, counted in
+# the finer periods the throttle now uses.
+export SLOTAO_QUEUE=20
 
 # TEMPORARY, one run: the queue target line and the ring's own numbers. Remove
 # once the latency is settled.
