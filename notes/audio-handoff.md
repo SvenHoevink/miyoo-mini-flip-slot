@@ -167,10 +167,16 @@ numbers the section above turns on.
   build if in doubt. An entire round of "it still sounds wrong" was the old
   process still running.
 - **The device's address is DHCP and moves** (seen on .135 and .145).
-  `task device:find` sweeps for it; it takes the subnet from `SLOT_DEVICE`,
-  because the build host is on 10.200.0.0/24 and reaches the handheld through a
-  router — a sweep of the *local* link finds nothing and looks conclusive.
-  `net-up.sh` also writes the address into `slot-net.txt` on the card.
+  `task device:find` sweeps for it, taking the subnet from `SLOT_DEVICE`.
+  The build host is on **192.168.1.12/24, the same link as the handheld**
+  (checked 2026-10-14 with `ip -4 route`); an earlier note here claimed it was
+  on 10.200.0.0/24 behind a router, which was reading `docker0`. So a sweep of
+  the local link is the right sweep after all — but FTP answering nowhere does
+  *not* mean the device is off. `net-up.sh` is what starts FTP, and it only
+  runs when `Apps > slot net` is launched; a powered-on handheld that has not
+  run it looks exactly like an absent one. Check the WiFi is associated and
+  run the app before concluding anything. It also writes the address into
+  `slot-net.txt` on the card.
 - WiFi is flaky at cold boot but recovers (dropped 4-way handshakes, then
   COMPLETED ~50 s). If the device is unreachable, put the SD card in the Mac
   (`dean@192.168.1.10`, `/Volumes/YELLOWSP`) and read/write it over ssh.

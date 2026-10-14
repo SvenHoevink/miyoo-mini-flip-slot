@@ -356,11 +356,14 @@ tasks:
         set -eu
         # The handheld's /24, taken from SLOT_DEVICE -- which is the last
         # address it had, and DHCP moves it within that subnet rather than off
-        # it. Deliberately not this machine's own link subnet: it is on
-        # 10.200.0.0/24 and reaches the handheld through a router, so a scan of
-        # the local link finds nothing and every probe times out instead of
-        # refusing. That is what made an earlier sweep look conclusive when it
-        # was simply looking in the wrong place.
+        # it. Asked for rather than guessed at from this machine's addresses:
+        # a build host with Docker has dozens of them (an earlier note here
+        # mistook docker0's 10.200.0.0/24 for the link and concluded the
+        # handheld was behind a router), and picking the wrong one makes every
+        # probe time out instead of refusing, which looks conclusive.
+        #
+        # Nothing answering does not mean the handheld is off: FTP comes from
+        # net-up.sh, which runs only when Apps > slot net is launched.
         want="{{.DEVICE}}"
         if [ -z "$want" ]; then
           echo "set SLOT_DEVICE to any address on the handheld's subnet, e.g. SLOT_DEVICE=192.168.1.1" >&2
