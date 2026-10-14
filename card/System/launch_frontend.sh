@@ -41,10 +41,11 @@ export SLOT_FB_ROTATE=180
 #                         skips the driver's 6.6 ms page copy but tears, on the
 #                         shelf and in game both, so it is not used
 #   SLOT_DRIVE_EMU=0      stop chaining the core to the display's rate
-#   SLOT_RING_FRAMES=N    audio ring depth in 60 Hz video frames; 12 here (200
-#                         ms, half of it the target) against upstream's 8,
-#                         because the frontend's 30-50 ms spikes drained a
-#                         133 ms ring. Deeper is more audio latency
+#   SLOT_RING_FRAMES=N    audio ring depth in 60 Hz video frames, upstream's 8
+#                         here; half of it is the DRC target, so 67 ms at
+#                         48 kHz. Deeper is more audio latency
+#   SLOTAO_FRAMES=N       MI_AO's hardware buffer, in 512-frame periods, 4 here
+#                         = 43 ms. The other half of the latency
 
 # The driver's FBIOPAN_DISPLAY costs 6.6 ms a frame here, which with 13.4 ms of
 # real work puts the loop near 20 ms. Drawing straight at the scanout

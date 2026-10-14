@@ -15,6 +15,7 @@
 //
 // Built by `task shim`, shipped to System/libslotao.so, loaded by the MI_AO
 // sink in patches/0005.
+#include <stdlib.h>
 #include <string.h>
 #include <mi_ao.h>
 
@@ -36,7 +37,25 @@ int slotao_open(unsigned int rate, unsigned int channels, unsigned int samples_p
 	attr.eWorkmode = E_MI_AUDIO_MODE_I2S_MASTER;
 	attr.eSoundmode = channels == 2 ? E_MI_AUDIO_SOUND_MODE_STEREO
 	                                : E_MI_AUDIO_SOUND_MODE_MONO;
-	attr.u32FrmNum = 6;
+	// Hardware buffer depth, in frames of u32PtNumPerFrm. At 512 frames and
+	// 48 kHz each one is 10.7 ms, so this is the second half of the audio
+	// latency -- the first being the ring's DRC target in emu.rs. Six was 64 ms
+	// and, with the ring at 100 ms, added up to lag that was audible as the
+	// sound running behind the picture. Four is 43 ms, which the audio thread
+	// has ample slack to keep fed: it does nothing but block in SendFrame and
+	// runs at a raised priority.
+	//
+	// SLOTAO_FRAMES overrides it, so the floor can be found on the device
+	// rather than guessed at here.
+	unsigned int frames = 4;
+	const char *env = getenv("SLOTAO_FRAMES");
+	if (env != NULL) {
+		int want = atoi(env);
+		if (want >= 2 && want <= 16) {
+			frames = (unsigned int)want;
+		}
+	}
+	attr.u32FrmNum = frames;
 	attr.u32PtNumPerFrm = samples_per_frame;
 	attr.u32ChnCnt = channels;
 	attr.u32CodecChnCnt = 0;
