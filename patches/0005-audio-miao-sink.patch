@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..875bfc9
+index 0000000..d88cd25
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,357 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -173,21 +173,11 @@ index 0000000..875bfc9
 +/// `emu.rs` converts to whatever the ring reports, which is set to this.
 +const DEVICE_HZ: u32 = 48_000;
 +const CHANNELS: u32 = 2;
-+/// Frames per MI_AO period, and so the granularity of everything downstream.
-+///
-+/// 512 frames is 10.7 ms at 48 kHz, and that was too coarse to throttle with.
-+/// The sink tops the codec's queue up to a target and then sleeps, and the
-+/// sleep cannot be shorter than this kernel's 10 ms tick -- so a cycle is about
-+/// 11.9 ms against a 10.7 ms period, writes are whole periods, and it lost
-+/// ground every cycle: measured at 84 periods a second against the codec's
-+/// 93.75. The codec idled in the gaps, which is the chop, while production
-+/// backed up and stalled the core on a full ring.
-+///
-+/// 128 frames is 2.7 ms, so a 10 ms wake-up covers about 3.75 of them and the
-+/// rounding error is a quarter of a period rather than a whole one. It does not
-+/// accumulate either, since each pass aims at a queue depth rather than a rate.
-+/// The cost is four times as many SendFrame calls, ~375 a second.
-+const PERIOD_FRAMES: usize = 128;
++/// Back to 512 with the throttle off. 128 was for the throttle, which needed
++/// fine granularity to track the codec's drain rate; unthrottled it only means
++/// four times as many SendFrame calls, ~375 a second, for nothing. The sink
++/// that sounded clean used 512.
++const PERIOD_FRAMES: usize = 512;
 +/// Long enough that a late frame does not tear the stream, short enough that a
 +/// wedged device does not hang the audio thread forever.
 +const WRITE_TIMEOUT_MS: i32 = 200;
