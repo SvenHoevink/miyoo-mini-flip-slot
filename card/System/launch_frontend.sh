@@ -64,7 +64,10 @@ export SLOT_DRIVE_EMU=0
 # is 352 ms, and it was heard as the sound running behind the picture. The
 # codec's queue is now held down by querying it instead, SLOTAO_QUEUE periods
 # of 512 frames. Three is ~32 ms.
-export SLOT_RING_FRAMES=4
+# Capacity, not occupancy: the DRC target is a quarter of this now, so eight
+# frames is a 133 ms ring held at 33 ms, with 100 ms of headroom before a full
+# ring can stall the emulator in push_blocking. Latency is unchanged.
+export SLOT_RING_FRAMES=8
 # Five periods, ~53 ms. The queue is topped up to this each pass rather than
 # written one period at a time, which is what made the first attempt sound
 # worse than the lag it replaced.

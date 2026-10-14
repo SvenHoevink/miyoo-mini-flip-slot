@@ -516,7 +516,7 @@ index b841d5f..d393527 100644
      Box::new(AlsaSink::new())
  }
 diff --git a/crates/slot/src/audio/ring.rs b/crates/slot/src/audio/ring.rs
-index aada45b..5e5b1de 100644
+index aada45b..9e71727 100644
 --- a/crates/slot/src/audio/ring.rs
 +++ b/crates/slot/src/audio/ring.rs
 @@ -4,8 +4,28 @@ use std::time::{Duration, Instant};
@@ -549,8 +549,70 @@ index aada45b..5e5b1de 100644
  }
  
  const MAX_WAIT: Duration = Duration::from_millis(50);
+@@ -32,6 +52,10 @@ pub struct Ring {
+     underruns: AtomicU64,
+     consuming: AtomicBool,
+     priming: AtomicBool,
++    /// Times `push_blocking` had to wait for room, i.e. times the ring stalled
++    /// the emulator. Nothing counted this, so a full ring looked exactly like a
++    /// healthy one in the trace: `dropped` only moves once a wait times out.
++    stalls: AtomicU64,
+ }
+ 
+ impl Ring {
+@@ -56,6 +80,7 @@ impl Ring {
+             underruns: AtomicU64::new(0),
+             consuming: AtomicBool::new(true),
+             priming: AtomicBool::new(false),
++            stalls: AtomicU64::new(0),
+         }
+     }
+ 
+@@ -108,6 +133,7 @@ impl Ring {
+                     .fetch_add(rest.len() as u64, Ordering::Relaxed);
+                 return;
+             };
++            self.stalls.fetch_add(1, Ordering::Relaxed);
+             i = self
+                 .room
+                 .wait_timeout(i, left)
+@@ -176,6 +202,10 @@ impl Ring {
+         self.underruns.load(Ordering::Relaxed)
+     }
+ 
++    pub fn stalls(&self) -> u64 {
++        self.stalls.load(Ordering::Relaxed)
++    }
++
+     pub fn clear_faults(&self) {
+         self.overruns.store(0, Ordering::Relaxed);
+         self.underruns.store(0, Ordering::Relaxed);
+diff --git a/crates/slot/src/drc.rs b/crates/slot/src/drc.rs
+index 1114105..1ac0513 100644
+--- a/crates/slot/src/drc.rs
++++ b/crates/slot/src/drc.rs
+@@ -9,6 +9,18 @@ pub fn drc_ratio(queued_frames: usize, target_frames: usize) -> f64 {
+     ratio.clamp(1.0 - MAX_CORRECTION, 1.0 + MAX_CORRECTION)
+ }
+ 
++/// Where dynamic rate control holds the ring, as a fraction of its capacity.
++///
++/// Upstream holds it at half, which makes the ring's occupancy and its headroom
++/// the same number. That is fine where the sink drains steadily. The MI_AO sink
++/// does not: it writes only while the codec's queue is under target and sleeps
++/// otherwise, so the ring fills between bursts -- measured at 2573 frames
++/// against a 3200 capacity -- and `push_blocking` then stalls the emulator
++/// waiting for room. The core sat at 51 Hz, 10% short on audio, with the ring
++/// reporting no starvation at all because the deficit had moved to the codec.
++///
++/// A quarter keeps the occupancy, and so the latency, where it was while giving
++/// the ring three times the headroom before it can block the core.
+ pub fn drc_target(capacity_frames: usize) -> usize {
+-    capacity_frames / 2
++    capacity_frames / 4
+ }
 diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
-index d9b2e62..0dc3e93 100644
+index d9b2e62..539cb15 100644
 --- a/crates/slot/src/emu.rs
 +++ b/crates/slot/src/emu.rs
 @@ -32,6 +32,11 @@ const SNAPSHOT_EVERY: u32 = 2;
@@ -589,7 +651,17 @@ index d9b2e62..0dc3e93 100644
              .ok();
          if join.is_none() {
              shared
-@@ -843,7 +863,28 @@ impl Worker {
+@@ -800,7 +820,8 @@ impl Worker {
+                     if crate::session::trace() && paced.is_multiple_of(TRACE_EVERY) {
+                         let (dropped, starved) = (ring.overruns(), ring.underruns());
+                         eprintln!(
+-                            "slot: audio: {queued}/{target} queued, {dropped} dropped, {starved} starved, locked {lock} at {scale:.5}"
++                            "slot: audio: {queued}/{target} queued, {dropped} dropped, {starved} starved, {} core stalls, locked {lock} at {scale:.5}",
++                            ring.stalls()
+                         );
+                     }
+                 }
+@@ -843,7 +864,28 @@ impl Worker {
              let now = Instant::now();
              match deadline.checked_duration_since(now) {
                  Some(wait) => std::thread::sleep(wait),
