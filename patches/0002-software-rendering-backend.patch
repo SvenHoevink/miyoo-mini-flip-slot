@@ -2825,10 +2825,10 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..e9b713b 100644
+index cada2b8..28bcfb5 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
-@@ -20,8 +20,18 @@ struct Pacer {
+@@ -20,8 +20,20 @@ struct Pacer {
      work: Duration,
      works: [Duration; WORK_WINDOW],
      next: usize,
@@ -2837,6 +2837,8 @@ index cada2b8..e9b713b 100644
 +    /// badly wrong -- and with `work` measuring 12.7 ms against a 16.77 ms
 +    /// period, half the loop being over 25 ms should not happen at all.
 +    seen: [u32; SEEN_BUCKETS],
++    /// Whether the last swap blocked, i.e. whether the panel is pacing us.
++    latched: bool,
  }
  
 +/// Upper edge of each bucket, in ms: under a period, about one period, about
@@ -2847,15 +2849,41 @@ index cada2b8..e9b713b 100644
  const WORK_WINDOW: usize = 32;
  
  impl Pacer {
-@@ -32,6 +42,7 @@ impl Pacer {
+@@ -32,6 +44,8 @@ impl Pacer {
              work: Duration::from_millis(4),
              works: [Duration::from_millis(4); WORK_WINDOW],
              next: 0,
 +            seen: [0; SEEN_BUCKETS],
++            latched: false,
          }
      }
  
-@@ -50,6 +61,9 @@ impl Pacer {
+@@ -39,6 +53,24 @@ impl Pacer {
+         let Some(last) = self.last_return else {
+             return;
+         };
++        // Sleeping here pushes the work as late as it will go, so input is
++        // sampled close to the frame it affects. It needs the sleep to land
++        // accurately, and on this kernel it does not: CONFIG_HZ is 100, a 10 ms
++        // tick, against a MARGIN of 1.5 ms. Measured: 9.4 ms of work against a
++        // 16.78 ms period, and 62% of frames still took two periods -- the
++        // sleep overshooting its 5.9 ms by a tick spends the margin four times
++        // over and the blank is gone.
++        //
++        // When the swap blocks, the panel is already pacing the loop, and the
++        // work can simply start at the blank: it then has the whole period
++        // minus the work as slack instead of 1.5 ms. That costs a frame of
++        // input latency and buys the frame rate, which on a handheld running
++        // at 45 Hz is the better trade. Where the swap does not block --
++        // SLOT_FB_PAGES=1, or a panel whose pan returns at once -- this is the
++        // only pacing there is, so it stays.
++        if self.latched {
++            return;
++        }
+         let delay = self.period.saturating_sub(self.work + MARGIN);
+         if let Some(left) = (last + delay).checked_duration_since(Instant::now()) {
+             std::thread::sleep(left);
+@@ -50,11 +82,15 @@ impl Pacer {
          let mut missed = false;
          if let Some(last) = self.last_return {
              let seen = now - last;
@@ -2865,7 +2893,13 @@ index cada2b8..e9b713b 100644
              missed = seen > self.period.mul_f64(1.5);
              if blocked && seen > Duration::from_millis(12) && seen < Duration::from_millis(22) {
                  self.period = self.period.mul_f64(0.95) + seen.mul_f64(0.05);
-@@ -128,7 +142,21 @@ pub fn run() {
+             }
+         }
++        self.latched = blocked;
+         self.works[self.next] = work;
+         self.next = (self.next + 1) % WORK_WINDOW;
+         self.work = self.works.iter().copied().max().unwrap_or(work);
+@@ -128,7 +164,21 @@ pub fn run() {
          .name("slot-bootlogo".into())
          .spawn(move || slot::bootlogo::refresh(&card));
      let mut drawn = false;
@@ -2888,7 +2922,7 @@ index cada2b8..e9b713b 100644
      let mut pacer = Pacer::new();
      let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
      loop {
-@@ -152,6 +180,15 @@ pub fn run() {
+@@ -152,6 +202,15 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
@@ -2904,7 +2938,7 @@ index cada2b8..e9b713b 100644
          let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
          if slot::latency::tracing() {
              frames += 1;
-@@ -159,10 +196,12 @@ pub fn run() {
+@@ -159,10 +218,12 @@ pub fn run() {
              early += u32::from(swap_took > pacer.period / 2);
              if frames == 600 {
                  eprintln!(
