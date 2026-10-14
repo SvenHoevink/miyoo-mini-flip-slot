@@ -177,9 +177,20 @@ numbers the section above turns on.
   run it looks exactly like an absent one. Check the WiFi is associated and
   run the app before concluding anything. It also writes the address into
   `slot-net.txt` on the card.
-- WiFi is flaky at cold boot but recovers (dropped 4-way handshakes, then
-  COMPLETED ~50 s). If the device is unreachable, put the SD card in the Mac
-  (`dean@192.168.1.10`, `/Volumes/YELLOWSP`) and read/write it over ssh.
+- **FTP comes up by itself on every boot.** The boot path is
+  `.tmp_update/updater` on the card, not Allium -- Allium's own copy is kept
+  beside it as `updater.allium-orig` -- and with `.slot-boot` present it
+  backgrounds `System/net-up.sh` whenever `.slot-net` is present, then runs
+  `launch_frontend.sh`. Both flags are on the card. So there is nothing to
+  launch by hand: `Apps > slot net` is the Allium-era route and is not
+  reachable from a slot boot. **Give it about a minute** -- the radio is flaky
+  from cold and drops the 4-way handshake once or twice before COMPLETED at
+  ~50 s, which is normal and not a wrong key. A sweep run before that answers
+  nothing and looks exactly like an absent device; one was.
+- If it is genuinely unreachable, put the SD card in the Mac
+  (`dean@192.168.1.10`, `/Volumes/YELLOWSP`) and read/write it over ssh. Note
+  that pulling the card truncates `slot-net.txt` mid-attempt, which reads as a
+  failed association when it is only an interrupted log.
 
 ## Hard-won rules that apply directly here
 

@@ -362,8 +362,11 @@ tasks:
         # handheld was behind a router), and picking the wrong one makes every
         # probe time out instead of refusing, which looks conclusive.
         #
-        # Nothing answering does not mean the handheld is off: FTP comes from
-        # net-up.sh, which runs only when Apps > slot net is launched.
+        # Nothing answering does not mean the handheld is off. FTP comes from
+        # net-up.sh, which .tmp_update/updater backgrounds at boot when
+        # .slot-net is on the card -- so it is coming, but the radio needs
+        # about a minute from cold and drops a handshake or two first. Sweep
+        # again before concluding anything.
         want="{{.DEVICE}}"
         if [ -z "$want" ]; then
           echo "set SLOT_DEVICE to any address on the handheld's subnet, e.g. SLOT_DEVICE=192.168.1.1" >&2
