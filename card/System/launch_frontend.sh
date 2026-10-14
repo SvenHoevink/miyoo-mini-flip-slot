@@ -55,6 +55,16 @@ export SLOT_FB_ROTATE=180
 # audio pitch are right and the cost is judder rather than slow motion.
 export SLOT_DRIVE_EMU=0
 
+# Audio latency is the ring's DRC target plus MI_AO's hardware buffer. The
+# defaults in the code are 67 ms + 43 ms = 110 ms, which was still audibly
+# behind the picture with no stutter at all -- so there is margin to spend.
+# Six ring frames is a 50 ms target, three MI_AO periods is 32 ms: 82 ms.
+#
+# If stutter comes back, raise SLOT_RING_FRAMES first: the ring is what absorbs
+# a late frame, and the hardware buffer only has to outlast one write.
+export SLOT_RING_FRAMES=6
+export SLOTAO_FRAMES=3
+
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
