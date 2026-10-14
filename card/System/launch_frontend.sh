@@ -66,10 +66,6 @@ export SLOT_DRIVE_EMU=0
 # until the 43,008 is understood. notes/hardware.md has the numbers.
 export SLOT_RING_FRAMES=8
 
-# TEMPORARY, one run: confirms the sink is back to the unthrottled path and the
-# ring sits on its target with no core stalls. Remove once seen.
-export SLOT_TRACE=1
-
 # A cart that crashes its core soft-bricks the handheld: the seated cart is
 # re-inserted on every boot, the core segfaults, slot dies before it can clear
 # the cart, and since slot is the boot process there is no shelf to escape to.

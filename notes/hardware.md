@@ -210,7 +210,11 @@ Ruled out along the way:
   what is being set.
 
 So the throttle is **off by default** (`SLOTAO_QUEUE` unset or 0) and the sink
-writes unthrottled: laggy and clean, which beats clean-rate and choppy. Next
+writes unthrottled: laggy and clean, which beats clean-rate and choppy.
+Confirmed on the device -- ring sitting on its 3200 target, `0 core stalls`,
+starvation frozen at its startup figure, and smooth audio about 350 ms behind.
+`PERIOD_FRAMES` is back to 512 with it; 128 existed only to give the throttle
+granularity. Next
 thing to chase is the 43,008 itself -- whether `u32ChnBusyNum` counts what it
 appears to, and what `MI_AO_QueryChnStat` reports for total and free alongside
 it, before anything else is built on top.

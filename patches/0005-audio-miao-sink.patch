@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..d88cd25
+index 0000000..d3aedef
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,362 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -367,7 +367,12 @@ index 0000000..d88cd25
 +                let mut said = std::time::Instant::now();
 +
 +                while !flag.load(Ordering::Relaxed) {
-+                    if said.elapsed() >= std::time::Duration::from_secs(5) {
++                    // Only meaningful with the throttle on: unthrottled there
++                    // is no queue to be low and nothing counts the writes, so
++                    // the line read "low 2147483647 of 0" -- i32::MAX dressed
++                    // up as a measurement, which is the last thing this file
++                    // needs more of.
++                    if want > 0 && said.elapsed() >= std::time::Duration::from_secs(5) {
 +                        eprintln!(
 +                            "slot: audio: codec queue low {low} of {want}, {empty} empty passes, {errs} send errors, {wrote_total} periods written"
 +                        );
