@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..06c50d0
+index 0000000..ba3d57a
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,251 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -312,6 +312,45 @@ index 0000000..06c50d0
 +                let _ = ready_tx.send(Ok(()));
 +
 +                let mut buf = vec![0i16; PERIOD_FRAMES * CHANNELS as usize];
++
++                // How deep is the hardware actually? `u32FrmNum` in the attr
++                // asks for a depth, and nothing says MI_AO honours a small one.
++                // It matters because it is half the audio latency, and cutting
++                // the ring's share from 100 ms to 33 ms was barely audible --
++                // which is what a large fixed component downstream would look
++                // like.
++                //
++                // Measured by filling it: writes return immediately while there
++                // is room and block once there is not, so the number accepted
++                // before the first slow write is the depth. Silence, at
++                // startup, costing only what it reports.
++                {
++                    let mut periods = 0u32;
++                    while periods < 64 {
++                        let t = std::time::Instant::now();
++                        // SAFETY: as the writes below.
++                        let err = unsafe {
++                            (shim.write)(
++                                buf.as_ptr() as *const c_void,
++                                PERIOD_FRAMES as u32,
++                                CHANNELS,
++                                WRITE_TIMEOUT_MS,
++                            )
++                        };
++                        if err != 0 {
++                            break;
++                        }
++                        periods += 1;
++                        if t.elapsed() > std::time::Duration::from_millis(4) {
++                            break;
++                        }
++                    }
++                    let ms = periods as f64 * PERIOD_FRAMES as f64 * 1000.0 / DEVICE_HZ as f64;
++                    eprintln!(
++                        "slot: audio: MI_AO took {periods} periods of {PERIOD_FRAMES} before blocking, {ms:.0} ms of hardware buffer"
++                    );
++                }
++
 +                let mut complained = false;
 +                while !flag.load(Ordering::Relaxed) {
 +                    ring.fill(&mut buf);
