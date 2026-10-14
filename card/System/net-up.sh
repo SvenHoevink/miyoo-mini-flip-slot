@@ -88,15 +88,26 @@ while :; do
 	assoc=""
 	n=0
 	last=""
+	drops=0
 	while [ $n -lt 90 ]; do
 		state=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
 		if [ "$state" != "$last" ]; then
 			log "    ${n}s: ${state:-unknown}"
-			# 4WAY_HANDSHAKE falling back to scanning or disconnected is what a
-			# wrong pre-shared key looks like from here.
+			# 4WAY_HANDSHAKE falling back to scanning is also what this radio
+			# does on the way to a *successful* connect: two drops and a
+			# COMPLETED around 50 s is the normal cold-boot progression here.
+			# So count them, and only point at the key once that has stopped
+			# being the likeliest explanation. The old message said "check the
+			# key" on the first drop, and a correct key was duly checked and
+			# re-entered while the real answer was to wait another minute.
 			case "$last:$state" in
 				4WAY_HANDSHAKE:SCANNING|4WAY_HANDSHAKE:DISCONNECTED)
-					log "    handshake dropped -- if this repeats, check the key in slot-wifi.txt" ;;
+					drops=$((drops + 1))
+					if [ "$drops" -ge 4 ]; then
+						log "    handshake dropped ${drops}x -- now worth checking the key in slot-wifi.txt"
+					else
+						log "    handshake dropped (${drops}) -- normal from cold, still trying"
+					fi ;;
 			esac
 			last="$state"
 		fi
