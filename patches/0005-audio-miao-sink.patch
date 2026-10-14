@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..4439116
+index 0000000..effe121
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,344 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -386,6 +386,7 @@ index 0000000..4439116
 +                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                            continue;
 +                        }
++
 +                        // Everything that drained, in one pass -- but only
 +                        // as far as the ring can actually supply.
 +                        //
@@ -423,16 +424,26 @@ index 0000000..4439116
 +                            }
 +                        }
 +                        wrote_total += wrote as u64;
-+                        // Wrote nothing: the codec wants more and the ring has
-+                        // not got a period yet. Without this the loop spins,
-+                        // hammering QueryChnStat on two cores at a raised
-+                        // priority, and starves the emulator and the renderer
-+                        // -- which sounds like the distortion it is meant to be
-+                        // avoiding.
 +                        if wrote == 0 {
 +                            empty += 1;
-+                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                        }
++                        // Sleep every pass, not just the empty ones. Polling
++                        // QueryChnStat and writing with no pause runs this
++                        // thread hot, and at priority -10 against the emulator
++                        // at -8 it takes the CPU the core needs: measured at 51
++                        // core frames a second instead of 60, which is a 10%
++                        // audio shortfall, which is the codec reaching 0 and
++                        // the chop. The audio thread starving the core it
++                        // depends on.
++                        //
++                        // Safe here only because the pass tops the queue up to
++                        // the target: one wake-up every 10 ms -- the floor on
++                        // this kernel -- can deliver 5 periods, 53 ms, where the
++                        // codec drains 10.7 ms in that time. The first attempt
++                        // at this wrote a single period per wake-up, which was
++                        // exactly the drain rate with no slack, and that is why
++                        // sleeping sounded worse then and is right now.
++                        std::thread::sleep(std::time::Duration::from_millis(2));
 +                        continue;
 +                    }
 +                    ring.fill(&mut buf);

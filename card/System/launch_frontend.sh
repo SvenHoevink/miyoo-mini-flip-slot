@@ -74,6 +74,11 @@ export SLOTAO_QUEUE=5
 # once the latency is settled.
 export SLOT_TRACE=1
 
+# TEMPORARY, with it: the core is running at ~51 Hz, not 59.73, which is the
+# whole audio shortfall. This says what a core frame costs and where the emu
+# thread's time goes.
+export SLOT_TRACE_LATENCY=1
+
 # A cart that crashes its core soft-bricks the handheld: the seated cart is
 # re-inserted on every boot, the core segfaults, slot dies before it can clear
 # the cart, and since slot is the boot process there is no shelf to escape to.
