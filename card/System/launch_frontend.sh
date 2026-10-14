@@ -58,12 +58,19 @@ export SLOT_DRIVE_EMU=0
 # Audio latency is the ring's DRC target plus MI_AO's hardware buffer. The
 # defaults in the code are 67 ms + 43 ms = 110 ms, which was still audibly
 # behind the picture with no stutter at all -- so there is margin to spend.
-# Six ring frames is a 50 ms target, three MI_AO periods is 32 ms: 82 ms.
+# Four ring frames is a 33 ms target, two MI_AO periods is 21 ms: ~54 ms. The
+# ring's fill granularity is PERIOD_FRAMES = 512, 10.7 ms, so two periods is as
+# shallow as the hardware side goes without changing that too.
 #
 # If stutter comes back, raise SLOT_RING_FRAMES first: the ring is what absorbs
 # a late frame, and the hardware buffer only has to outlast one write.
-export SLOT_RING_FRAMES=6
-export SLOTAO_FRAMES=3
+export SLOT_RING_FRAMES=4
+export SLOTAO_FRAMES=2
+
+# TEMPORARY, one run: confirms the two knobs above are actually reaching slot.
+# The ring target in this line should read 1600 (48000 x 4 / 60, halved), and
+# starved should stay put. Remove once seen.
+export SLOT_TRACE=1
 
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
