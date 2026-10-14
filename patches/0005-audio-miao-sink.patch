@@ -138,10 +138,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..a302993
+index 0000000..2e4ccec
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,443 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -178,6 +178,8 @@ index 0000000..a302993
 +/// four times as many SendFrame calls, ~375 a second, for nothing. The sink
 +/// that sounded clean used 512.
 +const PERIOD_FRAMES: usize = 512;
++/// Bytes in one sample frame, for converting `slotao_queued`'s byte count.
++const BYTES_PER_FRAME: usize = CHANNELS as usize * 2;
 +/// Long enough that a late frame does not tear the stream, short enough that a
 +/// wedged device does not hang the audio thread forever.
 +const WRITE_TIMEOUT_MS: i32 = 200;
@@ -357,11 +359,12 @@ index 0000000..a302993
 +                    // counters below exist to tell those apart. Unthrottled is
 +                    // laggy and clean; that is the better default until it is.
 +                    .unwrap_or(0);
++                let want_frames = want as usize * PERIOD_FRAMES;
 +                // SAFETY: the shim is loaded and the channel is open.
 +                let queued = || unsafe { (shim.queued)() };
 +                eprintln!(
-+                    "slot: audio: MI_AO queue target {want} periods (0 = unthrottled), {:.0} ms; it reports {} now",
-+                    want as f64 * PERIOD_FRAMES as f64 * 1000.0 / DEVICE_HZ as f64,
++                    "slot: audio: MI_AO queue target {want} periods (0 = unthrottled), {want_frames} frames, {:.0} ms; it reports {} bytes now",
++                    want_frames as f64 * 1000.0 / DEVICE_HZ as f64,
 +                    queued()
 +                );
 +
@@ -382,12 +385,12 @@ index 0000000..a302993
 +                // period per pass and four per pass. So measure the pass rate
 +                // against the elapsed time, and the periods a pass actually
 +                // manages, before believing anything about the codec's drain.
-+                let mut low = i32::MAX;
++                let mut low = usize::MAX;
 +                let mut empty = 0u32;
 +                let mut errs = 0u32;
 +                let mut wrote_total = 0u64;
 +                let mut passes = 0u64;
-+                let mut wrote_max = 0i32;
++                let mut wrote_max = 0usize;
 +                // Times a top-up stopped early because the ring could not fill
 +                // another period. If this is large the shortfall is production,
 +                // upstream of the sink, and the codec is innocent.
@@ -408,7 +411,9 @@ index 0000000..a302993
 +                        // the question.
 +                        let secs = said.elapsed().as_secs_f64();
 +                        eprintln!(
-+                            "slot: audio: codec queue low {low} of {want}, {passes} passes in {secs:.2}s ({:.0}/s), {wrote_total} periods written ({:.0} frames/s, max {wrote_max}/pass), {ring_short} ring short, {empty} empty passes, {errs} send errors",
++                            "slot: audio: codec queue low {low} of {want_frames} frames ({:.1} of {:.1} ms), {passes} passes in {secs:.2}s ({:.0}/s), {wrote_total} periods written ({:.0} frames/s, max {wrote_max}/pass), {ring_short} ring short, {empty} empty passes, {errs} send errors",
++                            low as f64 * 1000.0 / DEVICE_HZ as f64,
++                            want_frames as f64 * 1000.0 / DEVICE_HZ as f64,
 +                            passes as f64 / secs,
 +                            wrote_total as f64 * PERIOD_FRAMES as f64 / secs,
 +                        );
@@ -428,13 +433,13 @@ index 0000000..a302993
 +                                eprintln!("slot: audio: codec chan stat: error {err}");
 +                            }
 +                        }
-+                        (low, empty, errs, wrote_total) = (i32::MAX, 0, 0, 0);
++                        (low, empty, errs, wrote_total) = (usize::MAX, 0, 0, 0);
 +                        (passes, wrote_max, ring_short) = (0, 0, 0);
 +                        said = std::time::Instant::now();
 +                    }
 +                    passes += 1;
 +                    // Hold the codec's queue near the target: without it the
-+                    // sink races ahead and the 352 ms buffer stays full, which
++                    // sink races ahead and the 341 ms buffer stays full, which
 +                    // is the sound running behind the picture.
 +                    //
 +                    // Top the queue *up* to the target rather than writing one
@@ -444,17 +449,32 @@ index 0000000..a302993
 +                    // sleep is a 10 ms one, and one period per 10 ms is the
 +                    // codec's own drain rate with no slack at all -- every
 +                    // hiccup became an underrun. Topping up decouples
-+                    // throughput from the timer: each pass writes however many
-+                    // periods actually drained, so a late wake-up is made good
-+                    // by a longer write rather than lost.
++                    // throughput from the timer: each pass writes however much
++                    // actually drained, so a late wake-up is made good by a
++                    // longer write rather than lost.
 +                    //
 +                    // A negative answer means the channel will not say, and
 +                    // then the old unthrottled behaviour is the safe one: lag
 +                    // beats silence.
++                    //
++                    // In *frames*, because `slotao_queued` answers in bytes.
++                    // Comparing those bytes against a period count is what
++                    // produced the 43,008 frames/s: any audio at all in the
++                    // codec is "5 or more", so the throttle only ever wrote
++                    // once the queue had run completely dry, in bursts of the
++                    // whole target. That is a sawtooth from 53 ms to zero every
++                    // 59.5 ms, and the ~6 ms at the bottom -- a pass noticing
++                    // on the next 10 ms tick -- is 10.4% of the stream missing.
++                    // Measured: 420 periods per 5 s in bursts of 5, `low 0`
++                    // reaching zero bytes every window, `0 starved` on a ring
++                    // sitting at 6000 against its 3200 target with 2,888 core
++                    // stalls, because the sink was consuming a tenth slower
++                    // than the core produced.
 +                    let q = if want > 0 { queued() } else { -1 };
 +                    if q >= 0 {
++                        let q = q as usize / BYTES_PER_FRAME;
 +                        low = low.min(q);
-+                        if q >= want {
++                        if q >= want_frames {
 +                            std::thread::sleep(std::time::Duration::from_millis(2));
 +                            continue;
 +                        }
@@ -465,14 +485,19 @@ index 0000000..a302993
 +                        // `Ring::fill` pads with silence rather than waiting,
 +                        // so writing a period the ring cannot fill puts a hole
 +                        // in the stream. A top-up of up to `want` periods is
-+                        // 2560 frames against a ring target of 1600, so the
-+                        // burst outran the ring and the padding was audible as
-+                        // crackle. The codec is already holding ~53 ms; that
-+                        // cushion is there to cover a short ring, and it only
-+                        // works if we let it drain instead of filling it with
-+                        // zeros.
++                        // 2560 frames against a ring target of 3200, so a burst
++                        // can outrun the ring, and the padding is audible as
++                        // crackle. The codec's own cushion is there to cover a
++                        // short ring, and it only works if we let it drain
++                        // instead of filling it with zeros.
++                        //
++                        // Round the shortfall up, so a partial period's deficit
++                        // is still written: rounding down leaves the queue
++                        // permanently a fraction under target and hands the
++                        // drain back the hole this whole fix is about.
++                        let budget = (want_frames - q).div_ceil(PERIOD_FRAMES);
 +                        let mut wrote = 0;
-+                        for _ in 0..(want - q).min(want) {
++                        for _ in 0..budget {
 +                            if ring.queued_frames() < PERIOD_FRAMES {
 +                                ring_short += 1;
 +                                break;

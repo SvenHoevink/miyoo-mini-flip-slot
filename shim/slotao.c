@@ -86,13 +86,26 @@ int slotao_resample_from(unsigned int in_rate) {
 	return MI_AO_EnableReSmp(AO_DEV, AO_CHN, (MI_AUDIO_SampleRate_e)in_rate);
 }
 
-// Periods the codec still has to play, or -1 if it will not say.
+// **Bytes** the codec still has to play, or -1 if it will not say.
 //
-// This is the only handle on audio latency that works. u32FrmNum asks for a
-// buffer depth and this stack ignores it: asked for 2 periods it accepted 33,
-// 352 ms, and because the sink pads with silence rather than waiting it kept
-// that full. Querying the queue and writing only when it is shallow puts the
-// depth back under our control.
+// Bytes, measured, not periods -- which is what the name said for a while and
+// cost a session. u32ChnTotalNum reads 65536 on this channel: 32 periods of
+// 2048 bytes (512 frames, stereo, 16-bit), 341 ms, which is the buffer depth
+// u32FrmNum asked for 2 of and silently got 32. Observed busy counts of 8320,
+// 2560 and 648 are 4.06, 1.25 and 0.32 periods, so they are plainly not a
+// period count.
+//
+// A throttle that read this as periods therefore saw "5 or more" whenever the
+// codec held any audio whatsoever, and only wrote once it had run completely
+// dry -- a sawtooth to zero, with a silent hole at the bottom of every cycle
+// worth 10.4% of the stream. That was the unexplained 43,008 frames/s.
+//
+// Kept in bytes here, rather than divided down to periods, because the
+// division is lossy and the caller knows its own period size: miao.rs converts
+// to frames and throttles on those.
+//
+// This is still the only handle on audio latency that works: u32FrmNum asks
+// for a buffer depth and this stack ignores it.
 int slotao_queued(void) {
 	if (!opened) {
 		return -1;
