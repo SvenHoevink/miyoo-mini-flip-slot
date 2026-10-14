@@ -415,10 +415,22 @@ index aada45b..0b1eddf 100644
  
  const MAX_WAIT: Duration = Duration::from_millis(50);
 diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
-index d9b2e62..1798025 100644
+index d9b2e62..0dc3e93 100644
 --- a/crates/slot/src/emu.rs
 +++ b/crates/slot/src/emu.rs
-@@ -186,7 +186,22 @@ impl EmuHandle {
+@@ -32,6 +32,11 @@ const SNAPSHOT_EVERY: u32 = 2;
+ 
+ const STALL: Duration = Duration::from_millis(25);
+ 
++/// Frames of lateness past which the free-running clock gives up on catching
++/// up and resynchronises. Below it the debt is repaid a millisecond at a time,
++/// which is what keeps the average frame rate honest on a coarse timer.
++const RESYNC_FRAMES: u32 = 4;
++
+ const RATE_WINDOW: u32 = 300;
+ 
+ const TRACE_EVERY: u64 = 300;
+@@ -186,7 +191,22 @@ impl EmuHandle {
          let worker_link = link.clone();
          let join = std::thread::Builder::new()
              .name("slot-emu".into())
@@ -442,3 +454,33 @@ index d9b2e62..1798025 100644
              .ok();
          if join.is_none() {
              shared
+@@ -843,7 +863,28 @@ impl Worker {
+             let now = Instant::now();
+             match deadline.checked_duration_since(now) {
+                 Some(wait) => std::thread::sleep(wait),
+-                None => deadline = now,
++                None => {
++                    // Behind the schedule. Keep it rather than resetting to
++                    // now: this kernel's CONFIG_HZ is 100, so a sleep cannot
++                    // land finer than a 10 ms tick, and "sleep the rest of the
++                    // frame" -- 8.4 ms, after mGBA's measured 8.26 ms of work
++                    // -- routinely overshoots. Resetting the deadline makes
++                    // each overshoot permanent, so the core settles at whatever
++                    // rate the coarse timer allows, around 52 Hz. That is a
++                    // Game Boy that feels slow and an audio ring that starves
++                    // by the same proportion, both measured.
++                    //
++                    // Carried forward, the next frame's wait is that much
++                    // shorter and the average comes out at PRESENT exactly.
++                    //
++                    // Resync only past a few frames of debt, which means a real
++                    // stall -- a state write, a core load -- rather than timer
++                    // grain. Repaying that much by running flat out would be an
++                    // audible burst of fast-forward.
++                    if now.saturating_duration_since(deadline) > PRESENT * RESYNC_FRAMES {
++                        deadline = now;
++                    }
++                }
+             }
+         }
+         for cmd in self.cmds.try_iter() {
