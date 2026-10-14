@@ -259,6 +259,43 @@ slot: boot: first frame at 511.6 ms
 So: no backlight control found, no battery (below), no rumble motor, but `rtc0`
 is present. First frame in ~0.5 s on real hardware.
 
+## `CONFIG_HZ` is 100: a 10 ms tick, and three bugs came out of it
+
+```
+/proc/timer_list -> CONFIG_HZ: 100     kernel 4.9.84
+```
+
+**Read this before writing anything that sleeps.** A frontend paced by short
+sleeps is built on an assumption this kernel does not honour: `thread::sleep`
+cannot land finer than a 10 ms tick, so any sleep of a few milliseconds may
+return several milliseconds late. Three separate problems, each chased for a
+while on other theories, were all this:
+
+1. **The pacer's margin.** `Pacer::wait` sleeps `period - work - MARGIN` so the
+   work finishes `MARGIN` = 1.5 ms before the blank and input is sampled late.
+   A 5.9 ms sleep returning at 10 spends that margin four times over and the
+   blank is gone. Measured: 9.4 ms of work against a 16.78 ms period, and 62%
+   of frames taking two periods. Fixed by not pre-sleeping at all when the swap
+   blocks, since the panel is then the clock -- 594 of 600 frames in one period
+   afterwards.
+
+2. **The core's own clock.** Unchained from the display (`SLOT_DRIVE_EMU=0`) the
+   emu thread does `deadline += PRESENT`, then sleeps the remainder. After
+   mGBA's 8.26 ms of work that is an 8.4 ms sleep, which overshoots -- and
+   `deadline = now` on the late branch *discarded* the overshoot, making it
+   permanent. The core settled near 52 Hz: a Game Boy that feels slow, and an
+   audio ring starving in proportion (747,876 starved, `queued` down to 357 of
+   4800). Fixed by carrying the debt forward and resyncing only past four
+   frames of it. Ring now sits at 4159-5111 against its 4800 target.
+
+3. **The "spikes" that were never spikes.** `read>pad` and `pad>emu` reaching
+   30-50 ms read as a slow `advance`; they are queueing delays, and what was
+   queueing was work waiting behind a loop that had lost its clock.
+
+The general lesson, which cost most of a session: on this device, time a sleep
+before trusting it, and prefer a hardware wait (the pan's vblank block) over a
+timer whenever one is available.
+
 ## Frame budget, measured on the device
 
 `SLOT_TRACE_LATENCY=1` in the card's launch script writes a per-frame breakdown

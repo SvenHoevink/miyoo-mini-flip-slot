@@ -16,6 +16,16 @@ Two hard-won rules from getting here:
 over the game, which is genuinely annoying, and stopping it makes the handheld
 power off when a game launches.
 
+**Time a sleep before trusting it.** `CONFIG_HZ` on this kernel is 100, so a
+`thread::sleep` of a few milliseconds can return a tick late. Three separate
+"slow" bugs turned out to be that one fact, each chased on other theories
+first; `notes/hardware.md` has them. Prefer a hardware wait over a timer.
+
+**`task shot` cannot prove pixel-identity.** Two runs of identical code differ
+by ~873 pixels, which is more than a careful renderer change moves. Compare
+against a reference implementation in a unit test instead, as
+`raster::blit_tests` does. `task shot` is still the way to *see* what is drawn.
+
 **Look at the screen before theorising about the UI.** `dd if=/dev/fb0` on the
 device and `tools/fb2png.py` on the result gives a screenshot over the network.
 Four rounds of gesture tuning went into a menu problem that one screenshot

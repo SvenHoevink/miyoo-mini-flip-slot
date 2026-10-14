@@ -54,11 +54,6 @@ export SLOT_FB_ROTATE=180
 # audio pitch are right and the cost is judder rather than slow motion.
 export SLOT_DRIVE_EMU=0
 
-# TEMPORARY, for one run: with the core unchained the resample factor should sit
-# at 1.0 rather than following the display. Remove once confirmed.
-export SLOT_TRACE=1
-export SLOT_TRACE_LATENCY=1
-
 [ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
