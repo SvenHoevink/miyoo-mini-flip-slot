@@ -14,6 +14,11 @@ set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
 patches="$here/../../upstream/slot/cores/mgba"
+# This port's own core patches, applied after upstream slot's. They live here
+# rather than beside upstream's because upstream/slot is a read-only pinned
+# submodule. Each one carries a header saying what it fixes and which mgba
+# commit it applies to; drop a patch when a core bump makes it redundant.
+local_patches="$here/patches"
 toolchain="$here/../miyoo-toolchain.cmake"
 
 # No -flto=auto here: upstream uses it for the H700 build, but gcc 8.3 predates
@@ -36,6 +41,12 @@ stamp() {
 	for p in "$patches"/*.patch; do
 		echo "patch=$(basename "$p") sha256:$(sha256 "$p")"
 	done
+	# In the stamp as well, so editing one rebuilds the core rather than
+	# silently reusing a .so built without it.
+	for p in "$local_patches"/*.patch; do
+		[ -e "$p" ] || continue
+		echo "port-patch=$(basename "$p") sha256:$(sha256 "$p")"
+	done
 }
 
 build() {
@@ -43,6 +54,7 @@ build() {
 	src="$work/mgba"
 	obj="$work/build"
 	patches="$(cd "$patches" && pwd)"
+	local_patches="$(cd "$local_patches" && pwd)"
 	toolchain="$(cd "$(dirname "$toolchain")" && pwd)/$(basename "$toolchain")"
 
 	mkdir -p "$src"
@@ -52,6 +64,10 @@ build() {
 	git -C "$src" checkout -q --force --detach "$commit"
 	git -C "$src" clean -q -fdx
 	for p in "$patches"/*.patch; do
+		git -C "$src" apply "$p"
+	done
+	for p in "$local_patches"/*.patch; do
+		[ -e "$p" ] || continue
 		git -C "$src" apply "$p"
 	done
 

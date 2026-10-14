@@ -436,7 +436,8 @@ tasks:
         until curl -s --connect-timeout 3 --list-only "{{.FTP}}/" >/dev/null; do
           if [ "$waited" -ge "$limit" ]; then
             echo "no FTP on {{.DEVICE}}:21 after ${waited}s." >&2
-            echo "wake the handheld and run Apps > slot net; it loses the link when it sleeps." >&2
+            echo "wake the handheld: it loses the link when it sleeps, and brings FTP" >&2
+            echo "back by itself about 85s after a boot (.tmp_update/updater, .slot-net)." >&2
             echo "to wait for it instead: SLOT_WAIT_S=120 task <whatever>" >&2
             echo "the address is DHCP and does move -- 'task device:find' looks for it." >&2
             exit 1
