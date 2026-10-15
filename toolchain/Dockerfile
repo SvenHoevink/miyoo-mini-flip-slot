@@ -1,7 +1,17 @@
 # Build box for the Miyoo Mini Flip port: the Miyoo Mini toolchain (gcc 8.3,
 # arm-linux-gnueabihf, glibc 2.28 — the device's own libc) plus a pinned Rust
 # with the armv7 target, so one image builds both the cores and the frontend.
-FROM mholdg16/miyoomini-toolchain:latest
+#
+# Pinned by digest rather than :latest, because a release has to be able to name
+# the compiler that built it. The tag is someone else's to move, and two builds
+# a month apart sharing a tag is not the same as sharing a toolchain -- which is
+# the whole premise of "the toolchain is settled" in CLAUDE.md.
+#
+# To bump deliberately:
+#   docker buildx imagetools inspect mholdg16/miyoomini-toolchain:latest
+# and put the Digest line here. Resolved 2026-10-15; `task glibc` and
+# `task verify:arm` are what say whether a newer one is still usable.
+FROM mholdg16/miyoomini-toolchain@sha256:5d6d1d1b3b2d5c095edacc8b790874a3f57a5369e0463e2bee2a293a9fbccc67
 
 # bc, which the base image lacks. gpSP's Makefile gates -march=armv7ve and
 # -static-libgcc behind "$(CC) -dumpversion | bc" comparisons; without bc those

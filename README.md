@@ -39,6 +39,16 @@ pipeline builds untouched, because the `gl` crate resolves entry points at
 runtime. The GPU problem was never a compile-time one — the binary built, ran,
 and died looking for `libEGL.so`. Replacing that is `patches/0002`.
 
+**Single-player is done.** Thirteen carts have been played on the handheld
+across all three platforms, and on GBA across both cores. Taken from the
+`States/` and `Saves/` trees the device itself wrote, not from memory:
+
+| | |
+|---|---|
+| GB, mGBA | Tetris, Tetris GB SRS Colorized, BurgerTime Deluxe, Trip World |
+| GBC, mGBA | Alleyway DX, Super Mario Land DX, Super Mario Land 2 DX, Donkey Kong Land III DX, Kirby's Pinball Land DX, Galaga & Galaxian DX, Rayman |
+| GBA, gpSP *and* mGBA | Kirby & the Amazing Mirror, Kurukuru Kururin |
+
 Where it stands:
 
 | | |
@@ -46,10 +56,12 @@ Where it stands:
 | boots, renders, runs games | yes |
 | GB / GBC / GBA | yes, GBA on gpSP |
 | frame budget | backend 8.2 ms of a 16.86 ms period, core 6.3 ms |
+| shelf | scrolls at 15-18 ms a frame, from 30-36 |
 | buttons, including the d-pad | yes |
 | lid open/close | dozes, saves, darkens the panel |
 | audio | yes, ~100 ms behind the picture |
 | battery indicator | yes, from `axp_test` |
+| saves and save states | yes, including MBC2's 512x4 bits |
 
 The renderer, the cores and the input map are all working. What is left is in
 "Still open" at the bottom.
@@ -265,6 +277,16 @@ the frontend says rather than what it does.
   do AP mode at all is open: **Apps → slot link probe** answers it on the
   device. slot's link is mGBA-only, so GB/GBC is the realistic target and GBA
   would interpret at ~22 ms a frame. See [docs/link.md](docs/link.md).
+
+- **No Game Boy frame.** Upstream draws a grey Game Boy body around the screen,
+  and gives the shelf extra slack inside it. It has never appeared here and was
+  not removed: `bezel::framed` wants an exactly 4:3 panel, and 752x560 misses it
+  by sixteen pixels (2256 against 2240), so `upload_bezel` returns before
+  loading anything. Upstream ships one asset for it, `bezels/640x480.png`, which
+  is the Anbernic's panel. The software backend would also need to learn to draw
+  it — `set_bezel` stores the image and nothing reads it, which `patches/0002`
+  records among its deliberate no-ops. A full-canvas bezel is 421,120 pixels, so
+  it wants compositing once into the surround rather than per frame.
 
 ## Layout
 
