@@ -698,10 +698,10 @@ index 0000000..d13f87c
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..cfa5d7f
+index 0000000..bbb72df
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1674 @@
+@@ -0,0 +1,1712 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1861,6 +1861,21 @@ index 0000000..cfa5d7f
 +        }
 +        if self.clear_left > 0 {
 +            self.clear_left -= 1;
++            // The bezel is the panel's background: a full-panel image of the
++            // Game Boy's body with a hole where the picture goes, and the
++            // canvas is copied over that hole below. Painted here rather than
++            // per frame, which is the only reason it is affordable -- this
++            // runs when the output rect moves and for PAGES frames after, not
++            // every frame, and a full-panel blit is 421,120 pixels.
++            //
++            // Only when it is exactly panel-sized. `bezel_face` scales the art
++            // to the panel before it gets here, so a mismatch means something
++            // changed underneath us and black is the safe answer.
++            let bezel = self
++                .bezel
++                .as_ref()
++                .filter(|b| b.w == target.w && b.h == target.h);
++            let bw = bezel.map_or(0, |b| b.w as usize * 4);
 +            for py in 0..ph {
 +                // SAFETY: one row inside the mapping.
 +                let row = unsafe {
@@ -1869,7 +1884,30 @@ index 0000000..cfa5d7f
 +                        target.stride,
 +                    )
 +                };
-+                row.fill(0);
++                let Some(b) = bezel else {
++                    row.fill(0);
++                    continue;
++                };
++                // Same mirroring the canvas copy does: this panel is mounted
++                // upside down, so rows and columns both reverse. A Game Boy
++                // body is not symmetric -- getting this wrong puts the
++                // lettering under the screen and the power light above it.
++                let sy = if half { b.h as i32 - 1 - py } else { py } as usize;
++                let src = &b.px[sy * bw..sy * bw + bw];
++                let n = bw.min(row.len());
++                if half {
++                    for (d, s) in row[..n]
++                        .chunks_exact_mut(4)
++                        .zip(src.chunks_exact(4).rev())
++                    {
++                        d.copy_from_slice(s);
++                    }
++                } else {
++                    row[..n].copy_from_slice(&src[..n]);
++                }
++                if n < row.len() {
++                    row[n..].fill(0);
++                }
 +            }
 +        }
 +
@@ -3221,10 +3259,10 @@ index 0000000..be0184c
 +    }
 +}
 diff --git a/crates/slot-gfx/src/surface.rs b/crates/slot-gfx/src/surface.rs
-index 68ec778..bfb019a 100644
+index 68ec778..311d59e 100644
 --- a/crates/slot-gfx/src/surface.rs
 +++ b/crates/slot-gfx/src/surface.rs
-@@ -1,8 +1,18 @@
+@@ -1,8 +1,32 @@
  use std::ffi::c_void;
  use std::fmt;
  
@@ -3241,7 +3279,21 @@ index 68ec778..bfb019a 100644
 +/// screen. The game keeps its own size -- see `GAME_W` in `pipeline` -- and is
 +/// centred in it, which is why these two are no longer the same thing.
 +pub const OUT_W: u32 = 752;
-+pub const OUT_H: u32 = 560;
++/// 504, not the panel's 560, and the 56 rows left over are the Game Boy body.
++///
++/// This is the whole mechanism behind upstream's frame: its canvas is 720x480
++/// on a 640x480 panel, so fitting the canvas to the panel's width leaves 53
++/// rows of panel with nothing drawn on them, and `bezel` paints the body
++/// there. 0002 originally made the canvas the panel exactly -- 752x560 both --
++/// which is tidy and leaves no room for anything, by construction: no
++/// tolerance on `framed` can conjure a strip out of a canvas that already
++/// fills the panel.
++///
++/// 752x504 is aspect 1.492, within half a percent of upstream's 3:2, so the UI
++/// -- whose geometry is authored for 720x480 -- sits in it the way it was
++/// drawn to. The cost is 56 rows of picture: a stretched Game Boy goes from
++/// 622x560 to 560x504.
++pub const OUT_H: u32 = 504;
  
  #[derive(Debug)]
  pub enum GfxError {

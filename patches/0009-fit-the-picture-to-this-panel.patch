@@ -79,7 +79,7 @@ app.rs is shared with 0006, in a different place.
  use slot_store::{ini, Platform};
  
  pub const VIDEO_MODE_FILE: &str = "Config/video_mode.txt";
-@@ -40,17 +42,130 @@
+@@ -40,17 +42,135 @@
      ini::write(root, VIDEO_MODE_FILE, stem, mode.as_str())
  }
  
@@ -170,8 +170,13 @@ app.rs is shared with 0006, in a different place.
 +    fn stretching_a_game_boy_fills_the_height_without_distorting_or_cropping() {
 +        for p in [Platform::Gb, Platform::Gbc] {
 +            let (w, h) = on_panel(p, VideoMode::Stretch);
++            // Derived from the canvas, not written down: OUT_H moved from 560
++            // to 504 when the Game Boy body took the bottom of the panel, and
++            // a literal 622 here just broke rather than saying anything. The
++            // claim is that the picture fills the height and keeps its shape.
++            let want_w = 160.0 * OUT_H as f32 / 144.0;
 +            assert!((h - OUT_H as f32).abs() < 0.5, "{p:?} is {h} tall");
-+            assert!((w - 622.0).abs() < 1.0, "{p:?} is {w} wide");
++            assert!((w - want_w).abs() < 1.0, "{p:?} is {w} wide, wanted {want_w}");
 +            assert!(
 +                (w / h - 160.0 / 144.0).abs() < 0.001,
 +                "{p:?} came out at aspect {}",

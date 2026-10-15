@@ -1,0 +1,79 @@
+let a panel that is 4:3 to within a percent have the Game Boy body
+
+Upstream draws the body around the picture and gives the shelf slack inside
+it, and none of it has ever appeared on this device. Three things said no, and
+only one of them was really about this panel:
+
+  - bezel::framed wanted an exactly 4:3 panel. 752x560 is 2256 against 2240,
+    sixteen pixels, 0.71% -- off, for a panel nobody would describe as anything
+    but 4:3.
+  - bezel::pick wanted a bezel asset whose aspect equalled the panel's exactly,
+    which refused the only asset upstream ships: 640x480 against 752x560 is
+    358,400 to 360,960, the same 0.71%. bezel_face scales the art to the panel
+    regardless, so what was being refused was half a percent of stretch on a
+    picture of moulded plastic.
+  - and the structural one, which no tolerance here could fix: 0002 made the
+    canvas the panel exactly, so there was no strip of panel left to draw a
+    body on. That is 0002's half of this change -- the canvas is 752x504 now --
+    along with painting the thing, since the software backend stored set_bezel
+    and never read it.
+
+Both tests here are the same 1/64 window: wide enough for a maker who rounded
+560 to a round number, narrow enough that 16:9 and 3:2 stay out and keep
+upstream's behaviour on the panels it was written for.
+
+This is a UX change rather than a device fix, which CLAUDE.md asks to be said
+out loud: nothing was broken, the frame is simply a thing this port did not
+have. It costs 56 rows of picture, and was built to be looked at and judged
+rather than argued about.
+
+diff --git a/crates/slot-gfx/src/bezel.rs b/crates/slot-gfx/src/bezel.rs
+index 4592be1..ed527ce 100644
+--- a/crates/slot-gfx/src/bezel.rs
++++ b/crates/slot-gfx/src/bezel.rs
+@@ -1,7 +1,19 @@
+ use crate::surface::{OUT_H, OUT_W};
+ 
++/// Whether this panel gets the Game Boy body drawn around the picture.
++///
++/// Near enough to 4:3 rather than exactly it. The Mini Flip's 752x560 is
++/// 0.71% off -- 2256 against 2240, sixteen pixels -- and exact equality turned
++/// the frame off for a panel nobody would call anything but 4:3. The window
++/// is 1/64, wide enough for a panel whose maker rounded to a round number and
++/// narrow enough that 16:9 and 3:2 stay out.
+ pub fn framed(panel: (u32, u32)) -> bool {
+-    panel.0 > 0 && panel.0 * 3 == panel.1 * 4
++    if panel.0 == 0 || panel.1 == 0 {
++        return false;
++    }
++    let (a, b) = (u64::from(panel.0) * 3, u64::from(panel.1) * 4);
++    let (lo, hi) = (a.min(b), a.max(b));
++    hi - lo <= hi / 64
+ }
+ 
+ pub fn screen_rect(panel: (u32, u32)) -> (i32, i32, i32, i32) {
+diff --git a/crates/slot/src/bezel.rs b/crates/slot/src/bezel.rs
+index cfed1b0..31473e0 100644
+--- a/crates/slot/src/bezel.rs
++++ b/crates/slot/src/bezel.rs
+@@ -18,8 +18,19 @@ pub fn pick(root: &Path, panel: (u32, u32)) -> Option<PathBuf> {
+         .map(|e| e.path())
+         .filter(|p| !slot_store::is_hidden(p))
+         .filter_map(|p| Some((dims(&p)?, p)))
++        // Near enough to the panel's aspect, matching `bezel::framed`'s
++        // tolerance. Exactly it refused the only bezel upstream ships --
++        // 640x480 against a 752x560 panel is 358,400 to 360,960, the same
++        // 0.71% that made `framed` say no -- and the art is scaled to the
++        // panel by `bezel_face` anyway, so half a percent of stretch is not
++        // something anyone can see on a plastic shell.
+         .filter(|((w, h), _)| {
+-            u64::from(*w) * u64::from(panel.1) == u64::from(*h) * u64::from(panel.0)
++            let (a, b) = (
++                u64::from(*w) * u64::from(panel.1),
++                u64::from(*h) * u64::from(panel.0),
++            );
++            let (lo, hi) = (a.min(b), a.max(b));
++            hi - lo <= hi / 64
+         })
+         .collect();
+     fits.sort_by_key(|((w, _), p)| (w.abs_diff(panel.0), p.clone()));
