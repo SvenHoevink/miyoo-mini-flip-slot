@@ -1,0 +1,157 @@
+# Build the card zip and publish it on a tag.
+#
+# The armv7 counterpart of upstream/slot/.github/workflows/release.yml, and the
+# same shape: one job that assembles the tree and checks what is about to ship,
+# a second that holds the only `contents: write` and publishes it. Two things
+# differ, both because of this device:
+#
+#   - it runs on x86_64. Upstream builds aarch64 natively on an ARM runner; we
+#     cross-compile for armv7 inside toolchain/Dockerfile, so the runner's own
+#     architecture does not matter and Docker does the work.
+#   - everything goes through `task`, so a release is the same command anyone
+#     runs locally. `task release` starts with `task clean`, which is the point:
+#     CLAUDE.md says both of this port's build traps were found by rebuilding
+#     from clean, and a release is the worst place to hit one.
+#
+# Budget 20-30 minutes: the toolchain image, both libretro cores and the
+# frontend are all built from nothing. The image build pulls apt from
+# archive.debian.org and rustup from sh.rustup.rs, and the cores fetch from
+# GitHub, so a failure here is usually a re-run rather than a bug.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: card zip
+    runs-on: ubuntu-latest
+    outputs:
+      zip: ${{ steps.package.outputs.zip }}
+    steps:
+      # Submodules because upstream/slot is pinned and the build patches it;
+      # fetch-depth 0 because `task release` names the zip from `git describe
+      # --tags`, and the default shallow checkout has no tags -- it would
+      # quietly produce a sha-named artifact for a tagged release.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Task
+        run: curl -fsSL https://taskfile.dev/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Build the zip
+        run: task release OUT=release
+
+      - name: Check what is about to ship
+        run: |
+          set -eu
+          stage=release/stage
+
+          # armv7, not aarch64: upstream's workflow greps the other way here.
+          for f in slot gpsp_libretro.so mgba_libretro.so; do
+            file "$stage/System/$f" | grep -q "ELF 32-bit LSB .*ARM"
+          done
+          test -x "$stage/System/slot"
+          test -x "$stage/System/launch_frontend.sh"
+
+          # The device is glibc 2.28. A binary needing more does not start, and
+          # that is not visible from the outside until it fails on the handheld.
+          # Picked out of the output rather than taken whole: task echoes the
+          # docker command it runs, and today that goes to stderr, but this
+          # check should not depend on which stream it chose.
+          floor=$(task glibc 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1)
+          case "$floor" in
+            GLIBC_2.1*|GLIBC_2.2[0-8]) echo "glibc floor $floor, ok" ;;
+            *) echo "glibc floor $floor is above the device's 2.28" >&2; exit 1 ;;
+          esac
+
+          # GPL-3.0: the licence texts, the cores' source references and the
+          # record of what built this.
+          test -d "$stage/System/licenses"
+          test -f "$stage/System/licenses/gpsp-src.tar.gz"
+          test -f "$stage/System/licenses/gpsp_libretro.so.meta"
+          test -f "$stage/System/licenses/mgba_libretro.so.meta"
+          test -f "$stage/System/licenses/build-info.txt"
+          cat "$stage/System/licenses/build-info.txt"
+
+          # The install page travels with the zip.
+          test -f "$stage/System/slot-install.md"
+
+          # The one mistake that makes the app not appear: a wrapper directory,
+          # so the card gets slot-miyoo-x/App instead of App. task release zips
+          # from inside the stage for this reason -- assert it rather than trust
+          # it. The top level is the whole content root, twenty-odd directories,
+          # so this checks that the three that matter are at the root and that
+          # there is no single thing wrapping them.
+          zip=$(ls release/*.zip)
+          top=$(unzip -Z1 "$zip" | cut -d/ -f1 | sort -u)
+          echo "top level: $(echo "$top" | tr '\n' ' ')"
+          for d in App Apps System; do
+            echo "$top" | grep -qx "$d" || {
+              echo "$d/ is not at the zip root -- a wrapper directory would do this" >&2
+              exit 1
+            }
+          done
+          test "$(echo "$top" | grep -c .)" -gt 3
+
+      - name: Package
+        id: package
+        run: echo "zip=$(basename "$(ls release/*.zip)")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip }}
+          path: release/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: release
+    needs: build
+    # workflow_dispatch builds and checks but publishes nothing, which is how to
+    # exercise this without spending a tag.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.zip }}
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ needs.build.outputs.zip }}
+        run: |
+          set -eu
+          cat > notes.md <<'NOTES'
+          Unzip into the root of the SD card. `App/`, `Apps/` and `System/` go
+          beside what is already there; nothing is reflashed or replaced, and
+          slot appears as one more app in your launcher.
+
+          The short version is in `System/slot-install.md`, which travels in the
+          zip, or [docs/INSTALL.md](docs/INSTALL.md) here.
+
+          **This is the Miyoo Mini Flip build.** Its canvas is the Flip's
+          752x560 panel; other Miyoo models have a different one. See
+          [notes/variants.md](notes/variants.md).
+
+          Emulation is mGBA (MPL-2.0) and gpSP (GPL-2.0); slot is
+          GPL-3.0-or-later. Their licences, the patches applied to them and
+          gpSP's corresponding source are in `System/licenses/`, along with
+          `build-info.txt` naming the commit, the core revisions and the pinned
+          toolchain digest that produced this zip.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" "$ZIP" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md

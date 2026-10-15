@@ -17,4 +17,6 @@
 /.task
 /dist
 /dist-probe
+# `task release` stages the card tree and the zip here.
+/release
 /slot-wifi.txt

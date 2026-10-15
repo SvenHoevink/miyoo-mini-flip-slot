@@ -240,7 +240,56 @@ tasks:
       - cp -R {{.UPSTREAM}}/licenses {{.OUT}}/System/licenses
       - cp vendor-miyoo/gpsp_libretro.so.meta vendor-miyoo/mgba_libretro.so.meta {{.OUT}}/System/licenses/
       - cp third-party/gpsp-src.tar.gz {{.OUT}}/System/licenses/
+      # What built this tree, travelling with it. The cores already ship their
+      # own .meta stamps above; this is the frontend's provenance, which nothing
+      # recorded. A card found months from now should be able to name the commit
+      # and the compiler that produced it without the repo to hand -- and the
+      # toolchain digest is read out of the Dockerfile rather than retyped, so
+      # it cannot drift from the image that was actually used.
+      - |
+        set -eu
+        out={{.OUT}}/System/licenses/build-info.txt
+        {
+          echo "slot-miyoo $(git describe --tags --always --dirty 2>/dev/null || echo unknown)"
+          echo "built       $(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "toolchain   $(sed -n 's|^FROM ||p' toolchain/Dockerfile)"
+          echo "mgba        {{.MGBA_COMMIT}}"
+          echo "gpsp        {{.GPSP_COMMIT}}"
+          echo "target      {{.TARGET}}"
+        } > "$out"
+        cat "$out"
       - 'echo "tree ready at {{.OUT}} — copy its *contents* to the card root"'
+
+  release:
+    desc: Build the one zip a user installs, OUT defaults to ./release
+    vars:
+      OUT: '{{.OUT | default "release"}}'
+      # Tag if we are on one, otherwise the short sha, so an unreleased build
+      # still names the commit it came from rather than claiming a version.
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo unknown
+    cmds:
+      # A clean tree, because the two traps in CLAUDE.md were both found by
+      # rebuilding from clean, and a release is the worst place to hit them.
+      - task: clean
+      - task: dist
+        vars: {OUT: '{{.OUT}}/stage'}
+      # The install page travels with the zip: whoever unpacks this on a card
+      # months from now will not have the repo in front of them.
+      - cp docs/INSTALL.md {{.OUT}}/stage/System/slot-install.md
+      # Zipped from inside the stage dir so the paths are card-root relative --
+      # App/, Apps/, System/ at the top level, no wrapper directory. Getting
+      # this wrong is the one mistake that makes the app not appear.
+      - |
+        set -eu
+        zip="slot-miyoo-{{.VERSION}}-flip.zip"
+        rm -f "{{.OUT}}/$zip"
+        (cd {{.OUT}}/stage && zip -qr "../$zip" .)
+        cd {{.OUT}}
+        echo "$zip"
+        echo "  $(du -h "$zip" | cut -f1), $(unzip -l "$zip" | tail -1 | awk '{print $2}') files"
+        echo "  top level: $(unzip -l "$zip" | awk '$4 ~ /\// {split($4,a,"/"); print a[1]}' | sort -u | tr '\n' ' ')"
+        echo "unzip it into the card root; see docs/INSTALL.md"
 
   probe:
     desc: Assemble just the probe app, OUT defaults to ./dist-probe (no build needed)
