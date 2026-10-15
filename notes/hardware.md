@@ -320,16 +320,27 @@ the location and wrong about it being out of reach. Core patches now have a
 home at `cores/mgba/patches/`, applied after upstream slot's and hashed into
 the build stamp.
 
-### Still open: MBC2 saves probably do not persist
+### MBC2 saves do persist, despite the missing log line
 
-The load still logs no `emu: save ram` line where an MBC1 cart does
-(Alleyway DX: `save ram, 8192 bytes`). That is not the crash -- it is mGBA's
-libretro layer deferring `core->reset()` to the first `retro_run`
-(`_doDeferredSetup`, "need to defer resetting the core on start so drivers are
-initialized"), so `retro_get_memory_size(RETRO_MEMORY_SAVE_RAM)` returns
-`gb->sramSize`, which is still 0 when slot asks. Unverified, but it implies
-Kirby's high scores are lost on exit. Check whether slot can re-query the size
-after the first frame before building anything.
+The load logs no `emu: save ram` line where an MBC1 cart does (Alleyway DX:
+`save ram, 8192 bytes`), and that was written up here as "MBC2 saves probably
+do not persist". **Wrong** -- checked on the card afterwards:
+
+```
+-rwxrwxrwx 1 root root  256 Oct 14 21:02 Saves/GBC/Kirby's Pinball Land DX.sav
+```
+
+256 bytes, which is exactly MBC2's `sramSize` of 0x100, and the contents are
+real rather than blank -- `ff` fill for the first 27 bytes and then score data.
+So the save path works; only the *log line* is missing, because mGBA's libretro
+layer defers `core->reset()` to the first `retro_run` (`_doDeferredSetup`,
+"need to defer resetting the core on start so drivers are initialized") and
+`retro_get_memory_size(RETRO_MEMORY_SAVE_RAM)` therefore returns 0 when slot
+asks at load time. slot writes the save from the core's own buffer regardless.
+
+The lesson is the one this file keeps re-learning: a missing log line is
+evidence about the logging, not about the thing it would have described. The
+save file was one `ls` away the whole time.
 
 ## The backlight is a PWM channel, and its response is steeply non-linear
 
