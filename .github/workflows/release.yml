@@ -42,7 +42,7 @@ jobs:
       # fetch-depth 0 because `task release` names the zip from `git describe
       # --tags`, and the default shallow checkout has no tags -- it would
       # quietly produce a sha-named artifact for a tagged release.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -109,7 +109,7 @@ jobs:
         id: package
         run: echo "zip=$(basename "$(ls release/*.zip)")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.zip }}
           path: release/*.zip
@@ -125,7 +125,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build.outputs.zip }}
 
