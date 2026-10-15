@@ -377,11 +377,30 @@ Confirmed on the handheld: the lid now darkens the screen and restores it, the
 brightness HUD moves the panel, and the probe line reads `backlight pwm (0 to
 112)` where it used to read `no backlight`.
 
-Still open: a closed lid turns the screen off but does **not** suspend. Allium's
-own `power.json` has `lid_close_action: Suspend`, and alliumd logs
-`suspending...` / `waking up from suspend...`, so there is a vendor path to copy
-if the idle drain with the lid shut turns out to matter. slot's `doze` stops the
-game and the backlight, which is what was asked for here.
+### Closing the lid dozes; it deliberately does not suspend
+
+**Decided 2026-10-14, not an open question.** A closed lid runs slot's own
+`doze`, and that is the intended behaviour here:
+
+- the hall poll (150 ms) raises `Btn::Lid` -> `Action::LidClose` -> `doze()`;
+- `doze` flushes the state writer and the resume snapshot, so **shutting the
+  lid is a save point**;
+- the cart moves from `Phase::Playing` into `Phase::Doze { cart }`, which parks
+  it for the wake;
+- `sync_speed` includes `dozing()`, so the core goes to `Speed::Paused` -- the
+  game is not running behind a dark screen, and the audio ring goes quiet;
+- `power.on_close()` writes backlight step 0, which is duty 0;
+- after `DOZE_TIMEOUT`, 180 s, `on_doze_timeout` powers the handheld off.
+
+The SoC stays awake for those three minutes and the radio stays associated,
+which is why FTP keeps answering with the lid shut. Allium suspends instead
+(`power.json` has `lid_close_action: Suspend`; alliumd logs `suspending...` and
+`waking up from suspend...`), so a vendor path exists -- but doze is what this
+port uses. It is upstream's behaviour, it saves on the way down, and it wakes
+instantly. Do not reach for `/sys/power/state` here without a measured reason:
+the drain over a three-minute window has never been measured, and a suspend
+path on this SoC would be new guesswork against the rule that killing or
+bypassing the vendor stack is what made the handheld power off before.
 
 ## The lid: poll `hallvalue`, there are no events
 
