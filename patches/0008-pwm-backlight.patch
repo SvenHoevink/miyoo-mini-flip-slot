@@ -1,0 +1,204 @@
+drive the backlight over PWM, so the lid can turn the screen off
+
+The Miyoo Mini Flip has no /sys/class/backlight and no dispdbg, so
+DevicePlatform found no backlight at all and set_backlight returned without
+writing anything. Two things were broken by that and neither looked like a
+backlight problem: closing the lid left the screen lit (Power::on_close writes
+step 0, which went nowhere), and slot's brightness HUD moved its own number
+while the panel ignored it.
+
+Its panel is driven straight off a PWM channel instead -- the same file Allium
+writes, which reaches it by its device-tree path
+soc/1f003400.pwm/pwm/pwmchip0/pwm0/duty_cycle. Only consulted when there is
+neither a class device nor dispdbg, so a device with either keeps upstream's
+path untouched.
+
+The step table is measured rather than scaled. The panel's response is steeply
+non-linear: against its 800 ns period, duty 1 is not visible at all, 2 is the
+dimmest step that is, the firmware's own boot value of 6 is comfortable, 112 is
+as bright as anyone wanted and 400 is "extra bright", well past useful. Scaling
+the period the way the class backlight scales max_brightness would put step 1
+at 89 -- brighter than the device's own default -- and step 9 at 800. The
+ladder was stepped on the device and looked at; the values are what came back.
+
+Applies on top of 0004, which also touches these two files.
+
+--- a/crates/slot-power/src/device.rs
++++ b/crates/slot-power/src/device.rs
+@@ -61,9 +61,45 @@
+ 
+ const DISPDBG_MAX: u32 = 255;
+ 
++/// Where a bare PWM backlight lives, relative to the sysfs root.
++///
++/// The Miyoo Mini Flip has no `/sys/class/backlight` and no dispdbg: its panel
++/// is driven straight off a PWM channel, which is the same file Allium writes
++/// (it reaches it by its device-tree path,
++/// `soc/1f003400.pwm/pwm/pwmchip0/pwm0/duty_cycle`; this is the same channel
++/// under its class symlink).
++const PWM_DIRS: [&str; 1] = ["class/pwm/pwmchip0/pwm0"];
++
++/// Duty cycles for slot's ten brightness steps on that panel, in nanoseconds
++/// against its 800 ns period.
++///
++/// A table rather than a ratio of the period, because the response is steeply
++/// non-linear and measured, on the device, by stepping a ladder and looking at
++/// it: duty 1 is not visible at all, 2 is the dimmest step that is, the
++/// firmware's own boot value of 6 is comfortable, 112 is as bright as anyone
++/// wanted, and 400 -- half the period -- is "extra bright" and far past useful.
++/// Scaling the period the way the `Class` backlight scales `max_brightness`
++/// would put step 1 at 89, brighter than the device's own default, and step 9
++/// at 800.
++///
++/// Step 0 is off, matching every other backlight here: it is what
++/// `Power::on_close` writes when the lid shuts.
++const PWM_STEPS: [u32; 10] = [0, 2, 3, 5, 9, 15, 25, 41, 68, 112];
++
+ enum Backlight {
+     Class(PathBuf),
+     Dispdbg(PathBuf),
++    Pwm(PathBuf),
++}
++
++/// Only consulted when there is neither a backlight class device nor dispdbg,
++/// so a device with either keeps upstream's path and this table of
++/// Mini-Flip-calibrated steps stays out of its way.
++fn find_pwm(sysfs: &Path) -> Option<PathBuf> {
++    PWM_DIRS
++        .iter()
++        .map(|d| sysfs.join(d))
++        .find(|d| d.join("duty_cycle").is_file() && d.join("period").is_file())
+ }
+ 
+ enum Led {
+@@ -102,6 +138,7 @@
+                 dbg.join("param")
+                     .is_file()
+                     .then_some(Backlight::Dispdbg(dbg))
++                    .or_else(|| find_pwm(sysfs).map(Backlight::Pwm))
+             }
+         };
+         let battery = first_dir(&sysfs.join("class/power_supply"), is_battery);
+@@ -118,6 +155,13 @@
+                 Led::Mono { dir, max }
+             }
+         });
++        // A PWM channel has no max_brightness of its own, and the dispdbg
++        // default of 255 would make the probe line claim a range it does not
++        // have. The honest ceiling is the top of the step table.
++        let max_brightness = match &backlight {
++            Some(Backlight::Pwm(_)) => PWM_STEPS[TOP_STEP as usize],
++            _ => max_brightness,
++        };
+         DevicePlatform {
+             root,
+             sysfs: sysfs.to_path_buf(),
+@@ -159,6 +203,7 @@
+         let backlight = match &self.backlight {
+             Some(Backlight::Class(dir)) => leaf(dir),
+             Some(Backlight::Dispdbg(_)) => "dispdbg".to_string(),
++            Some(Backlight::Pwm(_)) => "pwm".to_string(),
+             None => "no backlight".to_string(),
+         };
+         let motor = match &self.motor {
+@@ -462,6 +507,21 @@
+                 write(dir.join("param"), value.to_string());
+                 write(dir.join("start"), "1".to_string());
+             }
++            Backlight::Pwm(dir) => {
++                // Indexed, not scaled -- see PWM_STEPS. Clamped to the period
++                // the channel reports, because a duty longer than the period
++                // is rejected with EINVAL, and a device whose period is
++                // smaller than this panel's should dim rather than fail.
++                let cap = read_number(&dir.join("period")).unwrap_or(u32::MAX);
++                let duty = PWM_STEPS[step as usize].min(cap);
++                write(dir.join("duty_cycle"), duty.to_string());
++                if duty > 0 {
++                    // Idempotent when the channel is already running, and it
++                    // means a channel something else switched off still lights
++                    // up rather than silently staying dark.
++                    write(dir.join("enable"), "1".to_string());
++                }
++            }
+         }
+     }
+ 
+--- a/crates/slot-power/tests/device.rs
++++ b/crates/slot-power/tests/device.rs
+@@ -362,3 +362,76 @@
+     let m = "/dev/x /mnt/card vfat rw,errors=remount-ro 0 0\n";
+     assert!(!slot_power::read_only_in(m, Path::new("/mnt/card")));
+ }
++
++/// The Mini Flip has no backlight class device and no dispdbg, just a PWM
++/// channel. Without this the lid shuts and the screen stays lit, which is how
++/// the gap was found.
++fn pwm_sysfs(period: &str) -> TempDir {
++    let d = tempfile::tempdir().unwrap();
++    let pwm = d.path().join("class/pwm/pwmchip0/pwm0");
++    fs::create_dir_all(&pwm).unwrap();
++    fs::write(pwm.join("period"), format!("{period}\n")).unwrap();
++    fs::write(pwm.join("duty_cycle"), "6\n").unwrap();
++    fs::write(pwm.join("enable"), "1\n").unwrap();
++    d
++}
++
++fn duty(d: &TempDir) -> u32 {
++    let text = fs::read_to_string(d.path().join("class/pwm/pwmchip0/pwm0/duty_cycle")).unwrap();
++    text.trim().parse().unwrap()
++}
++
++#[test]
++fn a_pwm_panel_dims_and_goes_dark() {
++    let d = pwm_sysfs("800");
++    let mut p = platform(&d);
++    // Step 0 is what Power::on_close writes when the lid shuts, and it has to
++    // reach the hardware or the screen stays on with the lid closed.
++    p.set_backlight(0);
++    assert_eq!(duty(&d), 0);
++    p.set_backlight(9);
++    assert_eq!(duty(&d), 112);
++    p.set_backlight(5);
++    assert_eq!(duty(&d), 15);
++}
++
++#[test]
++fn the_pwm_steps_rise_and_stay_inside_the_period() {
++    let d = pwm_sysfs("800");
++    let mut p = platform(&d);
++    let mut last = 0;
++    for step in 0..=9 {
++        p.set_backlight(step);
++        let now = duty(&d);
++        assert!(now <= 800, "step {step} wrote {now} against a 800 period");
++        assert!(
++            step == 0 || now > last,
++            "step {step} wrote {now}, not above step {}'s {last}",
++            step - 1
++        );
++        last = now;
++    }
++}
++
++#[test]
++fn a_shorter_period_clamps_rather_than_failing() {
++    // A duty longer than the period is EINVAL, so a panel with a shorter one
++    // should come out bright rather than erroring and staying put.
++    let d = pwm_sysfs("64");
++    let mut p = platform(&d);
++    p.set_backlight(9);
++    assert_eq!(duty(&d), 64);
++}
++
++#[test]
++fn a_backlight_class_device_still_wins_over_pwm() {
++    let d = sysfs("255", "87");
++    let pwm = d.path().join("class/pwm/pwmchip0/pwm0");
++    fs::create_dir_all(&pwm).unwrap();
++    fs::write(pwm.join("period"), "800\n").unwrap();
++    fs::write(pwm.join("duty_cycle"), "6\n").unwrap();
++    let mut p = platform(&d);
++    p.set_backlight(9);
++    assert_eq!(brightness(&d), 255);
++    assert_eq!(duty(&d), 6, "the pwm channel should have been left alone");
++}

@@ -331,6 +331,58 @@ initialized"), so `retro_get_memory_size(RETRO_MEMORY_SAVE_RAM)` returns
 Kirby's high scores are lost on exit. Check whether slot can re-query the size
 after the first frame before building anything.
 
+## The backlight is a PWM channel, and its response is steeply non-linear
+
+There is **no `/sys/class/backlight`** on this device and no Allwinner dispdbg,
+which are the only two things upstream's `set_backlight` knows. It therefore
+found no backlight, wrote nothing, and failed silently at two jobs that did not
+look related: closing the lid left the screen lit, because `Power::on_close`
+writes step 0 and step 0 went nowhere, and slot's brightness HUD moved its own
+number while the panel ignored it.
+
+The panel is driven straight off a PWM channel:
+
+```
+/sys/class/pwm/pwmchip0/pwm0/{period,duty_cycle,enable,polarity}
+period=800  duty_cycle=6  enable=1  polarity=normal
+```
+
+`.tmp_update/updater` sets `period=800`, `duty_cycle=6`, `enable=1` at boot.
+Allium writes the same channel by its device-tree path,
+`/sys/devices/soc0/soc/1f003400.pwm/pwm/pwmchip0/pwm0/duty_cycle`.
+
+**Measured by stepping a ladder on the device and looking at it** (2026-10-14),
+against the 800 ns period:
+
+| duty | what it looks like |
+|---|---|
+| 0 | off |
+| 1 | not visible at all |
+| 2 | dimmest step that is visible |
+| 6 | the firmware's own boot value, comfortable |
+| 112 | as bright as anyone wanted |
+| 400 | "extra bright", well past useful |
+
+So the response is concentrated in the bottom few percent of the period, and
+**scaling the period the way the class backlight scales `max_brightness` is
+wrong** -- it would put step 1 of 9 at 89, brighter than the device's own
+default, and step 9 at 800. `patches/0008` carries a measured table instead:
+
+```
+step  0  1  2  3  4  5   6   7   8   9
+duty  0  2  3  5  9  15  25  41  68  112
+```
+
+Confirmed on the handheld: the lid now darkens the screen and restores it, the
+brightness HUD moves the panel, and the probe line reads `backlight pwm (0 to
+112)` where it used to read `no backlight`.
+
+Still open: a closed lid turns the screen off but does **not** suspend. Allium's
+own `power.json` has `lid_close_action: Suspend`, and alliumd logs
+`suspending...` / `waking up from suspend...`, so there is a vendor path to copy
+if the idle drain with the lid shut turns out to matter. slot's `doze` stops the
+game and the backlight, which is what was asked for here.
+
 ## The lid: poll `hallvalue`, there are no events
 
 **Resolved.** The clamshell sensor is a platform device and exposes its state at
@@ -974,3 +1026,17 @@ ls: /sys/class/power_supply: No such file or directory
 not exist on this device. The HUD battery indicator has no source yet. Find out
 how Allium reads the charge (likely an ADC under `/sys/devices` or via the MI
 libraries) before writing anything.
+
+## `task test` is `--lib` for a reason, and one integration test says why
+
+`task test` runs `cargo test -p slot-gfx -p slot-power --lib` under qemu, so the
+integration tests in `crates/slot-power/tests/` are not part of it. Running them
+under qemu for the first time (2026-10-14) turned up
+`the_motor_is_found_by_capability_rather_than_by_position` failing in a full
+run but passing when run alone, and passing on the host either way -- test
+ordering or something environmental, not armv7. It predates the backlight work.
+
+Consequence worth knowing: the 30 tests in that file, including the PWM
+backlight ones, are only exercised by a plain `cargo test -p slot-power` on the
+host. Worth fixing the ordering dependency and widening `task test` to
+`--lib --tests`, so they run where everything else does.
