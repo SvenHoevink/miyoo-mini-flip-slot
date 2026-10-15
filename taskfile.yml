@@ -630,5 +630,22 @@ tasks:
   clean:
     desc: Remove this port's build output (leaves the cargo cache)
     cmds:
-      - docker run --rm -v "$PWD":/src -w /src {{.IMAGE}} rm -rf /src/target-miyoo /src/vendor-miyoo
+      # Through the toolchain image, because some of this is not ours to
+      # delete: a container running as root makes target-miyoo/qemu-root, and a
+      # host rm cannot touch it.
+      #
+      # Only when the image is there, though. It is not on a fresh clone, and
+      # `task clean` then failed with "pull access denied for
+      # slot-miyoo-toolchain" -- which is how the first CI release run died,
+      # since `task release` starts here. Nothing to delete in that case
+      # either, so fall back to a host rm rather than building a whole
+      # toolchain to remove two directories that do not exist.
+      - |
+        set -eu
+        [ -e target-miyoo ] || [ -e vendor-miyoo ] || exit 0
+        if docker image inspect {{.IMAGE}} >/dev/null 2>&1; then
+          docker run --rm -v "$PWD":/src -w /src {{.IMAGE}} rm -rf /src/target-miyoo /src/vendor-miyoo
+        else
+          rm -rf target-miyoo vendor-miyoo
+        fi
       - task: unpatch
