@@ -48,7 +48,18 @@ speak to frame times on a 1.2 GHz Cortex-A7 or to a 128 MB ceiling, and its
 for the panel, CPU, RAM, libc, mounts and input — use those, not spec sheets,
 which were wrong about the panel (752x560, not 750) and the usable RAM (~101 MB,
 not 128). Anything still missing from that file is a hypothesis; mark it as one.
-The per-button evdev codes and the battery source are the notable gaps.
+
+Both gaps this used to name are closed: all 18 per-button evdev codes are
+mapped and cross-checked against Allium's own, and the battery reads
+`/customer/app/axp_test` (`patches/0004`) because there is no
+`/sys/class/power_supply` at all.
+
+Beware a *second* instrument disagreeing with that file. slot's probe line
+still prints `battery no battery`, because it reports the sysfs directory while
+`battery()` succeeds through the vendor-tool fallback; read that as a gap and
+you will go looking for something that has worked for days. Same shape as the
+missing `emu: save ram` line on an MBC2 cart that saves fine. When a log line
+and `notes/hardware.md` disagree, check the thing itself.
 
 `.gitmodules` sets `ignore = dirty` for the submodule, because `task patch`
 leaves its working tree modified by design; the *pinned commit* is still
