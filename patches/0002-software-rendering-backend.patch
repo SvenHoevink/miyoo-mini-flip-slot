@@ -3259,7 +3259,7 @@ index 0000000..be0184c
 +    }
 +}
 diff --git a/crates/slot-gfx/src/surface.rs b/crates/slot-gfx/src/surface.rs
-index 68ec778..311d59e 100644
+index 68ec778..16ad101 100644
 --- a/crates/slot-gfx/src/surface.rs
 +++ b/crates/slot-gfx/src/surface.rs
 @@ -1,8 +1,32 @@
@@ -3279,21 +3279,21 @@ index 68ec778..311d59e 100644
 +/// screen. The game keeps its own size -- see `GAME_W` in `pipeline` -- and is
 +/// centred in it, which is why these two are no longer the same thing.
 +pub const OUT_W: u32 = 752;
-+/// 504, not the panel's 560, and the 56 rows left over are the Game Boy body.
++/// The panel exactly, which is also what decides where the Game Boy body shows.
 +///
-+/// This is the whole mechanism behind upstream's frame: its canvas is 720x480
-+/// on a 640x480 panel, so fitting the canvas to the panel's width leaves 53
-+/// rows of panel with nothing drawn on them, and `bezel` paints the body
-+/// there. 0002 originally made the canvas the panel exactly -- 752x560 both --
-+/// which is tidy and leaves no room for anything, by construction: no
-+/// tolerance on `framed` can conjure a strip out of a canvas that already
-+/// fills the panel.
++/// It was briefly 504, to leave 56 rows of panel for the body the way upstream
++/// leaves 53 on a 640x480 panel. That put the body on the shelf as well as in
++/// game, which is not wanted: the shelf is slot's own furniture and a plastic
++/// shell under it is clutter.
 +///
-+/// 752x504 is aspect 1.492, within half a percent of upstream's 3:2, so the UI
-+/// -- whose geometry is authored for 720x480 -- sits in it the way it was
-+/// drawn to. The cost is 56 rows of picture: a stretched Game Boy goes from
-+/// 622x560 to 560x504.
-+pub const OUT_H: u32 = 504;
++/// Equal to the panel, the phase decides it instead, and nothing had to learn
++/// about phases to do it. `output_frame` paints the surround and copies the
++/// picture over it, so the body is visible exactly where the picture does not
++/// reach: on the shelf the whole canvas is blitted and covers the panel, and
++/// in game the picture goes straight out at 720x480 and the margin around it
++/// is surround. Stretch fills the panel and covers it again, which is what
++/// stretch is for.
++pub const OUT_H: u32 = 560;
  
  #[derive(Debug)]
  pub enum GfxError {
