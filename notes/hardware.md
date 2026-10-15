@@ -1097,10 +1097,15 @@ There is no `/sys/class/power_supply` at all. The charge is behind
 `patches/0004` reads it when sysfs has nothing, which is what gives slot its
 indicator back. **Working as expected on the handheld**, confirmed 2026-10-15.
 
-The probe line is misleading about it and will stay so until someone fixes the
-description: it prints `battery no battery` because that field reports
-`self.battery`, the sysfs directory, which really is absent -- while `battery()`
-checks the vendor tool first and succeeds. Read as a gap once already. Allium reads the same tool on this hardware. The other source is
+The probe line used to be misleading about it, printing `battery no battery`
+because that field reported `self.battery`, the sysfs directory, which really is
+absent -- while `battery()` checks the vendor tool first and succeeds. It was
+read as an open gap once, days after the indicator started working.
+`patches/0010` names the source instead, confirmed on the handheld:
+
+```
+slot: backlight pwm (0 to 112), battery axp_test, rtc0, no motor
+``` Allium reads the same tool on this hardware. The other source is
 the SAR ADC behind `/dev/sar` and two vendor ioctls — a lot of machinery for the
 same number, and Allium only uses it on the older model.
 

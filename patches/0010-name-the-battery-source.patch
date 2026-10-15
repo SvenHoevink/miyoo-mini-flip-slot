@@ -1,0 +1,78 @@
+report the battery by its source instead of denying it
+
+`report()` printed "battery no battery" on a device whose battery indicator
+works. The field reports `self.battery`, the `/sys/class/power_supply`
+directory, which this device does not have at all -- while `battery()` checks
+`/customer/app/axp_test` first and succeeds, which is what 0004 added and what
+Allium reads too.
+
+Not a cosmetic complaint: the line was taken at face value and a solved problem
+was reported as an open gap, days after the indicator started working, against
+a notes/hardware.md section that said otherwise. The third such instrument this
+week, after a missing "emu: save ram" line on a cart that saves fine and the
+ring's "0 starved" while the codec ran dry every window.
+
+So name the source: the sysfs directory's leaf when there is one, the vendor
+tool's when that is what will be read, and "no battery" only when neither
+exists. The check is `is_file`, the same test `axp_battery` opens with, so
+describing the platform still costs no exec.
+
+The test goes in the middle of the file rather than the end, deliberately:
+0008 appends its tests at EOF, and anything after them stops that patch
+reverse-applying, which is how `task patch` decides a patch is already applied.
+
+Applies on top of 0004, which added the fallback, and 0008, which owns the
+backlight arm just above the line this changes.
+
+--- a/crates/slot-power/src/device.rs
++++ b/crates/slot-power/src/device.rs
+@@ -210,11 +210,21 @@
+             Some(m) => format!("motor {}", m.name),
+             None => "no motor".to_string(),
+         };
++        // Named by its source rather than called absent. There is no
++        // /sys/class/power_supply on this device at all, so this field read
++        // "no battery" while the indicator worked perfectly off the vendor
++        // tool -- and it was taken at face value and reported as an open
++        // problem days after the fact. A field that describes one of two
++        // sources should not go quiet about the other.
++        let battery = match &self.battery {
++            Some(dir) => leaf(dir),
++            None if Path::new(AXP_TOOL).is_file() => leaf(Path::new(AXP_TOOL)),
++            None => "no battery".to_string(),
++        };
+         format!(
+-            "backlight {} (0 to {}), battery {}, {}, {motor}",
++            "backlight {} (0 to {}), battery {battery}, {}, {motor}",
+             backlight,
+             self.max_brightness,
+-            name(&self.battery, "no battery"),
+             name(&self.rtc, "no rtc"),
+         )
+     }
+--- a/crates/slot-power/tests/device.rs
++++ b/crates/slot-power/tests/device.rs
+@@ -68,6 +68,23 @@
+ }
+ 
+ #[test]
++fn the_report_names_the_battery_source_rather_than_denying_it() {
++    // No power_supply at all is this device's normal state; the report should
++    // not then say "no battery", because the vendor tool is the source and the
++    // indicator works. Only reachable where the tool exists, so this asserts
++    // the absent case and documents the other.
++    let d = pwm_sysfs("800");
++    let p = platform(&d);
++    let report = p.report();
++    assert!(report.contains("backlight pwm"), "{report}");
++    if std::path::Path::new("/customer/app/axp_test").is_file() {
++        assert!(report.contains("battery axp_test"), "{report}");
++    } else {
++        assert!(report.contains("battery no battery"), "{report}");
++    }
++}
++
++#[test]
+ fn the_battery_is_found_past_the_supplies_that_are_not_one() {
+     let d = sysfs("255", "87");
+     assert_eq!(platform(&d).battery().map(|b| b.percent), Some(87));
