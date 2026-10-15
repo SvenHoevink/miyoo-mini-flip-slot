@@ -272,6 +272,16 @@ tasks:
       # A clean tree, because the two traps in CLAUDE.md were both found by
       # rebuilding from clean, and a release is the worst place to hit them.
       - task: clean
+      # Explicitly, and before dist. dist's deps -- cores, shim, build -- each
+      # declare `deps: [image]`, and go-task runs those three in parallel: on a
+      # fresh checkout one of them claims the shared image build while another
+      # carries on without it, and the shim's compile died with "pull access
+      # denied for slot-miyoo-toolchain" while the image was still being built.
+      # Free once it exists, since `image` fingerprints toolchain/Dockerfile.
+      #
+      # `task dist` on its own, on a machine that has never built the image,
+      # has the same race. Going through `task release` or `task all` avoids it.
+      - task: image
       - task: dist
         vars: {OUT: '{{.OUT}}/stage'}
       # The install page travels with the zip: whoever unpacks this on a card
