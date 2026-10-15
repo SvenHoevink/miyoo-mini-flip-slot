@@ -1,0 +1,64 @@
+time the wait for a cart face, which is the one shelf stall not in the renderer
+
+CartFaces::sync is called from compose every frame and blocks on recv() until
+every face the shelf wants on screen has been built, by two worker threads that
+are the only hot threads in slot with no priority set -- audio is -10, input
+-10, emu -8, these are 0, on two cores. A cart scrolling into view before its
+worker finishes stalls the frame outright, and nothing measured it.
+
+Measured over 19,200 frames of scrolling: nine waits past 2 ms, two of them
+26.0 and 24.3 ms. So it is real but rare -- not the routine unevenness, which
+turned out to be the sprite blit, but it is the only thing that can stall a
+frame for a frame and a half with the renderer idle. It is also the leading
+explanation for the gap notes/hardware.md flagged as unproven, between the
+pacer's work of 36-45 ms and take>swapped of 11.
+
+Printed per occurrence past a threshold rather than averaged: an average over
+19,200 frames hides exactly the shape being looked for.
+
+Applies on top of 0009, which owns the other end of frontend.rs's compose.
+
+--- a/crates/slot/src/latency.rs
++++ b/crates/slot/src/latency.rs
+@@ -87,6 +87,29 @@
+     );
+ }
+ 
++/// How long `compose` spent inside `CartFaces::sync`.
++///
++/// That call blocks on `recv()` until every face the shelf wants *on screen*
++/// has been built, so a cart scrolling into view before its worker has
++/// finished stalls the frame. It is the obvious suspect for a shelf that
++/// scrolls smoothly and then hitches, and for the gap in notes/hardware.md
++/// between the pacer's `work` of 36-45 ms and `take>swapped` of 11 -- "that
++/// would make most of it waiting rather than work, which has not been proven".
++///
++/// Printed per occurrence rather than averaged, and only past a threshold: an
++/// average would hide exactly the shape being looked for, and the frames that
++/// do not wait are the overwhelming majority.
++pub fn faces_waited(d: std::time::Duration) {
++    const NOTEWORTHY_MS: f64 = 2.0;
++    if !on() {
++        return;
++    }
++    let ms = d.as_secs_f64() * 1e3;
++    if ms >= NOTEWORTHY_MS {
++        eprintln!("slot: faces: compose waited {ms:.1} ms for a cart face");
++    }
++}
++
+ pub fn tracing() -> bool {
+     on()
+ }
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -349,7 +349,9 @@
+             compositor.upload_game(&frame);
+             crate::latency::taken();
+         }
++        let faces_at = std::time::Instant::now();
+         self.cart_faces.sync(self.session.app_mut(), compositor);
++        crate::latency::faces_waited(faces_at.elapsed());
+         sync_clock(self.session.app_mut(), compositor, &mut self.clocks);
+         sync_about(self.session.app_mut(), compositor, &mut self.about);
+         sync_quick_clock(self.session.app_mut(), compositor, &mut self.quick_clock);

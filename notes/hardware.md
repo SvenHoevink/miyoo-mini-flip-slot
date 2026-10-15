@@ -782,6 +782,66 @@ that it fills the panel, so the menu runs at about 35 Hz. Nothing depends on
 the menu's frame rate the way audio depends on the game's, but it is the
 largest number left in the backend.
 
+### The shelf's cost was alpha, not geometry (2026-10-15)
+
+Scrolling felt uneven. Measured over 19,200 frames with `SLOT_TRACE_LATENCY=1`,
+the shelf's `work` sat at **18.0-19.3 ms against a 16.77 ms period** -- just
+over, which is the worst place to be: the `<27` interval bucket is always
+**zero**, so every frame takes either one panel period or two, and 250-450 of
+every 600 take two. 60 Hz alternating with 30 reads as jerky at a mean of 45.
+
+Where it went, and three wrong answers on the way:
+
+| | |
+|---|---|
+| 186 rects | **0.3 ms** -- they write 0.14 of a screen between them |
+| 8 textured draws | **30-36 ms** -- all of it |
+| the fix | **15.3-18.2 ms** |
+
+**Rects were the first wrong answer.** "186 rects at 59 us each" was an
+inference from the stage total; counting their pixels showed 0.14 screens and
+`fill_rect` already memcpies a prepared row. Timing each draw *kind* separately
+is what found the eight textured draws.
+
+**The texels were the second.** Two draws of identical geometry measured 2.5
+and 16.0 ms, one copying 98,810 pixels and the other blending 99,520, with
+*identical* counts of fully transparent pixels. That looks exactly like a face
+whose alpha is a hair under 255, so `clip_to_silhouette` and both shell
+silhouettes were checked on the host, then `cart_face` with the real cover art,
+then all twelve 312x337 textures under qemu with the whole GBC shelf planted
+into a root. All opaque. A texture-alpha dump at upload on the device then said
+the same: **98,651/98,818 opaque**, matching the host exactly.
+
+**The answer was the draw's own alpha.** The shelf fades each cart face while
+scrolling -- 0.140, 0.159, 0.236 mid-animation -- and `blit`'s fast path wanted
+`colour == [1.0, 1.0, 1.0, 1.0]` *exactly*. Anything less fell to `modulate`
+per pixel: four float multiply-clamp-casts over ~90,000 pixels, three faces a
+frame. Worse, the lift eases *towards* 1.0 and lands at **0.9996**, so a cart
+sitting still at apparent full opacity blended all 99,520 of its pixels, 10.0 ms
+in one draw.
+
+Two changes, both in the blit, both bounded by tests against the reference:
+
+- `alpha_table`: slot only ever tints with white (`Draw::Tex` passes
+  `[1,1,1,alpha]`), so three of `modulate`'s four multiplies are by 1.0. One
+  256-byte table per draw and a byte lookup per pixel instead -- bit-identical,
+  since `v as f32 * 1.0` is `v`. 30-36 ms -> 21.
+- `plain_enough` and `OPAQUE_ENOUGH`: a tint or a texel within **one level** of
+  opaque is treated as opaque. Invisible, and it took that 10.0 ms draw to
+  2.47. 21 ms -> 15.3-18.2.
+
+What remains is honest: a cart genuinely at alpha 0.55 costs 3.8 ms to blend
+and must. The next lever is the overdraw visible in the same trace -- each cart
+draws an opaque silhouette (`id 23`, 1.2-2.7 ms) *underneath* its face, which
+is wasted wherever the face above it is opaque, about 5 ms a frame.
+
+**My own instruments lied twice here**, which cost two device rounds. The
+per-draw log printed `(alpha * 255).round()`, so 0.998 printed as `255` while
+failing the exact test; widened to three decimals, 0.9996 printed as `1.000`.
+An instrument that rounds away the exact quantity under test is worse than
+none. It is logged in thousandths now, and the rule generalises: **print the
+value the code branches on, not a rendering of it.**
+
 ### What is still unexplained
 
 The pacer reports `work 36-45 ms` while `take>swapped` is 11 and the core is 6.
