@@ -85,7 +85,7 @@ index 39903af..6fd5a8b 100644
      fn drop(&mut self) {
          unsafe {
 diff --git a/crates/slot-gfx/src/lib.rs b/crates/slot-gfx/src/lib.rs
-index a859f0d..c55e5a8 100644
+index a859f0d..539f759 100644
 --- a/crates/slot-gfx/src/lib.rs
 +++ b/crates/slot-gfx/src/lib.rs
 @@ -1,30 +1,44 @@
@@ -133,12 +133,13 @@ index a859f0d..c55e5a8 100644
  pub use host::HostSurface;
  pub use lcd3x::{lcd3x_factors, lcd3x_mask, ScreenEffect};
  pub use pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
- pub use power::{screen_brightness, screen_scale, screen_width};
+-pub use power::{screen_brightness, screen_scale, screen_width};
++pub use power::{screen_brightness, screen_scale, screen_width, PICTURE};
 +#[cfg(feature = "software")]
 +pub use soft::{canvas_size, Compositor, FbdevSurface, BACKDROP};
  pub use surface::{blit_rect, blit_rect_fit, fit_rect, fit_scale, GfxError, Surface, OUT_H, OUT_W};
 diff --git a/crates/slot-gfx/src/pipeline.rs b/crates/slot-gfx/src/pipeline.rs
-index 988bb8c..f47eaac 100644
+index 988bb8c..e780692 100644
 --- a/crates/slot-gfx/src/pipeline.rs
 +++ b/crates/slot-gfx/src/pipeline.rs
 @@ -1,15 +1,30 @@
@@ -175,15 +176,47 @@ index 988bb8c..f47eaac 100644
  pub struct GamePass {
      prog: gl::types::GLuint,
      game: gl::types::GLuint,
-@@ -29,6 +44,7 @@ pub struct GamePass {
+@@ -27,8 +42,11 @@ pub struct GamePass {
+     effect: ScreenEffect,
+     power: f32,
      src: [f32; 4],
++    /// See `power::screen_rect`: the picture's size in canvas units.
++    base: [f32; 2],
  }
  
 +#[cfg(not(feature = "software"))]
  impl GamePass {
      pub fn new() -> Result<Self, GfxError> {
          let prog = crate::shaders::program(RECT_VERT, GAME_FRAG)?;
-@@ -177,12 +193,14 @@ impl GamePass {
+@@ -81,6 +99,7 @@ impl GamePass {
+             effect: ScreenEffect::Lcd3x,
+             power: 1.0,
+             src: WHOLE_TEXTURE,
++            base: crate::power::PICTURE,
+         })
+     }
+ 
+@@ -114,6 +133,10 @@ impl GamePass {
+         self.paper_size = size as f32;
+     }
+ 
++    pub fn set_base(&mut self, base: [f32; 2]) {
++        self.base = base;
++    }
++
+     pub fn set_source_rect(&mut self, rect: [f32; 4]) {
+         self.src = rect;
+     }
+@@ -152,7 +175,7 @@ impl GamePass {
+     }
+ 
+     fn draw_source(&self, tex: gl::types::GLuint, quad: &Quad, src: [f32; 4]) {
+-        let (x, y, w, h) = screen_rect(self.power);
++        let (x, y, w, h) = screen_rect(self.power, self.base);
+         unsafe {
+             gl::UseProgram(self.prog);
+             gl::Uniform4f(self.u_rect, x, y, w, h);
+@@ -177,12 +200,14 @@ impl GamePass {
      }
  }
  
@@ -198,7 +231,7 @@ index 988bb8c..f47eaac 100644
  fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
      let shown = len * texels;
      let scale = (out / shown).ceil();
-@@ -194,6 +212,7 @@ fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
+@@ -194,6 +219,7 @@ fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
      (at + top / scale / texels, out / scale / texels)
  }
  
@@ -207,7 +240,7 @@ index 988bb8c..f47eaac 100644
      fn drop(&mut self) {
          unsafe {
 diff --git a/crates/slot-gfx/src/power.rs b/crates/slot-gfx/src/power.rs
-index 160e42a..c00d881 100644
+index 160e42a..428f65f 100644
 --- a/crates/slot-gfx/src/power.rs
 +++ b/crates/slot-gfx/src/power.rs
 @@ -1,3 +1,4 @@
@@ -230,26 +263,77 @@ index 160e42a..c00d881 100644
  }
  
  pub fn screen_brightness(t: f32) -> f32 {
-@@ -21,8 +22,11 @@ pub fn screen_brightness(t: f32) -> f32 {
+@@ -21,8 +22,61 @@ pub fn screen_brightness(t: f32) -> f32 {
      1.0 + OVERSHOOT * left * left
  }
  
-+/// Where the picture sits on the canvas: its own size, centred, shrinking to a
-+/// line for the screen-off animation. Centred in the canvas rather than filling
-+/// it, now that the two can differ.
- pub fn screen_rect(t: f32) -> (f32, f32, f32, f32) {
+-pub fn screen_rect(t: f32) -> (f32, f32, f32, f32) {
 -    let w = OUT_W as f32 * screen_width(t);
 -    let h = OUT_H as f32 * screen_scale(t);
-+    let w = GAME_W as f32 * screen_width(t);
-+    let h = GAME_H as f32 * screen_scale(t);
++/// Where the picture sits on the canvas: `base` sized, centred, shrinking to a
++/// line for the screen-off animation.
++///
++/// `base` is the picture's size in canvas units, which is *not* the canvas: on
++/// this port the canvas is the 752x560 panel while the picture's natural size
++/// is `GAME_W` x `GAME_H`, a pixel-exact `SCALE` times the source texture, and
++/// the difference is paper. Upstream never had to tell them apart -- its canvas
++/// and its picture were both 720x480, which is why "stretch" filled the screen
++/// there by construction and filled all but a 16px border here until this was
++/// a parameter.
++///
++/// A base larger than the canvas is fine and is how the picture is scaled past
++/// pixel-exact: the draw clamps to the canvas, so the paper is clipped first
++/// and the picture itself is clipped only once it runs out of panel. See
++/// `video_mode::base_size`.
++pub fn screen_rect(t: f32, base: [f32; 2]) -> (f32, f32, f32, f32) {
++    let w = base[0] * screen_width(t);
++    let h = base[1] * screen_scale(t);
      ((OUT_W as f32 - w) / 2.0, (OUT_H as f32 - h) / 2.0, w, h)
  }
++
++/// The picture's natural, pixel-exact size: `SCALE` times the source texture.
++pub const PICTURE: [f32; 2] = [GAME_W as f32, GAME_H as f32];
++
++#[cfg(test)]
++mod picture_tests {
++    use super::*;
++
++    #[test]
++    fn the_centred_picture_keeps_its_own_size() {
++        let (x, y, w, h) = screen_rect(1.0, PICTURE);
++        assert_eq!((w, h), (GAME_W as f32, GAME_H as f32));
++        assert_eq!(x, (OUT_W as f32 - GAME_W as f32) / 2.0);
++        assert_eq!(y, (OUT_H as f32 - GAME_H as f32) / 2.0);
++    }
++
++    /// The bug this flag exists for: with the canvas at 752x560 and the
++    /// picture left at 720x480, "stretch" filled everything except a 16px
++    /// border down each side and 40px top and bottom.
++    #[test]
++    fn the_stretched_picture_fills_the_canvas() {
++        let (x, y, w, h) = screen_rect(1.0, [OUT_W as f32, OUT_H as f32]);
++        assert_eq!((x, y), (0.0, 0.0));
++        assert_eq!((w, h), (OUT_W as f32, OUT_H as f32));
++    }
++
++    /// `screen_scale` is normalised against `GAME_H`, so a filled picture
++    /// closes to `LINE_PX * OUT_H / GAME_H` -- 2.33px rather than 2. Near
++    /// enough to a line; not worth a second constant.
++    #[test]
++    fn both_shrink_to_a_line_for_the_screen_off_animation() {
++        for base in [PICTURE, [OUT_W as f32, OUT_H as f32]] {
++            let (_, _, w, h) = screen_rect(0.0, base);
++            assert!(h < 3.0, "base={base:?} starts {h} tall, not a line");
++            assert!(w > 0.0, "base={base:?} starts with no width");
++        }
++    }
++}
 diff --git a/crates/slot-gfx/src/soft/fb.rs b/crates/slot-gfx/src/soft/fb.rs
 new file mode 100644
-index 0000000..cf46e75
+index 0000000..d13f87c
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/fb.rs
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,362 @@
 +//! A `Surface` over `/dev/fb0` for devices with no GPU.
 +//!
 +//! The Miyoo Mini Flip's SigmaStar SSD202D has no 3D core and no libEGL, so the
@@ -462,7 +546,10 @@ index 0000000..cf46e75
 +        // scanout, waiting for the blank instead, which trades the copy for a
 +        // tearing risk. Per device in the launch script; measure both.
 +        let offered = (var.yres_virtual / var.yres.max(1)).max(1);
-+        let pages = match std::env::var("SLOT_FB_PAGES").ok().and_then(|v| v.trim().parse().ok()) {
++        let pages = match std::env::var("SLOT_FB_PAGES")
++            .ok()
++            .and_then(|v| v.trim().parse().ok())
++        {
 +            Some(n) if n >= 1 => offered.min(n),
 +            _ => offered,
 +        };
@@ -611,10 +698,10 @@ index 0000000..cf46e75
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..c67eefe
+index 0000000..cd7631e
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1505 @@
+@@ -0,0 +1,1530 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -835,6 +922,9 @@ index 0000000..c67eefe
 +    power: f32,
 +    pic: [f32; 4],
 +    src: [f32; 4],
++    /// The picture's size in canvas units. Set from the video mode; see
++    /// `power::screen_rect` and `video_mode::base_size`.
++    base: [f32; 2],
 +    fbo_scale: [f32; 2],
 +    /// Scratch that would otherwise be heap-allocated twice a frame. Two
 +    /// allocations per frame is a poor way to spend a 16 ms budget, and the
@@ -852,6 +942,7 @@ index 0000000..c67eefe
 +            power: 1.0,
 +            pic: WHOLE_TEXTURE,
 +            src: WHOLE_TEXTURE,
++            base: crate::power::PICTURE,
 +            fbo_scale: [1.0, 1.0],
 +            col: Vec::new(),
 +            col_key: None,
@@ -888,11 +979,15 @@ index 0000000..c67eefe
 +
 +    fn draw_inner(&mut self, mut dest: Dest<'_>, tex: Option<&Image>, mirror: bool) -> u8 {
 +        let img = tex.unwrap_or(&self.frame);
-+        let (rx, ry, rw, rh) = screen_rect(self.power);
++        let (rx, ry, rw, rh) = screen_rect(self.power, self.base);
 +        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
 +            return 0;
 +        }
-+        let src = if tex.is_some() { WHOLE_TEXTURE } else { self.src };
++        let src = if tex.is_some() {
++            WHOLE_TEXTURE
++        } else {
++            self.src
++        };
 +        let (sw, sh) = (img.w as f32, img.h as f32);
 +
 +        let x0 = (rx.round() as i32).max(0);
@@ -1125,7 +1220,6 @@ index 0000000..c67eefe
 +    }
 +}
 +
-+
 +/// Scale a prepared row by one 8.8 factor, writing 8.8 fixed values down to
 +/// bytes: `dst[i] = min(255, (line[i] * yk) >> 16)`.
 +///
@@ -1273,7 +1367,11 @@ index 0000000..c67eefe
 +        let t = std::time::Instant::now();
 +        self.game.upload(xrgb8888);
 +        if self.profiling {
-+            { let us = t.elapsed().as_micros() as u64; self.profile.upload_us += us; self.profile.frame_us += us; }
++            {
++                let us = t.elapsed().as_micros() as u64;
++                self.profile.upload_us += us;
++                self.profile.frame_us += us;
++            }
 +        }
 +    }
 +
@@ -1281,7 +1379,11 @@ index 0000000..c67eefe
 +        let t = std::time::Instant::now();
 +        let path = self.game.draw(&mut self.canvas, None);
 +        if self.profiling {
-+            { let us = t.elapsed().as_micros() as u64; self.profile.game_us += us; self.profile.frame_us += us; }
++            {
++                let us = t.elapsed().as_micros() as u64;
++                self.profile.game_us += us;
++                self.profile.frame_us += us;
++            }
 +            self.profile.path = path;
 +        }
 +    }
@@ -1294,11 +1396,8 @@ index 0000000..c67eefe
 +        }
 +        self.pending_clear = false;
 +        let covered = matches!(items.first(), Some(Draw::Game)) && {
-+            let (x, y, w, h) = screen_rect(self.game.power);
-+            x <= 0.0
-+                && y <= 0.0
-+                && w >= self.canvas.w as f32
-+                && h >= self.canvas.h as f32
++            let (x, y, w, h) = screen_rect(self.game.power, self.game.base);
++            x <= 0.0 && y <= 0.0 && w >= self.canvas.w as f32 && h >= self.canvas.h as f32
 +        };
 +        if covered {
 +            return;
@@ -1353,7 +1452,11 @@ index 0000000..c67eefe
 +                    let t = std::time::Instant::now();
 +                    let path = self.game.draw(&mut self.canvas, None);
 +                    if self.profiling {
-+                        { let us = t.elapsed().as_micros() as u64; self.profile.game_us += us; self.profile.frame_us += us; }
++                        {
++                            let us = t.elapsed().as_micros() as u64;
++                            self.profile.game_us += us;
++                            self.profile.frame_us += us;
++                        }
 +                        self.profile.path = path;
 +                    }
 +                }
@@ -1374,10 +1477,7 @@ index 0000000..c67eefe
 +    }
 +
 +    fn take_image(&mut self, id: TexId) -> Option<Image> {
-+        self.textures
-+            .get_mut(id.raw())?
-+            .take()
-+            .map(|t: Tex| t.img)
++        self.textures.get_mut(id.raw())?.take().map(|t: Tex| t.img)
 +    }
 +
 +    fn put_image(&mut self, id: TexId, img: Image) {
@@ -1395,7 +1495,11 @@ index 0000000..c67eefe
 +            self.profile.draws += items.len() as u64;
 +            self.profile.reused += self.scratch.reused as u64;
 +            self.profile.gathered += self.scratch.direct as u64;
-+            { let us = t.elapsed().as_micros() as u64; self.profile.sprite_us += us; self.profile.frame_us += us; }
++            {
++                let us = t.elapsed().as_micros() as u64;
++                self.profile.sprite_us += us;
++                self.profile.frame_us += us;
++            }
 +        }
 +    }
 +
@@ -1520,6 +1624,10 @@ index 0000000..c67eefe
 +        self.game.power = t.clamp(0.0, 1.0);
 +    }
 +
++    pub fn set_game_base(&mut self, base: [f32; 2]) {
++        self.game.base = base;
++    }
++
 +    pub fn set_game_source_rect(&mut self, rect: [f32; 4]) {
 +        self.game.src = rect;
 +    }
@@ -1598,13 +1706,8 @@ index 0000000..c67eefe
 +        // The game's own rect when it goes straight out, since that is what
 +        // actually gets written; otherwise the canvas blit's.
 +        let rect = if self.direct_game {
-+            let (gx, gy, gw, gh) = screen_rect(self.game.power);
-+            (
-+                x + gx as i32,
-+                y + gy as i32,
-+                gw as i32,
-+                gh as i32,
-+            )
++            let (gx, gy, gw, gh) = screen_rect(self.game.power, self.game.base);
++            (x + gx as i32, y + gy as i32, gw as i32, gh as i32)
 +        } else {
 +            (x, y, w, h)
 +        };
@@ -1848,7 +1951,7 @@ index 0000000..c67eefe
 +
 +        // The picture is centred in the canvas, so walk it in picture
 +        // coordinates and offset into the canvas.
-+        let (ox, oy, _, _) = crate::power::screen_rect(1.0);
++        let (ox, oy, _, _) = crate::power::screen_rect(1.0, crate::power::PICTURE);
 +        let (ox, oy) = (ox as u32, oy as u32);
 +        let mut worst = 0i32;
 +        for py in (0..GAME_H).step_by(37) {
@@ -1913,7 +2016,7 @@ index 0000000..c67eefe
 +
 +        let (sw, sh) = (SRC_W as f32, SRC_H as f32);
 +        let (rw, rh) = (GAME_W as f32, GAME_H as f32);
-+        let (ox, oy, _, _) = crate::power::screen_rect(1.0);
++        let (ox, oy, _, _) = crate::power::screen_rect(1.0, crate::power::PICTURE);
 +        let (ox, oy) = (ox as u32, oy as u32);
 +        let mut worst = 0i32;
 +        for py in (0..GAME_H).step_by(29) {
@@ -1930,13 +2033,15 @@ index 0000000..c67eefe
 +                        / (BRIGHTEN_LCD + 1.0);
 +                    let src = g.frame.px[((sy * SRC_W + sx) * 4) as usize + c] as f32;
 +                    let want = (src * xk * yk).clamp(0.0, 255.0) as i32;
-+                    let got =
-+                        canvas.px[(((py + oy) * OUT_W + px + ox) * 4) as usize + c] as i32;
++                    let got = canvas.px[(((py + oy) * OUT_W + px + ox) * 4) as usize + c] as i32;
 +                    worst = worst.max((got - want).abs());
 +                }
 +            }
 +        }
-+        assert!(worst <= 2, "separable path differs from the mask by {worst}");
++        assert!(
++            worst <= 2,
++            "separable path differs from the mask by {worst}"
++        );
 +    }
 +
 +    /// The hot loop reads the source through a raw pointer on the strength of
@@ -1959,9 +2064,7 @@ index 0000000..c67eefe
 +    /// position, including a length that is not a multiple of eight so the
 +    /// scalar tail is covered.
 +    fn line() -> Vec<u16> {
-+        (0..723u32)
-+            .map(|i| ((i * 2731) % 65536) as u16)
-+            .collect()
++        (0..723u32).map(|i| ((i * 2731) % 65536) as u16).collect()
 +    }
 +
 +    #[test]
@@ -1983,7 +2086,10 @@ index 0000000..c67eefe
 +        let line = vec![u16::MAX; 16];
 +        let mut out = vec![0u8; 16];
 +        unsafe { scale_row(&mut out, &line, 65535) };
-+        assert!(out.iter().all(|&v| v == 255), "expected saturation, got {out:?}");
++        assert!(
++            out.iter().all(|&v| v == 255),
++            "expected saturation, got {out:?}"
++        );
 +    }
 +
 +    #[test]
@@ -2087,14 +2193,20 @@ index 0000000..c67eefe
 +
 +    #[test]
 +    fn direct_matches_the_canvas_path_upright() {
-+        diff(&via_direct(false, PW, PH, X, Y), &via_canvas(false, PW, PH, X, Y));
++        diff(
++            &via_direct(false, PW, PH, X, Y),
++            &via_canvas(false, PW, PH, X, Y),
++        );
 +    }
 +
 +    #[test]
 +    fn direct_matches_the_canvas_path_upside_down() {
 +        // The one that matters here: this panel is always rotated, and the
 +        // mirroring happens in the column table rather than in a second pass.
-+        diff(&via_direct(true, PW, PH, X, Y), &via_canvas(true, PW, PH, X, Y));
++        diff(
++            &via_direct(true, PW, PH, X, Y),
++            &via_canvas(true, PW, PH, X, Y),
++        );
 +    }
 +
 +    #[test]
@@ -2122,10 +2234,10 @@ index 0000000..c67eefe
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..c46720d
+index 0000000..eea09f3
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,668 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2652,11 +2764,7 @@ index 0000000..c46720d
 +                    let mut got = canvas(48, 36);
 +                    fill_reference(&mut want, x, y, w, h, colour);
 +                    super::fill_rect(&mut got, x, y, w, h, colour, &mut scratch);
-+                    assert_eq!(
-+                        got.px, want.px,
-+                        "rect {:?} colour {colour:?}",
-+                        (x, y, w, h)
-+                    );
++                    assert_eq!(got.px, want.px, "rect {:?} colour {colour:?}", (x, y, w, h));
 +                }
 +            }
 +        }
@@ -2679,7 +2787,16 @@ index 0000000..c46720d
 +            assert_eq!(got.px, want.px, "rect {i}");
 +
 +            reference(&mut want, &tex, 1.0, 1.0, 39.0, 21.0, [1.0, 1.0, 1.0, 1.0]);
-+            super::blit(&mut got, &tex, 1.0, 1.0, 39.0, 21.0, [1.0, 1.0, 1.0, 1.0], &mut scratch);
++            super::blit(
++                &mut got,
++                &tex,
++                1.0,
++                1.0,
++                39.0,
++                21.0,
++                [1.0, 1.0, 1.0, 1.0],
++                &mut scratch,
++            );
 +            assert_eq!(got.px, want.px, "blit after rect {i}");
 +        }
 +    }
@@ -2713,11 +2830,7 @@ index 0000000..c46720d
 +                let mut got = canvas(48, 36);
 +                reference(&mut want, &tex, x, y, w, h, colour);
 +                super::blit(&mut got, &tex, x, y, w, h, colour, &mut scratch);
-+                assert_eq!(
-+                    got.px, want.px,
-+                    "rect {:?} colour {colour:?}",
-+                    (x, y, w, h)
-+                );
++                assert_eq!(got.px, want.px, "rect {:?} colour {colour:?}", (x, y, w, h));
 +            }
 +        }
 +    }
@@ -2741,7 +2854,16 @@ index 0000000..c46720d
 +        ];
 +        for (tex, x, y, w, h) in draws {
 +            reference(&mut want, tex, x, y, w, h, [1.0, 1.0, 1.0, 1.0]);
-+            super::blit(&mut got, tex, x, y, w, h, [1.0, 1.0, 1.0, 1.0], &mut scratch);
++            super::blit(
++                &mut got,
++                tex,
++                x,
++                y,
++                w,
++                h,
++                [1.0, 1.0, 1.0, 1.0],
++                &mut scratch,
++            );
 +            assert_eq!(got.px, want.px, "after {}x{} at {x},{y}", tex.w, tex.h);
 +        }
 +    }
@@ -2825,7 +2947,7 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..28bcfb5 100644
+index cada2b8..f37d0ea 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
 @@ -20,8 +20,20 @@ struct Pacer {
@@ -2883,12 +3005,15 @@ index cada2b8..28bcfb5 100644
          let delay = self.period.saturating_sub(self.work + MARGIN);
          if let Some(left) = (last + delay).checked_duration_since(Instant::now()) {
              std::thread::sleep(left);
-@@ -50,11 +82,15 @@ impl Pacer {
+@@ -50,11 +82,18 @@ impl Pacer {
          let mut missed = false;
          if let Some(last) = self.last_return {
              let seen = now - last;
 +            let ms = seen.as_millis() as u64;
-+            let at = SEEN_EDGES.iter().position(|&e| ms < e).unwrap_or(SEEN_EDGES.len());
++            let at = SEEN_EDGES
++                .iter()
++                .position(|&e| ms < e)
++                .unwrap_or(SEEN_EDGES.len());
 +            self.seen[at] += 1;
              missed = seen > self.period.mul_f64(1.5);
              if blocked && seen > Duration::from_millis(12) && seen < Duration::from_millis(22) {
@@ -2899,7 +3024,7 @@ index cada2b8..28bcfb5 100644
          self.works[self.next] = work;
          self.next = (self.next + 1) % WORK_WINDOW;
          self.work = self.works.iter().copied().max().unwrap_or(work);
-@@ -128,7 +164,21 @@ pub fn run() {
+@@ -128,7 +167,21 @@ pub fn run() {
          .name("slot-bootlogo".into())
          .spawn(move || slot::bootlogo::refresh(&card));
      let mut drawn = false;
@@ -2922,7 +3047,7 @@ index cada2b8..28bcfb5 100644
      let mut pacer = Pacer::new();
      let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
      loop {
-@@ -152,6 +202,15 @@ pub fn run() {
+@@ -152,6 +205,15 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
@@ -2938,7 +3063,7 @@ index cada2b8..28bcfb5 100644
          let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
          if slot::latency::tracing() {
              frames += 1;
-@@ -159,10 +218,12 @@ pub fn run() {
+@@ -159,10 +221,12 @@ pub fn run() {
              early += u32::from(swap_took > pacer.period / 2);
              if frames == 600 {
                  eprintln!(

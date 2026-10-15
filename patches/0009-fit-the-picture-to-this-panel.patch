@@ -1,0 +1,246 @@
+size the picture for this panel: 3x actual, height-filling stretch
+
+Stretch mode stopped short of the screen edges. Upstream's canvas and its
+picture are both 720x480, so "stretch" fills the panel by construction; 0002
+made the canvas the 752x560 panel and deliberately left the picture at 720x480
+("keeping it separate is what lets the canvas be the panel while the game stays
+where it was"), and nothing taught stretch the difference -- it filled all but
+a 16px border down each side and 40px top and bottom, on the mode whose whole
+job is to fill the screen.
+
+GAME_W and GAME_H cannot simply be raised to the panel: SRC_W and SRC_H derive
+from them, so that would resize the 240x160 source texture. So the picture's
+size on the canvas is a size the frontend chooses, and screen_rect takes it.
+That half is in 0002, which owns power.rs, pipeline.rs and soft/mod.rs; this is
+the half that chooses.
+
+Sizes are multiples of the whole 240x160 texture rather than of the 160x144
+picture inside it, which is what makes this cheap: the paper around the picture
+scales with it, the lcd3x grid stays aligned to source pixels, the canvas clips
+the overhang -- paper first -- and `pic` keeps gating the grid exactly as
+before.
+
+That also means source_rect must stop cropping. Upstream cropped to the
+platform's picture when stretching and drew the crop across a canvas-sized
+destination; doing that *and* sizing the destination from the texture
+multiplies the two. It shipped that way for one build and a stretched Game Boy
+came out at 5.83x by 4.32x -- a 933x622 picture on a 752x560 panel, wildly
+zoomed. The source rect is now the whole texture always, and
+the_effective_scale_is_never_doubled_up checks the product of the two rather
+than either alone, which is the mistake that let it through: each was right on
+its own.
+
+On this 752x560 panel:
+
+  actual    3x, 480x432, 136px of paper a side. Pixel-exact, unchanged, and the
+            only size where a source pixel is one square block.
+  stretch   3.889x for GB/GBC, filling the height: 622x560, 65px of paper a
+            side, nothing cropped, aspect right.
+  GBA       unchanged in both modes. source_rect already returns WHOLE_TEXTURE
+            for it either way, so stretch is a no-op upstream, and the largest
+            aspect-correct fit here is 3.133x -- non-integer pixels for 4% more
+            picture, a bad trade nobody asked for.
+
+Two other sizes were built, looked at on the handheld, and rejected: the whole
+752x560, which is 21% wider than square pixels, and a whole 4x at 640x560,
+which is uniform and 2.9% bigger than the above but crops 2 source rows off the
+top and 2 off the bottom. The crop was the part that was disliked, which is the
+sort of thing only the panel can tell you -- the arithmetic preferred 4x.
+
+Upstream's own test for this, l_fills_the_panel_and_r_gives_back_the_centred
+_picture, could not catch the original bug: it is macOS-only, and its 120px bar
+is narrower than this panel's 136px actual-size margin, so it passes either way.
+The tests here pin the sizes that reach the panel instead.
+
+app.rs is shared with 0006, in a different place.
+
+--- a/crates/slot-gfx/src/fbo.rs
++++ b/crates/slot-gfx/src/fbo.rs
+@@ -224,6 +224,10 @@
+         self.game.set_power(t);
+     }
+ 
++    pub fn set_game_base(&mut self, base: [f32; 2]) {
++        self.game.set_base(base);
++    }
++
+     pub fn set_game_source_rect(&mut self, rect: [f32; 4]) {
+         self.game.set_source_rect(rect);
+     }
+--- a/crates/slot/src/video_mode.rs
++++ b/crates/slot/src/video_mode.rs
+@@ -1,6 +1,8 @@
+ use std::path::Path;
+ 
+-use slot_gfx::{SRC_H, SRC_W, WHOLE_TEXTURE};
++use std::sync::OnceLock;
++
++use slot_gfx::{OUT_H, OUT_W, PICTURE, SRC_H, SRC_W, WHOLE_TEXTURE};
+ use slot_store::{ini, Platform};
+ 
+ pub const VIDEO_MODE_FILE: &str = "Config/video_mode.txt";
+@@ -40,17 +42,130 @@
+     ini::write(root, VIDEO_MODE_FILE, stem, mode.as_str())
+ }
+ 
+-pub fn source_rect(platform: Platform, mode: VideoMode) -> [f32; 4] {
++/// Which part of the texture is sampled: all of it, always.
++///
++/// Upstream cropped to the platform's own picture when stretching, and drew
++/// that crop across a destination the same size as its canvas -- that is how
++/// stretch filled its screen. Here the destination carries the mode instead
++/// (`base_size`), which is what lets a stretched picture fill the panel's
++/// height without distorting, and keeps the paper and the lcd3x grid intact.
++///
++/// Doing both at once is a bug I shipped for one build: the crop and a
++/// texture-sized destination multiply, and a stretched Game Boy came out at
++/// 5.83x by 4.32x -- a 933x622 picture on a 752x560 panel, wildly zoomed and
++/// cropped. `the_effective_scale_is_never_doubled_up` is the guard.
++///
++/// Kept as a function rather than deleted so the compositor call in
++/// `frontend.rs` stays upstream's shape, and so this explanation has somewhere
++/// to live.
++pub fn source_rect(_platform: Platform, _mode: VideoMode) -> [f32; 4] {
++    WHOLE_TEXTURE
++}
++
++/// How big the picture is drawn, in canvas units, for the compositor to centre.
++///
++/// Expressed as a multiple of the whole 240x160 texture, not of the 160x144
++/// picture inside it, which matters: the paper around the picture then scales
++/// with it, the lcd3x grid stays aligned to source pixels, and the canvas
++/// clips the overhang -- paper first, picture only once the panel runs out.
++///
++/// Three cases on this 752x560 panel:
++///
++///   - **Actual**, and anything whose picture already fills the texture, is
++///     the pixel-exact `PICTURE`: 3x, a 480x432 Game Boy with 136px of paper
++///     down each side. Upstream's behaviour, and the right default -- it is the
++///     only size where one source pixel is one square block of four.
++///   - **Stretched**, a GB or GBC picture scales until it fills the panel's
++///     height: 3.889x, so 622x560 with 65px of paper a side. Nothing is
++///     cropped and the aspect is right.
++///   - **GBA is never stretched.** `source_rect` returns `WHOLE_TEXTURE` for it
++///     in both modes, so stretch is already a no-op upstream, and the largest
++///     aspect-correct fit here would be 3.133x -- non-integer pixels for 4%
++///     more picture, which is a bad trade nobody asked for.
++///
++/// Two sizes that were tried on the device and rejected, so they do not come
++/// back: filling the whole 752x560 (21% wider than square pixels, which is
++/// what "stretch" meant for a day) and a whole 4x at 640x560, which is uniform
++/// and 2.9% bigger than the above but crops 2 source rows off the top and 2
++/// off the bottom. The crop was the part nobody liked.
++pub fn base_size(platform: Platform, mode: VideoMode) -> [f32; 2] {
+     let (w, h) = platform.picture();
+-    if mode == VideoMode::Actual || (w, h) == (SRC_W, SRC_H) {
+-        return WHOLE_TEXTURE;
++    if (w, h) == (SRC_W, SRC_H) {
++        return PICTURE;
++    }
++    match mode {
++        VideoMode::Actual => PICTURE,
++        VideoMode::Stretch => {
++            let k = OUT_H as f32 / h as f32;
++            [SRC_W as f32 * k, SRC_H as f32 * k]
++        }
++    }
++}
++
++#[cfg(test)]
++mod fit_tests {
++    use super::*;
++
++    /// What reaches the panel is the picture inside the texture, so that is
++    /// what these check rather than the base size itself.
++    fn on_panel(platform: Platform, mode: VideoMode) -> (f32, f32) {
++        let [bw, bh] = base_size(platform, mode);
++        let (w, h) = platform.picture();
++        (bw * w as f32 / SRC_W as f32, bh * h as f32 / SRC_H as f32)
++    }
++
++    #[test]
++    fn actual_size_is_a_pixel_exact_three_times() {
++        for p in [Platform::Gb, Platform::Gbc] {
++            assert_eq!(on_panel(p, VideoMode::Actual), (480.0, 432.0));
++        }
++        assert_eq!(on_panel(Platform::Gba, VideoMode::Actual), (720.0, 480.0));
++    }
++
++    #[test]
++    fn stretching_a_game_boy_fills_the_height_without_distorting_or_cropping() {
++        for p in [Platform::Gb, Platform::Gbc] {
++            let (w, h) = on_panel(p, VideoMode::Stretch);
++            assert!((h - OUT_H as f32).abs() < 0.5, "{p:?} is {h} tall");
++            assert!((w - 622.0).abs() < 1.0, "{p:?} is {w} wide");
++            assert!(
++                (w / h - 160.0 / 144.0).abs() < 0.001,
++                "{p:?} came out at aspect {}",
++                w / h
++            );
++        }
++    }
++
++    #[test]
++    fn a_gba_picture_is_the_same_in_both_modes() {
++        assert_eq!(
++            base_size(Platform::Gba, VideoMode::Stretch),
++            base_size(Platform::Gba, VideoMode::Actual)
++        );
++    }
++
++    /// The renderer spreads `source_rect`'s texels across `base_size`'s
++    /// rectangle, so the two multiply. Checking them apart is what let a
++    /// stretched Game Boy ship at 5.83x by 4.32x: `base_size` was right, the
++    /// source was still cropped to the picture, and each looked fine alone.
++    #[test]
++    fn the_effective_scale_is_never_doubled_up() {
++        for p in [Platform::Gb, Platform::Gbc, Platform::Gba] {
++            for mode in [VideoMode::Actual, VideoMode::Stretch] {
++                let [bw, bh] = base_size(p, mode);
++                let src = source_rect(p, mode);
++                let (sx, sy) = (bw / (src[2] * SRC_W as f32), bh / (src[3] * SRC_H as f32));
++                assert!(
++                    (sx - sy).abs() < 0.001,
++                    "{p:?}/{mode:?} scales {sx}x by {sy}y -- not square"
++                );
++                let (w, h) = p.picture();
++                let (on_w, on_h) = (w as f32 * sx, h as f32 * sy);
++                assert!(
++                    on_w <= OUT_W as f32 + 0.5 && on_h <= OUT_H as f32 + 0.5,
++                    "{p:?}/{mode:?} draws {on_w}x{on_h} on a {OUT_W}x{OUT_H} panel"
++                );
++            }
++        }
+     }
+-    let x = SRC_W.saturating_sub(w) / 2;
+-    let y = SRC_H.saturating_sub(h) / 2;
+-    [
+-        x as f32 / SRC_W as f32,
+-        y as f32 / SRC_H as f32,
+-        w as f32 / SRC_W as f32,
+-        h as f32 / SRC_H as f32,
+-    ]
+ }
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -851,6 +851,10 @@
+         video_mode::source_rect(self.platform, self.video_mode)
+     }
+ 
++    pub fn game_base(&self) -> [f32; 2] {
++        video_mode::base_size(self.platform, self.video_mode)
++    }
++
+     fn slot_owns_the_shoulders(&self) -> bool {
+         matches!(self.phase, Phase::Playing { .. }) && self.platform != Platform::Gba
+     }
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -340,6 +340,7 @@
+         compositor.set_frame_lift(self.session.app().frame_lift());
+         compositor.set_frame_split(self.session.app().frame_split());
+         compositor.set_game_source_rect(self.session.app().source_rect());
++        compositor.set_game_base(self.session.app().game_base());
+         compositor.begin_frame();
+         if self.draw_rebuild(compositor) {
+             return;

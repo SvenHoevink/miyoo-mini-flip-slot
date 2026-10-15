@@ -458,6 +458,77 @@ the handheld down in the first place. More cycles showed there were no further
 events at all, and the state file turned up by searching sysfs for the chip name
 from the probe.
 
+## Picture geometry: the canvas is the panel, the picture is not
+
+`OUT_W` x `OUT_H` is the canvas, 752x560, which `patches/0002` set to this
+panel. `GAME_W` x `GAME_H` is the *picture*, 720x480, and it stayed at
+upstream's size on purpose -- `SRC_W` and `SRC_H` derive from it
+(`GAME_W / SCALE`), so raising it would resize the 240x160 source texture. The
+two being different is what this device introduced; upstream's are equal, which
+is why its "stretch" filled the screen by construction and ours did not.
+
+Measured sizes on this panel, for a 160x144 Game Boy picture (2026-10-15):
+
+| mode | picture | paper each side | pixels |
+|---|---|---|---|
+| actual (R1) | 480x432 | 136px | uniform 3x3, pixel-exact |
+| stretch (L1) | **622x560** | 65px | 3.889x, fills the height |
+| *rejected* | 752x560 | 0 | 21% wider than square |
+| *rejected* | 640x560 | 56px | uniform 4x4, **crops 2 source rows top and bottom** |
+
+**4x was built, looked at, and disliked for the crop** -- which the arithmetic
+had preferred: at 640x560 it is 2.9% *bigger* than the aspect-correct 622x560
+and perfectly uniform, where 3.889x lands 16 of 144 rows 3 pixels tall against
+128 at 4 (a thin row every ninth, and the same every ninth column). Only the
+panel could decide that; do not re-derive it from the numbers.
+
+GBA is pixel-exact 3x in both modes. `source_rect` returns the whole texture
+for it either way, so stretch is already a no-op upstream, and the largest
+aspect-correct fit here is 3.133x -- non-integer pixels for 4% more picture.
+
+Sizes are multiples of the **whole 240x160 texture**, not of the picture inside
+it. That is what keeps it cheap: the paper scales with the picture, `pic` keeps
+gating the lcd3x grid at the same texel boundaries, and the canvas clips the
+overhang -- paper first, picture only once the panel runs out.
+
+### The source rect and the destination multiply
+
+The renderer spreads `source_rect`'s texels across `screen_rect`'s rectangle,
+so the two are a product. Upstream cropped the source to the platform picture
+when stretching and drew that crop across a canvas-sized destination. Sizing
+the destination from the texture *as well* multiplies them: a stretched Game
+Boy shipped for one build at **5.83x by 4.32x**, a 933x622 picture on a 752x560
+panel, wildly zoomed and cropped.
+
+Each half was correct alone, which is exactly why a test of each half passed.
+`the_effective_scale_is_never_doubled_up` checks the product instead -- that it
+is square and fits the panel -- and was confirmed to fail on the broken version
+before being trusted. **When two numbers are multiplied downstream, test the
+product.**
+
+## Working on the patch series without breaking it
+
+Two traps, both paid for on 2026-10-15.
+
+**One patch owns a file.** `task patch` decides a patch is already applied by
+reverse-checking it, so a *later* patch that rewrites lines an earlier one
+introduced makes the earlier one unreplayable. The symptom is misdirecting: the
+failure is reported against whichever file `git apply` reaches first, which was
+`device_app.rs does not apply` for a change that touched neither
+`device_app.rs` nor anything near it. Keep edits to a file in the patch that
+owns it -- `grep -l "+++ b/<path>" patches/*.patch` says which -- and split a
+change along file ownership if it has to. 0009 is split from 0002 for exactly
+this reason, and each header points at the other.
+
+**Do not run `cargo fmt` on a whole package.** `cargo fmt -p slot` reformats
+every file in the package, including ones the port patches, and neither 0003
+nor 0005 is rustfmt-clean -- the *pinned* 1.96 rustfmt reformats them too, so
+this is not a host-toolchain mismatch. It silently made both stale. Format the
+files you edited, or regenerate the patches you disturbed; `for p in
+patches/*.patch; do git -C upstream/slot apply --reverse --check "$PWD/$p"; done`
+tells you which are stale, one line each, which is far clearer than what
+`task patch` reports.
+
 ## Panel orientation
 
 **The LCD is fitted upside down.** A frame written top-down to `/dev/fb0`
