@@ -407,9 +407,9 @@ tasks:
 
   device:find:
     desc: >-
-      Find the handheld on the local /24 by its FTP port. Its address is DHCP
-      and does move -- a whole round of "the device is off the network" was
-      really the device sitting on a different address
+      Find the handheld on the local /24. Its address is DHCP and does move,
+      and it answers slowly when it is busy -- both of which have been reported
+      as "the device is off the network" when it was not
     cmds:
       - |
         set -eu
@@ -420,63 +420,83 @@ tasks:
         # mistook docker0's 10.200.0.0/24 for the link and concluded the
         # handheld was behind a router), and picking the wrong one makes every
         # probe time out instead of refusing, which looks conclusive.
-        #
-        # Nothing answering does not mean the handheld is off. FTP comes from
-        # net-up.sh, which .tmp_update/updater backgrounds at boot when
-        # .slot-net is on the card -- so it is coming, but the radio needs
-        # about a minute from cold and drops a handshake or two first. Sweep
-        # again before concluding anything.
         want="{{.DEVICE}}"
         if [ -z "$want" ]; then
           echo "set SLOT_DEVICE to any address on the handheld's subnet, e.g. SLOT_DEVICE=192.168.1.1" >&2
           exit 1
         fi
         base=${want%.*}
-        # A sweep of 254 hosts in parallel takes about a second, which is the
-        # trap: it is a snapshot dressed up as a search. The handheld needs
-        # ~85 s from cold to get through the DHCP and the two dropped
-        # handshakes its radio does before COMPLETED, and a sweep run inside
-        # that window finds nothing and looks conclusive. It did exactly that
-        # once, and the empty result was then reported as "the device is not on
-        # the network" while it was seconds from associating.
-        #
-        # So sweep repeatedly for SLOT_WAIT_S (default 150, past the 85) and
-        # stop at the first answer.
         limit={{.WAIT_S}}
         [ "$limit" -lt 150 ] && limit=150
-        echo "looking for the handheld on $base.0/24, for up to ${limit}s..." >&2
+
+        # Patiently, and on both of its ports. This is the case a sweep gets
+        # wrong: a busy handheld takes many seconds to accept, and 254 parallel
+        # probes cannot each wait that long, so the sweep below has to be
+        # quick. Asking the address it already had costs one connection, so it
+        # can afford to wait -- and it is the answer almost every time, since
+        # DHCP usually hands back the same lease.
+        #
+        # Both ports because they do not come up together: net-up.sh starts
+        # telnetd first and tcpsvd for FTP after, and a handheld answering
+        # telnet while FTP was still refusing was read as absent for four
+        # minutes.
+        patient() {
+          for port in 21 23; do
+            if timeout "${SLOT_PROBE_S:-20}" bash -c "exec 3<>/dev/tcp/$1/$port" 2>/dev/null; then
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        echo "looking for the handheld, starting with $want, for up to ${limit}s..." >&2
         waited=0
         while :; do
-          # A TCP connect per host, in parallel, with a short timeout. nc is
-          # the right tool but is not always installed, hence the bash
-          # redirect. The whole group is redirected, not `wait`: the children
-          # inherit the group's stdout and `wait` has none of their output.
+          if patient "$want"; then
+            echo "$want"
+            exit 0
+          fi
+          # Not where it was, so it moved: sweep wide and fast for a candidate,
+          # then confirm it patiently. One second per host is too short to
+          # trust on its own -- it is a filter for "something is there", not an
+          # answer -- which is why nothing is reported straight from here.
+          #
+          # The whole group is redirected, not `wait`: the children inherit the
+          # group's stdout and `wait` has none of their output.
           {
             for i in $(seq 1 254); do
               (
-                if timeout 1 bash -c "exec 3<>/dev/tcp/$base.$i/21" 2>/dev/null; then
-                  echo "$base.$i"
-                fi
+                for port in 21 23; do
+                  if timeout 2 bash -c "exec 3<>/dev/tcp/$base.$i/$port" 2>/dev/null; then
+                    echo "$base.$i"
+                    break
+                  fi
+                done
               ) &
             done
             wait
           } > /tmp/slot-sweep.$$ 2>/dev/null
-          if [ -s /tmp/slot-sweep.$$ ]; then
-            cat /tmp/slot-sweep.$$
-            rm -f /tmp/slot-sweep.$$
-            break
-          fi
+          for cand in $(sort -u /tmp/slot-sweep.$$); do
+            [ "$cand" = "$want" ] && continue
+            if patient "$cand"; then
+              rm -f /tmp/slot-sweep.$$
+              echo "$cand"
+              echo "(it moved from $want -- export SLOT_DEVICE=$cand)" >&2
+              exit 0
+            fi
+          done
           rm -f /tmp/slot-sweep.$$
           if [ "$waited" -ge "$limit" ]; then
-            echo "nothing answered FTP in ${waited}s." >&2
-            echo "the handheld brings FTP up itself at boot (.tmp_update/updater, .slot-net)," >&2
-            echo "so if it is on and still absent, check the radio: slot-net.txt on the card." >&2
+            echo "nothing answered FTP or telnet in ${waited}s." >&2
+            echo "the handheld brings both up itself at boot (.tmp_update/updater, .slot-net)," >&2
+            echo "and the radio needs about 85s from cold, dropping a handshake or two first." >&2
+            echo "if it is on and still absent, read slot-net.txt on the card." >&2
             exit 1
           fi
           sleep 5
-          waited=$((waited + 6))
+          waited=$((waited + 10))
         done
-      - 'echo "the address above answers FTP; the handheld also writes its own into slot-net.txt on the card" >&2'
+      - 'echo "the address above answers; the handheld also writes its own into slot-net.txt on the card" >&2'
 
   device:check:
     desc: >-

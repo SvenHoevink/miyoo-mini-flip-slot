@@ -278,15 +278,29 @@ the frontend says rather than what it does.
   device. slot's link is mGBA-only, so GB/GBC is the realistic target and GBA
   would interpret at ~22 ms a frame. See [docs/link.md](docs/link.md).
 
-- **No Game Boy frame.** Upstream draws a grey Game Boy body around the screen,
-  and gives the shelf extra slack inside it. It has never appeared here and was
-  not removed: `bezel::framed` wants an exactly 4:3 panel, and 752x560 misses it
-  by sixteen pixels (2256 against 2240), so `upload_bezel` returns before
-  loading anything. Upstream ships one asset for it, `bezels/640x480.png`, which
-  is the Anbernic's panel. The software backend would also need to learn to draw
-  it — `set_bezel` stores the image and nothing reads it, which `patches/0002`
-  records among its deliberate no-ops. A full-canvas bezel is 421,120 pixels, so
-  it wants compositing once into the surround rather than per frame.
+- **The Game Boy body shows under a GBA game only.** Upstream draws a shell
+  around the picture; three things stopped it appearing here, and none of them
+  was that it had been removed. `bezel::framed` wanted an exactly 4:3 panel and
+  752x560 is 0.71% off; `bezel::pick` wanted an asset whose aspect matched the
+  panel's exactly and refused the only one upstream ships for the same 0.71%;
+  and `patches/0002` had made the canvas the panel exactly, so there was no
+  strip of panel left to draw a shell on. The tolerances are `patches/0012`,
+  the painting is in 0002, and where it shows falls out of what was already
+  there: `output_frame` paints the surround and copies the picture over it, so
+  the shell appears exactly where the picture does not reach -- the margin in
+  game, nothing on the shelf, nothing under a stretched picture.
+
+  It is gated to GBA because the asset is a Game Boy Advance SP shell and says
+  so in large letters, which is wrong under a Game Boy game. A DMG shell would
+  fix that and no such asset exists; `bezels/640x480.png` is the only one
+  upstream ships. Drop one in `System/bezels/` and the pick already tolerates
+  its aspect.
+
+- **GB palettes are off by default.** `gb_palettes=0` in `Config/slot.state`.
+  Turn them on in the quick menu under Screen, then L2 and R2 cycle 48 of them,
+  `GBC Red` included. mGBA does the recolouring -- slot passes the palette as a
+  core option, so the software renderer is not involved -- and it applies to
+  monochrome Game Boy carts, not to GBC titles that carry their own colour.
 
 ## Layout
 
