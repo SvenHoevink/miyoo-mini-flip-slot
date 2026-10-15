@@ -698,10 +698,10 @@ index 0000000..d13f87c
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..bbb72df
+index 0000000..4455b85
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1712 @@
+@@ -0,0 +1,1730 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -1412,6 +1412,10 @@ index 0000000..bbb72df
 +    lift: f32,
 +    screen: f32,
 +    bezel: Option<Image>,
++    /// Whether the bezel belongs under what is playing. The art is a Game Boy
++    /// Advance SP shell and says so in large letters, which is wrong under a
++    /// Game Boy game; `App::bezel_suits_platform` decides and says so here.
++    bezel_shown: bool,
 +    turn: Option<((u32, u32), bool)>,
 +}
 +
@@ -1439,6 +1443,7 @@ index 0000000..bbb72df
 +            lift: 1.0,
 +            screen: 0.0,
 +            bezel: None,
++            bezel_shown: false,
 +            turn: None,
 +        };
 +        me.white = me.create_texture(1, 1, &[255, 255, 255, 255]);
@@ -1802,6 +1807,18 @@ index 0000000..bbb72df
 +        self.pending_clear = true;
 +    }
 +
++    pub fn set_bezel_shown(&mut self, shown: bool) {
++        if self.bezel_shown == shown {
++            return;
++        }
++        self.bezel_shown = shown;
++        // The surround is painted only when the output rect moves, so without
++        // this the answer that was on the panel stays there -- the shell would
++        // survive into the next Game Boy game until something else happened to
++        // move the picture.
++        self.clear_left = PAGES;
++    }
++
 +    pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
 +        // Stored top-down, unlike the GL path which pre-flips for its FBO.
 +        // Unused until a 4:3 panel is supported; see the module note.
@@ -1874,6 +1891,7 @@ index 0000000..bbb72df
 +            let bezel = self
 +                .bezel
 +                .as_ref()
++                .filter(|_| self.bezel_shown)
 +                .filter(|b| b.w == target.w && b.h == target.h);
 +            let bw = bezel.map_or(0, |b| b.w as usize * 4);
 +            for py in 0..ph {

@@ -56,13 +56,17 @@ app.rs is shared with 0006, in a different place.
 
 --- a/crates/slot-gfx/src/fbo.rs
 +++ b/crates/slot-gfx/src/fbo.rs
-@@ -224,6 +224,10 @@
+@@ -224,6 +224,14 @@
          self.game.set_power(t);
      }
  
 +    pub fn set_game_base(&mut self, base: [f32; 2]) {
 +        self.game.set_base(base);
 +    }
++
++    /// Accepted and ignored: the GL compositor draws no bezel, as the note in
++    /// the software backend records for the rest of the framed path.
++    pub fn set_bezel_shown(&mut self, _shown: bool) {}
 +
      pub fn set_game_source_rect(&mut self, rect: [f32; 4]) {
          self.game.set_source_rect(rect);
@@ -228,10 +232,20 @@ app.rs is shared with 0006, in a different place.
  }
 --- a/crates/slot/src/app.rs
 +++ b/crates/slot/src/app.rs
-@@ -851,6 +851,10 @@
+@@ -851,6 +851,20 @@
          video_mode::source_rect(self.platform, self.video_mode)
      }
  
++    /// Whether the bezel belongs under what is on screen.
++    ///
++    /// The only one anybody ships is a Game Boy Advance SP shell, and its
++    /// lettering says so, which is wrong under a Game Boy game. Upstream never
++    /// had to ask: its bezel covers a 4:3 panel whatever is playing, where
++    /// here it is the margin around the picture and the margin is in view.
++    pub fn bezel_suits_platform(&self) -> bool {
++        self.platform == Platform::Gba
++    }
++
 +    pub fn game_base(&self) -> [f32; 2] {
 +        video_mode::base_size(self.platform, self.video_mode)
 +    }
@@ -241,11 +255,12 @@ app.rs is shared with 0006, in a different place.
      }
 --- a/crates/slot/src/frontend.rs
 +++ b/crates/slot/src/frontend.rs
-@@ -340,6 +340,7 @@
+@@ -340,6 +340,8 @@
          compositor.set_frame_lift(self.session.app().frame_lift());
          compositor.set_frame_split(self.session.app().frame_split());
          compositor.set_game_source_rect(self.session.app().source_rect());
 +        compositor.set_game_base(self.session.app().game_base());
++        compositor.set_bezel_shown(self.session.app().bezel_suits_platform());
          compositor.begin_frame();
          if self.draw_rebuild(compositor) {
              return;
