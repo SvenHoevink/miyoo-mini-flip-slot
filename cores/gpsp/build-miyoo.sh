@@ -29,11 +29,28 @@ usage() {
 }
 
 patches="upstream/slot/cores/gpsp"
-# -DROM_BUFFER_SIZE caps a loop that otherwise mallocs 1 MB at a time until it
-# fails -- "try to allocate up to 32 blocks of 1MB each" in init_gamepak_buffer,
-# regardless of how big the ROM is. 16 covers every GBA cart here without
-# swapping; a larger ROM swaps from the card, which gpSP is built to do and
-# which beats being killed.
+# -DROM_BUFFER_SIZE is gpSP's own default, written out because the number was
+# argued about. init_gamepak_buffer mallocs 1 MB at a time "up to 32 blocks"
+# whatever the ROM's size, and the blocks it never fills are address space
+# rather than memory -- so an 8 or 16 MB cart pays nothing for the ceiling.
+# Only a 32 MB one does, and that is the one the ceiling is for: Mother 3 at
+# 16 held half its ROM and swapped the rest off the card block by block, which
+# was felt as a long run-up to gameplay.
+#
+# 24 rather than gpSP's own 32, measured with Mother 3 running on the handheld:
+#
+#     cap 16   RSS 62.3 MB   24.6 MB free   swaps, felt as a long run-up
+#     cap 32   RSS 74.6 MB   10.6 MB free   no swapping
+#     cap 32 + rewind on     7.7 MB free and still filling -- the edge
+#
+# A 32 MB cart wants 32 MB of buffer, rewind wants another 6.5, and slot and
+# the system want the rest of about 80 MB. Both do not fit, and 7.7 MB falling
+# is the regime that was killing carts before any of this was understood. 24
+# holds three quarters of the ROM, which keeps most of the swapping away, and
+# leaves ~15 MB for rewind and for the JIT to grow into.
+#
+# Smaller carts pay nothing either way: the blocks past a ROM's size are
+# allocated and never filled, so they are address space rather than memory.
 #
 # -DSMALL_TRANSLATION_CACHE was here for a day and is deliberately not. gpSP
 # mmaps ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE at core start
@@ -47,7 +64,7 @@ patches="upstream/slot/cores/gpsp"
 # nine cart faces rather than eighteen (patches/0016) and a crash that no
 # longer leaves Allium resident alongside slot (card/.tmp_update/updater),
 # together worth far more than the 8 MB this was saving.
-device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DROM_BUFFER_SIZE=16"
+device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DROM_BUFFER_SIZE=24"
 
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
 
