@@ -54,36 +54,124 @@ The tests here pin the sizes that reach the panel instead.
 
 app.rs is shared with 0006, in a different place.
 
+diff --git a/crates/slot-gfx/src/fbo.rs b/crates/slot-gfx/src/fbo.rs
+index 7c9e5d0..b4c49ec 100644
 --- a/crates/slot-gfx/src/fbo.rs
 +++ b/crates/slot-gfx/src/fbo.rs
-@@ -224,6 +224,14 @@
-         self.game.set_power(t);
+@@ -275,6 +275,10 @@ impl Compositor {
+         self.game.set_fills_frame(on);
      }
  
 +    pub fn set_game_base(&mut self, base: [f32; 2]) {
 +        self.game.set_base(base);
 +    }
 +
-+    /// Accepted and ignored: the GL compositor draws no bezel, as the note in
-+    /// the software backend records for the rest of the framed path.
-+    pub fn set_bezel_shown(&mut self, _shown: bool) {}
-+
      pub fn set_game_source_rect(&mut self, rect: [f32; 4]) {
          self.game.set_source_rect(rect);
      }
+diff --git a/crates/slot-gfx/src/pipeline.rs b/crates/slot-gfx/src/pipeline.rs
+index 0066c43..a76d785 100644
+--- a/crates/slot-gfx/src/pipeline.rs
++++ b/crates/slot-gfx/src/pipeline.rs
+@@ -1,7 +1,7 @@
+ #[cfg(not(feature = "software"))]
+ use crate::lcd3x::ScreenEffect;
+ #[cfg(not(feature = "software"))]
+-use crate::power::{screen_brightness, screen_rect_above};
++use crate::power::{screen_brightness, screen_rect};
+ #[cfg(not(feature = "software"))]
+ use crate::quad::Quad;
+ #[cfg(not(feature = "software"))]
+@@ -125,11 +125,23 @@ impl GamePass {
+         self.placed()
+     }
+ 
++    /// Where the picture lands on the canvas.
++    ///
++    /// Upstream's picture is the canvas, so it centres a canvas-sized rect in
++    /// the space above the footer. Here the picture has its own size -- see
++    /// `power::screen_rect` and `video_mode::base_size` -- and only the raising
++    /// above the footer is shared. The software backend's `Game::rect` is the
++    /// same arithmetic, and the two are checked against each other by
++    /// `the_two_backends_place_the_picture_alike`.
+     fn placed(&self) -> (f32, f32, f32, f32) {
+         let foot = self.bottom;
+         match self.fills {
+             true => (0.0, 0.0, OUT_W as f32, OUT_H as f32 - foot),
+-            false => screen_rect_above(self.power, foot),
++            false => {
++                let (x, _, w, h) = screen_rect(self.power, self.base);
++                let view = OUT_H as f32 - foot;
++                (x, (view - h) / 2.0, w, h)
++            }
+         }
+     }
+ 
+@@ -215,10 +227,11 @@ impl GamePass {
+         } else {
+             screen_brightness(self.power)
+         };
+-        // The footer covers the bottom of a full-frame picture. Keep the part that sat above
+-        // it, so opening the scale does not squash the picture into the shorter rect.
++        // The footer covers the bottom of a picture that fills the frame; keep
++        // the part that sat above it. A picture smaller than the canvas has
++        // nothing under the footer to lose and keeps all of itself.
+         let mut src = src;
+-        if self.bottom > 0.0 {
++        if self.bottom > 0.0 && self.fills {
+             src[3] *= (OUT_H as f32 - self.bottom) / OUT_H as f32;
+         }
+         unsafe {
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 75ea7f8..e3d8f1c 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -1399,6 +1399,20 @@ impl App {
+         video_mode::source_rect(self.platform, self.video_mode)
+     }
+ 
++    /// Whether the bezel belongs under what is on screen.
++    ///
++    /// The only one anybody ships is a Game Boy Advance SP shell, and its
++    /// lettering says so, which is wrong under a Game Boy game. Upstream never
++    /// had to ask: its bezel covers a 4:3 panel whatever is playing, where
++    /// here it is the margin around the picture and the margin is in view.
++    pub fn bezel_suits_platform(&self) -> bool {
++        self.platform == Platform::Gba
++    }
++
++    pub fn game_base(&self) -> [f32; 2] {
++        video_mode::base_size(self.platform, self.video_mode)
++    }
++
+     fn slot_owns_the_shoulders(&self) -> bool {
+         matches!(self.phase, Phase::Playing { .. }) && self.platform != Platform::Gba
+     }
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 5d8f78c..926a1d7 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -511,6 +511,7 @@ impl Frontend {
+         compositor.set_screen_footer(self.session.app().screen_footer());
+         compositor.set_overlay_slide(self.session.app().overlay_slide());
+         compositor.set_game_source_rect(self.session.app().source_rect());
++        compositor.set_game_base(self.session.app().game_base());
+         self.grab_link_shot(compositor);
+         compositor.begin_frame(self.session.app().layout());
+         if self.draw_rebuild(compositor) {
+diff --git a/crates/slot/src/video_mode.rs b/crates/slot/src/video_mode.rs
+index da522e0..fcea3f2 100644
 --- a/crates/slot/src/video_mode.rs
 +++ b/crates/slot/src/video_mode.rs
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,6 @@
  use std::path::Path;
  
 -use slot_gfx::{SRC_H, SRC_W, WHOLE_TEXTURE};
-+use std::sync::OnceLock;
-+
-+use slot_gfx::{OUT_H, OUT_W, PICTURE, SRC_H, SRC_W, WHOLE_TEXTURE};
++use slot_gfx::{OUT_H, PICTURE, SRC_H, SRC_W, WHOLE_TEXTURE};
  use slot_store::{ini, Platform};
  
  pub const VIDEO_MODE_FILE: &str = "Config/video_mode.txt";
-@@ -40,17 +42,135 @@
+@@ -40,11 +40,138 @@ pub fn write_video_mode(root: &Path, stem: &str, mode: VideoMode) -> std::io::Re
      ini::write(root, VIDEO_MODE_FILE, stem, mode.as_str())
  }
  
@@ -180,7 +268,10 @@ app.rs is shared with 0006, in a different place.
 +            // claim is that the picture fills the height and keeps its shape.
 +            let want_w = 160.0 * OUT_H as f32 / 144.0;
 +            assert!((h - OUT_H as f32).abs() < 0.5, "{p:?} is {h} tall");
-+            assert!((w - want_w).abs() < 1.0, "{p:?} is {w} wide, wanted {want_w}");
++            assert!(
++                (w - want_w).abs() < 1.0,
++                "{p:?} is {w} wide, wanted {want_w}"
++            );
 +            assert!(
 +                (w / h - 160.0 / 144.0).abs() < 0.001,
 +                "{p:?} came out at aspect {}",
@@ -222,45 +313,5 @@ app.rs is shared with 0006, in a different place.
 +        }
      }
 -    let x = SRC_W.saturating_sub(w) / 2;
--    let y = SRC_H.saturating_sub(h) / 2;
--    [
--        x as f32 / SRC_W as f32,
--        y as f32 / SRC_H as f32,
--        w as f32 / SRC_W as f32,
--        h as f32 / SRC_H as f32,
--    ]
+-    [x as f32 / SRC_W as f32, 0.0, w as f32 / SRC_W as f32, 1.0]
  }
---- a/crates/slot/src/app.rs
-+++ b/crates/slot/src/app.rs
-@@ -851,6 +851,20 @@
-         video_mode::source_rect(self.platform, self.video_mode)
-     }
- 
-+    /// Whether the bezel belongs under what is on screen.
-+    ///
-+    /// The only one anybody ships is a Game Boy Advance SP shell, and its
-+    /// lettering says so, which is wrong under a Game Boy game. Upstream never
-+    /// had to ask: its bezel covers a 4:3 panel whatever is playing, where
-+    /// here it is the margin around the picture and the margin is in view.
-+    pub fn bezel_suits_platform(&self) -> bool {
-+        self.platform == Platform::Gba
-+    }
-+
-+    pub fn game_base(&self) -> [f32; 2] {
-+        video_mode::base_size(self.platform, self.video_mode)
-+    }
-+
-     fn slot_owns_the_shoulders(&self) -> bool {
-         matches!(self.phase, Phase::Playing { .. }) && self.platform != Platform::Gba
-     }
---- a/crates/slot/src/frontend.rs
-+++ b/crates/slot/src/frontend.rs
-@@ -340,6 +340,8 @@
-         compositor.set_frame_lift(self.session.app().frame_lift());
-         compositor.set_frame_split(self.session.app().frame_split());
-         compositor.set_game_source_rect(self.session.app().source_rect());
-+        compositor.set_game_base(self.session.app().game_base());
-+        compositor.set_bezel_shown(self.session.app().bezel_suits_platform());
-         compositor.begin_frame();
-         if self.draw_rebuild(compositor) {
-             return;

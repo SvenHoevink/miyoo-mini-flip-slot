@@ -1,3 +1,5 @@
+software rendering backend
+
 diff --git a/Cargo.lock b/Cargo.lock
 index 198f672..05625cd 100644
 --- a/Cargo.lock
@@ -31,7 +33,7 @@ index 5791f2c..b133912 100644
  glutin-winit = { workspace = true, optional = true }
  raw-window-handle = { workspace = true, optional = true }
 diff --git a/crates/slot-gfx/src/draw.rs b/crates/slot-gfx/src/draw.rs
-index 39903af..6fd5a8b 100644
+index 664d1ab..059cd0e 100644
 --- a/crates/slot-gfx/src/draw.rs
 +++ b/crates/slot-gfx/src/draw.rs
 @@ -1,15 +1,24 @@
@@ -60,7 +62,7 @@ index 39903af..6fd5a8b 100644
  }
  
  #[derive(Copy, Clone, PartialEq, Debug)]
-@@ -44,6 +53,7 @@ pub enum Draw {
+@@ -53,6 +62,7 @@ pub enum Draw {
      },
  }
  
@@ -68,15 +70,15 @@ index 39903af..6fd5a8b 100644
  pub struct Sprites {
      prog: gl::types::GLuint,
      white: gl::types::GLuint,
-@@ -53,6 +63,7 @@ pub struct Sprites {
-     u_turn: gl::types::GLint,
+@@ -64,6 +74,7 @@ pub struct Sprites {
+     u_src: gl::types::GLint,
  }
  
 +#[cfg(not(feature = "software"))]
  impl Sprites {
      pub fn new() -> Result<Self, GfxError> {
          let prog = crate::shaders::program(SPRITE_VERT, SPRITE_FRAG)?;
-@@ -181,6 +192,7 @@ impl Sprites {
+@@ -213,6 +224,7 @@ impl Sprites {
      }
  }
  
@@ -85,10 +87,10 @@ index 39903af..6fd5a8b 100644
      fn drop(&mut self) {
          unsafe {
 diff --git a/crates/slot-gfx/src/lib.rs b/crates/slot-gfx/src/lib.rs
-index a859f0d..539f759 100644
+index 6aa73bf..86365d1 100644
 --- a/crates/slot-gfx/src/lib.rs
 +++ b/crates/slot-gfx/src/lib.rs
-@@ -1,30 +1,44 @@
+@@ -1,32 +1,46 @@
  mod bezel;
  mod draw;
 +#[cfg(not(feature = "software"))]
@@ -104,6 +106,7 @@ index a859f0d..539f759 100644
 -#[cfg(feature = "host")]
 +#[cfg(all(feature = "host", not(feature = "software")))]
  mod host;
+ mod layout;
  mod lcd3x;
  mod pipeline;
  mod power;
@@ -131,22 +134,23 @@ index a859f0d..539f759 100644
 -#[cfg(feature = "host")]
 +#[cfg(all(feature = "host", not(feature = "software")))]
  pub use host::HostSurface;
+ pub use layout::{Canvas, Layout};
  pub use lcd3x::{lcd3x_factors, lcd3x_mask, ScreenEffect};
  pub use pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
--pub use power::{screen_brightness, screen_scale, screen_width};
-+pub use power::{screen_brightness, screen_scale, screen_width, PICTURE};
+-pub use power::{screen_brightness, screen_rect_above, screen_scale, screen_width};
++pub use power::{screen_brightness, screen_rect_above, screen_scale, screen_width, PICTURE};
 +#[cfg(feature = "software")]
 +pub use soft::{canvas_size, Compositor, FbdevSurface, BACKDROP};
  pub use surface::{blit_rect, blit_rect_fit, fit_rect, fit_scale, GfxError, Surface, OUT_H, OUT_W};
 diff --git a/crates/slot-gfx/src/pipeline.rs b/crates/slot-gfx/src/pipeline.rs
-index 988bb8c..e780692 100644
+index a7f37aa..0066c43 100644
 --- a/crates/slot-gfx/src/pipeline.rs
 +++ b/crates/slot-gfx/src/pipeline.rs
 @@ -1,15 +1,30 @@
 +#[cfg(not(feature = "software"))]
  use crate::lcd3x::ScreenEffect;
 +#[cfg(not(feature = "software"))]
- use crate::power::{screen_brightness, screen_rect};
+ use crate::power::{screen_brightness, screen_rect_above};
 +#[cfg(not(feature = "software"))]
  use crate::quad::Quad;
 +#[cfg(not(feature = "software"))]
@@ -176,9 +180,9 @@ index 988bb8c..e780692 100644
  pub struct GamePass {
      prog: gl::types::GLuint,
      game: gl::types::GLuint,
-@@ -27,8 +42,11 @@ pub struct GamePass {
-     effect: ScreenEffect,
-     power: f32,
+@@ -32,8 +47,11 @@ pub struct GamePass {
+     /// Pixels kept for the carousel footer. The picture scales in the space above them.
+     bottom: f32,
      src: [f32; 4],
 +    /// See `power::screen_rect`: the picture's size in canvas units.
 +    base: [f32; 2],
@@ -188,15 +192,15 @@ index 988bb8c..e780692 100644
  impl GamePass {
      pub fn new() -> Result<Self, GfxError> {
          let prog = crate::shaders::program(RECT_VERT, GAME_FRAG)?;
-@@ -81,6 +99,7 @@ impl GamePass {
-             effect: ScreenEffect::Lcd3x,
-             power: 1.0,
+@@ -91,6 +109,7 @@ impl GamePass {
+             fills: false,
+             bottom: 0.0,
              src: WHOLE_TEXTURE,
 +            base: crate::power::PICTURE,
          })
      }
  
-@@ -114,6 +133,10 @@ impl GamePass {
+@@ -148,6 +167,10 @@ impl GamePass {
          self.paper_size = size as f32;
      }
  
@@ -207,16 +211,7 @@ index 988bb8c..e780692 100644
      pub fn set_source_rect(&mut self, rect: [f32; 4]) {
          self.src = rect;
      }
-@@ -152,7 +175,7 @@ impl GamePass {
-     }
- 
-     fn draw_source(&self, tex: gl::types::GLuint, quad: &Quad, src: [f32; 4]) {
--        let (x, y, w, h) = screen_rect(self.power);
-+        let (x, y, w, h) = screen_rect(self.power, self.base);
-         unsafe {
-             gl::UseProgram(self.prog);
-             gl::Uniform4f(self.u_rect, x, y, w, h);
-@@ -177,12 +200,14 @@ impl GamePass {
+@@ -223,12 +246,14 @@ impl GamePass {
      }
  }
  
@@ -231,7 +226,7 @@ index 988bb8c..e780692 100644
  fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
      let shown = len * texels;
      let scale = (out / shown).ceil();
-@@ -194,6 +219,7 @@ fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
+@@ -240,6 +265,7 @@ fn whole_scale(at: f32, len: f32, texels: f32, out: f32) -> (f32, f32) {
      (at + top / scale / texels, out / scale / texels)
  }
  
@@ -240,7 +235,7 @@ index 988bb8c..e780692 100644
      fn drop(&mut self) {
          unsafe {
 diff --git a/crates/slot-gfx/src/power.rs b/crates/slot-gfx/src/power.rs
-index 160e42a..428f65f 100644
+index 1ee7bcf..4e7cf06 100644
 --- a/crates/slot-gfx/src/power.rs
 +++ b/crates/slot-gfx/src/power.rs
 @@ -1,3 +1,4 @@
@@ -263,13 +258,11 @@ index 160e42a..428f65f 100644
  }
  
  pub fn screen_brightness(t: f32) -> f32 {
-@@ -21,8 +22,61 @@ pub fn screen_brightness(t: f32) -> f32 {
-     1.0 + OVERSHOOT * left * left
+@@ -29,3 +30,62 @@ pub fn screen_rect_above(t: f32, footer: f32) -> (f32, f32, f32, f32) {
+     let h = view * screen_scale(t);
+     ((OUT_W as f32 - w) / 2.0, (view - h) / 2.0, w, h)
  }
- 
--pub fn screen_rect(t: f32) -> (f32, f32, f32, f32) {
--    let w = OUT_W as f32 * screen_width(t);
--    let h = OUT_H as f32 * screen_scale(t);
++
 +/// Where the picture sits on the canvas: `base` sized, centred, shrinking to a
 +/// line for the screen-off animation.
 +///
@@ -288,8 +281,8 @@ index 160e42a..428f65f 100644
 +pub fn screen_rect(t: f32, base: [f32; 2]) -> (f32, f32, f32, f32) {
 +    let w = base[0] * screen_width(t);
 +    let h = base[1] * screen_scale(t);
-     ((OUT_W as f32 - w) / 2.0, (OUT_H as f32 - h) / 2.0, w, h)
- }
++    ((OUT_W as f32 - w) / 2.0, (OUT_H as f32 - h) / 2.0, w, h)
++}
 +
 +/// The picture's natural, pixel-exact size: `SCALE` times the source texture.
 +pub const PICTURE: [f32; 2] = [GAME_W as f32, GAME_H as f32];
@@ -698,10 +691,10 @@ index 0000000..d13f87c
 +}
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 new file mode 100644
-index 0000000..4455b85
+index 0000000..a2c79d4
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -0,0 +1,1730 @@
+@@ -0,0 +1,1805 @@
 +//! Software rendering backend, for devices with a framebuffer and no GPU.
 +//!
 +//! `lib.rs` exports this module's `Compositor` and `FbdevSurface` under the
@@ -720,10 +713,9 @@ index 0000000..4455b85
 +//!     are multi-tap per-pixel filters; Lcd3x is the default and the only one
 +//!     that reduces to a table at integer scale. Revisit once there are frame
 +//!     times from the device.
-+//!   - **Bezel, frame split and frame lift** are no-ops. All three are gated on
-+//!     `bezel::framed()`, which needs a 4:3 panel; the Mini Flip is 752x560
-+//!     (2256 != 2240), so the device never reaches them. They are left as
-+//!     recorded state so the API matches and a 4:3 target can fill them in.
++//!   - **The overlay slide** is recorded and ignored: upstream slides the SP
++//!     shell up from the bottom of a taller panel, and here the shell covers
++//!     the margin around the picture, which does not move.
 +//!   - **Panel rotation** (`set_panel_turn`) is accepted and ignored: the Mini
 +//!     Flip reports `rotate 0` and a landscape panel.
 +
@@ -736,6 +728,7 @@ index 0000000..4455b85
 +
 +use crate::draw::{Draw, TexId};
 +use crate::grade::blue_light_gain;
++use crate::layout::Layout;
 +use crate::lcd3x::ScreenEffect;
 +use crate::pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
 +use crate::power::{screen_brightness, screen_rect};
@@ -925,6 +918,9 @@ index 0000000..4455b85
 +    /// The picture's size in canvas units. Set from the video mode; see
 +    /// `power::screen_rect` and `video_mode::base_size`.
 +    base: [f32; 2],
++    /// A strip along the bottom of the canvas the picture keeps clear of: the
++    /// carousel footer, which the pause and quick menus share.
++    bottom: f32,
 +    fbo_scale: [f32; 2],
 +    /// Scratch that would otherwise be heap-allocated twice a frame. Two
 +    /// allocations per frame is a poor way to spend a 16 ms budget, and the
@@ -943,6 +939,7 @@ index 0000000..4455b85
 +            pic: WHOLE_TEXTURE,
 +            src: WHOLE_TEXTURE,
 +            base: crate::power::PICTURE,
++            bottom: 0.0,
 +            fbo_scale: [1.0, 1.0],
 +            col: Vec::new(),
 +            col_key: None,
@@ -977,9 +974,22 @@ index 0000000..4455b85
 +        self.draw_inner(Dest::Fb(fb), tex, mirror)
 +    }
 +
++    /// Where the picture lands on the canvas.
++    ///
++    /// Upstream crops the source by the footer's share of the canvas as well
++    /// as moving the picture up, because there the picture *is* the canvas and
++    /// the footer covers its bottom rows. Here the picture is smaller than the
++    /// canvas -- 720x480 in 752x560 -- so there is nothing of it under the
++    /// footer to lose: it only moves up, and keeps all of itself.
++    fn rect(&self) -> (f32, f32, f32, f32) {
++        let (x, _, w, h) = screen_rect(self.power, self.base);
++        let view = OUT_H as f32 - self.bottom.max(0.0);
++        (x, (view - h) / 2.0, w, h)
++    }
++
 +    fn draw_inner(&mut self, mut dest: Dest<'_>, tex: Option<&Image>, mirror: bool) -> u8 {
 +        let img = tex.unwrap_or(&self.frame);
-+        let (rx, ry, rw, rh) = screen_rect(self.power, self.base);
++        let (rx, ry, rw, rh) = self.rect();
 +        if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
 +            return 0;
 +        }
@@ -1109,7 +1119,7 @@ index 0000000..4455b85
 +            // Nothing reads it: the output writes its own alpha, and sprite
 +            // blending only uses the canvas alpha to update itself.
 +            // SAFETY: both slices are width * 4 long.
-+            unsafe { scale_row(drow, &line, yk as u16) };
++            unsafe { scale_row(drow, line, yk as u16) };
 +        }
 +
 +        2
@@ -1218,7 +1228,10 @@ index 0000000..4455b85
 +            }
 +        }
 +    }
-+    let worst = common.iter().max_by_key(|(_, n)| **n).map(|(a, n)| (*a, *n));
++    let worst = common
++        .iter()
++        .max_by_key(|(_, n)| **n)
++        .map(|(a, n)| (*a, *n));
 +    eprintln!(
 +        "slot: soft: texture {id} {w}x{h}: opaque {full}, clear {clear}, partial {partial}{}",
 +        match worst {
@@ -1407,11 +1420,12 @@ index 0000000..4455b85
 +    game: Game,
 +    gain: [f32; 3],
 +    shake: f32,
-+    // Recorded for API parity; unreachable on a non-4:3 panel. See the module note.
-+    split: Option<f32>,
 +    lift: f32,
 +    screen: f32,
 +    bezel: Option<Image>,
++    /// The bezel that belongs to the console being played, drawn in the band
++    /// of canvas the picture does not reach: `App::shown_game_bezel`.
++    game_bezel: Option<TexId>,
 +    /// Whether the bezel belongs under what is playing. The art is a Game Boy
 +    /// Advance SP shell and says so in large letters, which is wrong under a
 +    /// Game Boy game; `App::bezel_suits_platform` decides and says so here.
@@ -1439,11 +1453,11 @@ index 0000000..4455b85
 +            game: Game::new(),
 +            gain: blue_light_gain(0),
 +            shake: 0.0,
-+            split: None,
 +            lift: 1.0,
 +            screen: 0.0,
 +            bezel: None,
-+            bezel_shown: false,
++            game_bezel: None,
++            bezel_shown: true,
 +            turn: None,
 +        };
 +        me.white = me.create_texture(1, 1, &[255, 255, 255, 255]);
@@ -1582,7 +1596,11 @@ index 0000000..4455b85
 +        let t = std::time::Instant::now();
 +        self.scratch.reused = 0;
 +        self.scratch.direct = 0;
-+        (self.scratch.blend_rects, self.scratch.opaque_px, self.scratch.blend_px) = (0, 0, 0);
++        (
++            self.scratch.blend_rects,
++            self.scratch.opaque_px,
++            self.scratch.blend_px,
++        ) = (0, 0, 0);
 +        // Per frame, so the shapes printed below are one frame's draws rather
 +        // than a mixture: the report fires every 60.
 +        self.profile.tex_seen = 0;
@@ -1608,7 +1626,9 @@ index 0000000..4455b85
 +            // ~20 us here, worth paying to learn which kind owns the stage.
 +            let at = self.profiling.then(std::time::Instant::now);
 +            let shape = match *item {
-+                Draw::Tex { w, h, tex, .. } | Draw::Turned { w, h, tex, .. } => self
++                Draw::Tex { w, h, tex, .. }
++                | Draw::Part { w, h, tex, .. }
++                | Draw::Turned { w, h, tex, .. } => self
 +                    .textures
 +                    .get(tex.raw())
 +                    .and_then(|t| t.as_ref())
@@ -1616,17 +1636,23 @@ index 0000000..4455b85
 +                _ => None,
 +            };
 +            let who = match *item {
-+                Draw::Tex { tex, alpha, .. } | Draw::Turned { tex, alpha, .. } => {
++                Draw::Tex { tex, alpha, .. }
++                | Draw::Part { tex, alpha, .. }
++                | Draw::Turned { tex, alpha, .. } => {
 +                    Some((tex.raw() as u32, (alpha * 1000.0).round() as u32))
 +                }
 +                _ => None,
 +            };
 +            if shape.is_some() {
-+                (self.scratch.tex_skip, self.scratch.tex_copy, self.scratch.tex_blend) = (0, 0, 0);
++                (
++                    self.scratch.tex_skip,
++                    self.scratch.tex_copy,
++                    self.scratch.tex_blend,
++                ) = (0, 0, 0);
 +            }
 +            let kind = match item {
 +                Draw::Rect { .. } => 0usize,
-+                Draw::Tex { .. } => 1,
++                Draw::Tex { .. } | Draw::Part { .. } => 1,
 +                Draw::Turned { .. } => 2,
 +                _ => 3,
 +            };
@@ -1660,6 +1686,29 @@ index 0000000..4455b85
 +                            w,
 +                            h,
 +                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            &mut self.scratch,
++                        );
++                    }
++                }
++                Draw::Part {
++                    x,
++                    y,
++                    w,
++                    h,
++                    tex,
++                    alpha,
++                    uv,
++                } => {
++                    if let Some(t) = self.textures.get(tex.raw()).and_then(|t| t.as_ref()) {
++                        raster::blit_part(
++                            &mut self.canvas,
++                            &t.img,
++                            x,
++                            y,
++                            w,
++                            h,
++                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            uv,
 +                            &mut self.scratch,
 +                        );
 +                    }
@@ -1760,12 +1809,18 @@ index 0000000..4455b85
 +        }
 +    }
 +
-+    pub fn set_frame_split(&mut self, canvas_y: Option<f32>) {
-+        self.split = canvas_y;
++    pub fn set_overlay_slide(&mut self, t: f32) {
++        self.lift = t;
 +    }
 +
-+    pub fn set_frame_lift(&mut self, t: f32) {
-+        self.lift = t;
++    pub fn set_screen_footer(&mut self, px: f32) {
++        self.game.bottom = px.max(0.0);
++    }
++
++    /// The canvas, which is the panel here: there is no offscreen target to be
++    /// a different size from it.
++    pub fn frame_size(&self) -> (u32, u32) {
++        (self.canvas.w, self.canvas.h)
 +    }
 +
 +    pub fn set_screen_power(&mut self, t: f32) {
@@ -1795,7 +1850,10 @@ index 0000000..4455b85
 +        out
 +    }
 +
-+    pub fn begin_frame(&mut self) {
++    /// `Layout` is accepted and ignored. Upstream widens its 720x480 canvas
++    /// towards the panel's shape for `Native`; here the canvas is already the
++    /// panel, so the two layouts are the same canvas and nothing has to switch.
++    pub fn begin_frame(&mut self, _layout: Layout) {
 +        self.game.fbo_scale = [
 +            self.canvas.w as f32 / OUT_W as f32,
 +            self.canvas.h as f32 / OUT_H as f32,
@@ -1807,7 +1865,10 @@ index 0000000..4455b85
 +        self.pending_clear = true;
 +    }
 +
-+    pub fn set_bezel_shown(&mut self, shown: bool) {
++    /// Whether the panel bezel -- the Advance SP shell -- suits what is
++    /// playing. Upstream's name for it, and upstream's answer: a Game Boy game
++    /// gets its own bezel instead, through `set_game_bezel`.
++    pub fn set_sp_frame(&mut self, shown: bool) {
 +        if self.bezel_shown == shown {
 +            return;
 +        }
@@ -1816,6 +1877,16 @@ index 0000000..4455b85
 +        // this the answer that was on the panel stays there -- the shell would
 +        // survive into the next Game Boy game until something else happened to
 +        // move the picture.
++        self.clear_left = PAGES;
++    }
++
++    pub fn set_game_bezel(&mut self, tex: Option<TexId>) {
++        if self.game_bezel == tex {
++            return;
++        }
++        self.game_bezel = tex;
++        // Painted with the surround rather than per frame, so the panel has to
++        // be told to repaint: see `output_frame`.
 +        self.clear_left = PAGES;
 +    }
 +
@@ -1914,10 +1985,7 @@ index 0000000..4455b85
 +                let src = &b.px[sy * bw..sy * bw + bw];
 +                let n = bw.min(row.len());
 +                if half {
-+                    for (d, s) in row[..n]
-+                        .chunks_exact_mut(4)
-+                        .zip(src.chunks_exact(4).rev())
-+                    {
++                    for (d, s) in row[..n].chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
 +                        d.copy_from_slice(s);
 +                    }
 +                } else {
@@ -2434,10 +2502,10 @@ index 0000000..4455b85
 +}
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 new file mode 100644
-index 0000000..be0184c
+index 0000000..ab1d54f
 --- /dev/null
 +++ b/crates/slot-gfx/src/soft/raster.rs
-@@ -0,0 +1,838 @@
+@@ -0,0 +1,862 @@
 +//! CPU rasteriser for slot's five-variant display list.
 +//!
 +//! Everything is RGBA8, top-down, premultiplied by nothing: the blend is plain
@@ -2541,8 +2609,6 @@ index 0000000..be0184c
 +/// against 6x the cost of every pixel in the biggest draws on the shelf.
 +const OPAQUE_ENOUGH: u8 = 254;
 +
-+/// src-over, both sides straight (non-premultiplied) alpha.
-+#[inline]
 +/// Divide by 255, rounding, without dividing.
 +///
 +/// The blend did this three times per pixel and a divide is the most expensive
@@ -2555,6 +2621,7 @@ index 0000000..be0184c
 +    (x + (x >> 8)) >> 8
 +}
 +
++/// src-over, both sides straight (non-premultiplied) alpha.
 +#[inline(always)]
 +fn blend(dst: &mut [u8], src: [u8; 4]) {
 +    let a = src[3] as u32;
@@ -2757,6 +2824,7 @@ index 0000000..be0184c
 +///
 +/// Scaled *down*, no two destination rows share a source row, so the line would
 +/// be pure overhead and the direct path is kept.
++#[allow(clippy::too_many_arguments)]
 +pub fn blit(
 +    dst: &mut Image,
 +    tex: &Image,
@@ -2765,6 +2833,26 @@ index 0000000..be0184c
 +    w: f32,
 +    h: f32,
 +    colour: [f32; 4],
++    scratch: &mut Scratch,
++) {
++    blit_part(dst, tex, x, y, w, h, colour, WHOLE, scratch);
++}
++
++/// The whole texture, as `Draw::Tex` samples it.
++pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
++
++/// `blit`, sampling only the `uv` window of the texture -- `Draw::Part`, which
++/// the shelf uses to show the middle of a texture wider than the canvas.
++#[allow(clippy::too_many_arguments)]
++pub fn blit_part(
++    dst: &mut Image,
++    tex: &Image,
++    x: f32,
++    y: f32,
++    w: f32,
++    h: f32,
++    colour: [f32; 4],
++    uv: [f32; 4],
 +    scratch: &mut Scratch,
 +) {
 +    let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
@@ -2781,7 +2869,7 @@ index 0000000..be0184c
 +    scratch.col.reserve(width);
 +    for i in 0..width {
 +        let px = x0 + i as i32;
-+        let u = (px as f32 + 0.5 - x) / w;
++        let u = uv[0] + (px as f32 + 0.5 - x) / w * uv[2];
 +        let sx = ((u * tex.w as f32) as i32).clamp(0, tex.w as i32 - 1) as u32;
 +        scratch.col.push(sx * 4);
 +    }
@@ -2792,7 +2880,7 @@ index 0000000..be0184c
 +    let row_bytes = tw * 4;
 +
 +    // Worth the line only when destination rows share source rows.
-+    let reuse = h >= tex.h as f32;
++    let reuse = h >= tex.h as f32 * uv[3];
 +    if reuse && scratch.line.len() != width * 4 {
 +        scratch.line.resize(width * 4, 0);
 +    }
@@ -2813,7 +2901,7 @@ index 0000000..be0184c
 +    let enough = if plain { OPAQUE_ENOUGH } else { 255 };
 +
 +    for py in y0..y1 {
-+        let v = (py as f32 + 0.5 - y) / h;
++        let v = uv[1] + (py as f32 + 0.5 - y) / h * uv[3];
 +        let sy = ((v * tex.h as f32) as i32).clamp(0, tex.h as i32 - 1) as usize;
 +        let src_row = sy * row_bytes;
 +        let dstart = (py as usize * dw + x0 as usize) * 4;
@@ -2902,6 +2990,7 @@ index 0000000..be0184c
 +/// `SPRITE_VERT` rotates the quad's corners by `(cos, sin)` around the rect
 +/// centre. Forward-mapping corners would leave seams, so this walks the
 +/// destination bounding box and inverse-rotates each pixel back into the rect.
++#[allow(clippy::too_many_arguments)]
 +pub fn blit_turned(
 +    dst: &mut Image,
 +    tex: &Image,
@@ -3144,7 +3233,10 @@ index 0000000..be0184c
 +    #[test]
 +    fn a_near_opaque_tint_costs_at_most_one_level() {
 +        let colour = [1.0, 1.0, 1.0, OPAQUE_ENOUGH as f32 / 255.0];
-+        assert!(super::plain_enough(colour), "the tolerance should accept it");
++        assert!(
++            super::plain_enough(colour),
++            "the tolerance should accept it"
++        );
 +        for s in [[0u8, 0, 0, 255], [255, 255, 255, 255], [37, 128, 201, 255]] {
 +            for d0 in [[0u8, 0, 0, 255], [255, 255, 255, 255], [91, 17, 240, 255]] {
 +                let mut exact = d0;
@@ -3331,10 +3423,10 @@ index b3ee812..99480a7 100644
  [dependencies]
  slot-gfx = { path = "../slot-gfx", default-features = false }
 diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
-index cada2b8..f37d0ea 100644
+index de4cf67..24d8087 100644
 --- a/crates/slot/src/device_app.rs
 +++ b/crates/slot/src/device_app.rs
-@@ -20,8 +20,20 @@ struct Pacer {
+@@ -21,8 +21,20 @@ struct Pacer {
      work: Duration,
      works: [Duration; WORK_WINDOW],
      next: usize,
@@ -3355,7 +3447,7 @@ index cada2b8..f37d0ea 100644
  const WORK_WINDOW: usize = 32;
  
  impl Pacer {
-@@ -32,6 +44,8 @@ impl Pacer {
+@@ -33,6 +45,8 @@ impl Pacer {
              work: Duration::from_millis(4),
              works: [Duration::from_millis(4); WORK_WINDOW],
              next: 0,
@@ -3364,7 +3456,7 @@ index cada2b8..f37d0ea 100644
          }
      }
  
-@@ -39,6 +53,24 @@ impl Pacer {
+@@ -40,6 +54,24 @@ impl Pacer {
          let Some(last) = self.last_return else {
              return;
          };
@@ -3389,7 +3481,7 @@ index cada2b8..f37d0ea 100644
          let delay = self.period.saturating_sub(self.work + MARGIN);
          if let Some(left) = (last + delay).checked_duration_since(Instant::now()) {
              std::thread::sleep(left);
-@@ -50,11 +82,18 @@ impl Pacer {
+@@ -51,11 +83,18 @@ impl Pacer {
          let mut missed = false;
          if let Some(last) = self.last_return {
              let seen = now - last;
@@ -3408,7 +3500,7 @@ index cada2b8..f37d0ea 100644
          self.works[self.next] = work;
          self.next = (self.next + 1) % WORK_WINDOW;
          self.work = self.works.iter().copied().max().unwrap_or(work);
-@@ -128,7 +167,21 @@ pub fn run() {
+@@ -138,7 +177,21 @@ pub fn run() {
          .name("slot-bootlogo".into())
          .spawn(move || slot::bootlogo::refresh(&card));
      let mut drawn = false;
@@ -3431,7 +3523,7 @@ index cada2b8..f37d0ea 100644
      let mut pacer = Pacer::new();
      let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
      loop {
-@@ -152,6 +205,15 @@ pub fn run() {
+@@ -162,6 +215,15 @@ pub fn run() {
          }
          let swap_took = swap.elapsed();
          slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
@@ -3447,7 +3539,7 @@ index cada2b8..f37d0ea 100644
          let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
          if slot::latency::tracing() {
              frames += 1;
-@@ -159,10 +221,12 @@ pub fn run() {
+@@ -169,10 +231,12 @@ pub fn run() {
              early += u32::from(swap_took > pacer.period / 2);
              if frames == 600 {
                  eprintln!(

@@ -56,10 +56,10 @@ If so:
 - a 752x560 canvas simply does not fit a 640x480 panel, so today's binary
   will not lay out correctly there. The launch script now says so in the log
   instead of drawing something wrong in silence.
-- 640x480 is **4:3**, which the Flip's 752x560 is not. That may re-enable
-  upstream's `bezel::framed()` path, which `patches/0002` had to drop because
-  it needs a 4:3 panel. The Plus could end up *closer* to upstream than the
-  Flip is.
+- 640x480 is **4:3** exactly, which the Flip's 752x560 is only to within
+  0.71%. `patches/0012` widened `bezel::framed()` to that tolerance, so the
+  Plus takes the same path without needing the tolerance at all, and is
+  *closer* to upstream than the Flip is.
 - the GB/GBC picture at 3x is 480x432, which fits 640x480 comfortably — so
   `patches/0009`'s fitting work is a Flip-shaped problem and may not arise.
 

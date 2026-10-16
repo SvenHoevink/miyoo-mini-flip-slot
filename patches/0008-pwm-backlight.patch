@@ -23,9 +23,11 @@ ladder was stepped on the device and looked at; the values are what came back.
 
 Applies on top of 0004, which also touches these two files.
 
+diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
+index 3010331..04dfc2a 100644
 --- a/crates/slot-power/src/device.rs
 +++ b/crates/slot-power/src/device.rs
-@@ -61,9 +61,45 @@
+@@ -74,9 +74,45 @@ const EVIOCSFF: c_ulong = 0x4030_4580;
  
  const DISPDBG_MAX: u32 = 255;
  
@@ -71,7 +73,7 @@ Applies on top of 0004, which also touches these two files.
  }
  
  enum Led {
-@@ -102,6 +138,7 @@
+@@ -115,6 +151,7 @@ impl DevicePlatform {
                  dbg.join("param")
                      .is_file()
                      .then_some(Backlight::Dispdbg(dbg))
@@ -79,7 +81,7 @@ Applies on top of 0004, which also touches these two files.
              }
          };
          let battery = first_dir(&sysfs.join("class/power_supply"), is_battery);
-@@ -118,6 +155,13 @@
+@@ -131,6 +168,13 @@ impl DevicePlatform {
                  Led::Mono { dir, max }
              }
          });
@@ -93,7 +95,7 @@ Applies on top of 0004, which also touches these two files.
          DevicePlatform {
              root,
              sysfs: sysfs.to_path_buf(),
-@@ -159,6 +203,7 @@
+@@ -174,6 +218,7 @@ impl DevicePlatform {
          let backlight = match &self.backlight {
              Some(Backlight::Class(dir)) => leaf(dir),
              Some(Backlight::Dispdbg(_)) => "dispdbg".to_string(),
@@ -101,7 +103,7 @@ Applies on top of 0004, which also touches these two files.
              None => "no backlight".to_string(),
          };
          let motor = match &self.motor {
-@@ -462,6 +507,21 @@
+@@ -511,6 +556,21 @@ impl Platform for DevicePlatform {
                  write(dir.join("param"), value.to_string());
                  write(dir.join("start"), "1".to_string());
              }
@@ -123,11 +125,13 @@ Applies on top of 0004, which also touches these two files.
          }
      }
  
+diff --git a/crates/slot-power/tests/device.rs b/crates/slot-power/tests/device.rs
+index 13dfc57..f1deb63 100644
 --- a/crates/slot-power/tests/device.rs
 +++ b/crates/slot-power/tests/device.rs
-@@ -362,3 +362,76 @@
-     let m = "/dev/x /mnt/card vfat rw,errors=remount-ro 0 0\n";
-     assert!(!slot_power::read_only_in(m, Path::new("/mnt/card")));
+@@ -435,3 +435,76 @@ fn the_kernel_log_keeps_the_latest_card_lines() {
+     assert_eq!(kept.len(), 40);
+     assert_eq!(kept.last().unwrap(), "[99] FAT-fs (mmcblk0p7): line 99");
  }
 +
 +/// The Mini Flip has no backlight class device and no dispdbg, just a PWM

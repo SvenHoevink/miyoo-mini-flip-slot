@@ -24,9 +24,11 @@ reverse-applying, which is how `task patch` decides a patch is already applied.
 Applies on top of 0004, which added the fallback, and 0008, which owns the
 backlight arm just above the line this changes.
 
+diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
+index 04dfc2a..1955005 100644
 --- a/crates/slot-power/src/device.rs
 +++ b/crates/slot-power/src/device.rs
-@@ -210,11 +210,21 @@
+@@ -225,11 +225,21 @@ impl DevicePlatform {
              Some(m) => format!("motor {}", m.name),
              None => "no motor".to_string(),
          };
@@ -50,12 +52,15 @@ backlight arm just above the line this changes.
              name(&self.rtc, "no rtc"),
          )
      }
+diff --git a/crates/slot-power/tests/device.rs b/crates/slot-power/tests/device.rs
+index f1deb63..93c07b7 100644
 --- a/crates/slot-power/tests/device.rs
 +++ b/crates/slot-power/tests/device.rs
-@@ -68,6 +68,23 @@
+@@ -111,6 +111,23 @@ fn step_zero_is_dark() {
+     assert_eq!(brightness(&d), 0);
  }
  
- #[test]
++#[test]
 +fn the_report_names_the_battery_source_rather_than_denying_it() {
 +    // No power_supply at all is this device's normal state; the report should
 +    // not then say "no battery", because the vendor tool is the source and the
@@ -72,7 +77,6 @@ backlight arm just above the line this changes.
 +    }
 +}
 +
-+#[test]
+ #[test]
  fn the_battery_is_found_past_the_supplies_that_are_not_one() {
      let d = sysfs("255", "87");
-     assert_eq!(platform(&d).battery().map(|b| b.percent), Some(87));

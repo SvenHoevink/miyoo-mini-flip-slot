@@ -53,10 +53,10 @@ index 4592be1..ed527ce 100644
  
  pub fn screen_rect(panel: (u32, u32)) -> (i32, i32, i32, i32) {
 diff --git a/crates/slot/src/bezel.rs b/crates/slot/src/bezel.rs
-index cfed1b0..31473e0 100644
+index de0f803..22fe917 100644
 --- a/crates/slot/src/bezel.rs
 +++ b/crates/slot/src/bezel.rs
-@@ -18,8 +18,19 @@ pub fn pick(root: &Path, panel: (u32, u32)) -> Option<PathBuf> {
+@@ -41,8 +41,19 @@ pub fn pick(root: &Path, panel: (u32, u32)) -> Option<PathBuf> {
          .map(|e| e.path())
          .filter(|p| !slot_store::is_hidden(p))
          .filter_map(|p| Some((dims(&p)?, p)))

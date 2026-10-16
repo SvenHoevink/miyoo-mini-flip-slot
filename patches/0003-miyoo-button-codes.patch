@@ -1,8 +1,10 @@
+miyoo button codes
+
 diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
-index 9f71f9d..4032746 100644
+index 3228cdb..544f03c 100644
 --- a/crates/slot/src/input/device.rs
 +++ b/crates/slot/src/input/device.rs
-@@ -46,9 +46,18 @@ impl DeviceInput {
+@@ -53,9 +53,20 @@ impl DeviceInput {
              let queue = pending.clone();
              let name = node.display().to_string();
              let trace = trace.clone();
@@ -14,7 +16,9 @@ index 9f71f9d..4032746 100644
 +            // there is nothing to fall back to yet: drop the node's keys rather
 +            // than act on them, until the open/close signalling is known.
 +            let hall_node = cfg!(feature = "miyoo")
-+                && device_name(sys, &node).to_ascii_lowercase().contains("hall");
++                && device_name(sys, &node)
++                    .to_ascii_lowercase()
++                    .contains("hall");
              let spawned = std::thread::Builder::new()
                  .name(format!("slot-input-{name}"))
 -                .spawn(move || read_node(&node, &queue, trace.as_deref()));
@@ -22,7 +26,7 @@ index 9f71f9d..4032746 100644
              if let Err(e) = spawned {
                  eprintln!("slot: input {name}: {e}");
              }
-@@ -86,7 +95,33 @@ fn quicken_poll(sys: &Path, node: &Path) {
+@@ -94,7 +105,28 @@ fn quicken_poll(sys: &Path, node: &Path) {
      }
  }
  
@@ -47,17 +51,12 @@ index 9f71f9d..4032746 100644
 +    }
 +}
 +
-+fn read_node(
-+    node: &Path,
-+    queue: &Mutex<Vec<RawEvent>>,
-+    trace: Option<&Trace>,
-+    hall_node: bool,
-+) {
++fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>, hall_node: bool) {
 +    favour_this_thread();
      let label = node
          .file_name()
          .map(|n| n.to_string_lossy().into_owned())
-@@ -120,6 +155,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
+@@ -128,6 +160,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
              }
              match ev.kind {
                  EV_ABS => events.extend(hat.feed(ev)),
@@ -66,7 +65,7 @@ index 9f71f9d..4032746 100644
                  _ => events.extend(to_raw(ev)),
              }
          }
-@@ -201,7 +238,24 @@ impl InputSource for DeviceInput {
+@@ -215,7 +249,24 @@ impl InputSource for DeviceInput {
      }
  }
  

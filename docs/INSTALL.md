@@ -60,7 +60,18 @@ slot keeps its library separate. Saves and save states land beside them in
 GBA also needs a BIOS at **`BIOS/gba_bios.bin`**. Without it GBA games will not
 start. It is not included here and you have to supply it yourself.
 
+Bezels -- the plastic body drawn around the picture -- are picked per console
+in the quick menu under Screen. A Game Boy and a Game Boy Color body ship
+inside slot itself; the Advance SP shell is `System/bezels/640x480.png`. Your
+own art goes in **`Bezels/GB`** or **`Bezels/GBC`** as a PNG, 720x480 with a
+transparent hole where the picture belongs, and appears in that menu by its
+file name.
+
 ## 5. the controls worth knowing
+
+> **These are the gestures of the build before 2026-10-15.** The upstream bump
+> on that date added an in-game menu on a tap of MENU and moved what the quick
+> menu holds. The table below has not been re-checked on the handheld since.
 
 | gesture | what it does |
 |---|---|

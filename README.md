@@ -24,6 +24,13 @@ install page is the short version. See also
 with working input and a software renderer standing in for the GPU this device
 does not have.
 
+**The submodule was last bumped on 2026-10-15, by 94 upstream commits.** That
+brings an in-game menu, favourites, a recents shelf, handmade cart and shelf
+art, per-console screen settings and per-platform bezels, along with a new
+canvas and layout model the port's own patches now sit on. All thirteen
+patches rebased and the device build is clean, but everything in that bump has
+been seen under qemu only; the device numbers quoted below are from before it.
+
 `task all` produces, from a clean tree, three armv7 artifacts that the handheld
 could load — verified as 32-bit ARMv7-A, VFPv4 hard-float, needing nothing
 beyond glibc 2.28:
@@ -62,6 +69,7 @@ Where it stands:
 | audio | yes, ~100 ms behind the picture |
 | battery indicator | yes, from `axp_test` |
 | saves and save states | yes, including MBC2's 512x4 bits |
+| bezels | the Advance SP shell under a GBA game |
 
 The renderer, the cores and the input map are all working. What is left is in
 "Still open" at the bottom.
@@ -110,6 +118,7 @@ The UI builds a flat display list and hands it over:
 pub enum Draw {
     Rect   { x, y, w, h, colour: [f32; 4] },
     Tex    { x, y, w, h, tex: TexId, alpha: f32 },
+    Part   { x, y, w, h, tex: TexId, alpha: f32, uv: [f32; 4] },
     Turned { x, y, w, h, tex: TexId, alpha: f32, turn: f32 },
     Game,
     Shot   { tex: TexId },
@@ -118,7 +127,7 @@ pub enum Draw {
 
 All GL is quarantined in `slot-gfx` (~1,950 lines, of which the actual drawing
 is `draw.rs`, `pipeline.rs`, `fbo.rs`, `quad.rs`, `shaders.rs`). The seam is
-the `Surface` trait plus that five-variant display list. A CPU rasteriser that
+the `Surface` trait plus that six-variant display list. A CPU rasteriser that
 honours both, writing straight into `/dev/fb0`, replaces the GLES backend
 without touching a line of UI code.
 
@@ -278,23 +287,15 @@ the frontend says rather than what it does.
   device. slot's link is mGBA-only, so GB/GBC is the realistic target and GBA
   would interpret at ~22 ms a frame. See [docs/link.md](docs/link.md).
 
-- **The Game Boy body shows under a GBA game only.** Upstream draws a shell
-  around the picture; three things stopped it appearing here, and none of them
-  was that it had been removed. `bezel::framed` wanted an exactly 4:3 panel and
-  752x560 is 0.71% off; `bezel::pick` wanted an asset whose aspect matched the
-  panel's exactly and refused the only one upstream ships for the same 0.71%;
-  and `patches/0002` had made the canvas the panel exactly, so there was no
-  strip of panel left to draw a shell on. The tolerances are `patches/0012`,
-  the painting is in 0002, and where it shows falls out of what was already
-  there: `output_frame` paints the surround and copies the picture over it, so
-  the shell appears exactly where the picture does not reach -- the margin in
-  game, nothing on the shelf, nothing under a stretched picture.
-
-  It is gated to GBA because the asset is a Game Boy Advance SP shell and says
-  so in large letters, which is wrong under a Game Boy game. A DMG shell would
-  fix that and no such asset exists; `bezels/640x480.png` is the only one
-  upstream ships. Drop one in `System/bezels/` and the pick already tolerates
-  its aspect.
+- **The per-platform bezels have not been on the handheld yet.** Upstream now
+  draws a bezel belonging to the console being played -- a DMG body for GB, a
+  GBC one, the SP shell for GBA -- picked per console in the quick menu under
+  Screen. The port draws it a different way than upstream does, because a
+  full-frame blit every frame is not something this device can afford: the
+  game pass is cropped to the picture and the bezel is painted into the
+  surround, where it costs nothing until the picture moves (`patches/0013`).
+  It is right under qemu, picture in the hole and nothing leaking, and qemu
+  says nothing about frame times. Pick **Default** for GB or GBC and look.
 
 - **GB palettes are off by default.** `gb_palettes=0` in `Config/slot.state`.
   Turn them on in the quick menu under Screen, then L2 and R2 cycle 48 of them,

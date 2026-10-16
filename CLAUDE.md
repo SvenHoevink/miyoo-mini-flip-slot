@@ -51,7 +51,7 @@ not 128). Anything still missing from that file is a hypothesis; mark it as one.
 
 Both gaps this used to name are closed: all 18 per-button evdev codes are
 mapped and cross-checked against Allium's own, and the battery reads
-`/customer/app/axp_test` (`patches/0004`) because there is no
+`/customer/app/axp_test` (`patches/0010`) because there is no
 `/sys/class/power_supply` at all.
 
 Beware a *second* instrument disagreeing with that file. slot's probe line
@@ -65,6 +65,14 @@ and `notes/hardware.md` disagree, check the thing itself.
 leaves its working tree modified by design; the *pinned commit* is still
 tracked, so a deliberate upstream bump shows up in `git status` as it should.
 
+**`task patch` is idempotent through a stamp**, `upstream/slot/.port-patches`,
+which holds a hash of the patch set that was applied. It used to ask each
+patch whether it could be reversed, which stops being true as soon as a later
+patch edits the same lines -- 0013 edits a file 0002 creates, and 0002 then
+read as stale on a tree it had just patched. A patch set that differs from the
+stamp on a modified tree is a hard error asking for `task unpatch`, not a
+silent re-apply.
+
 **`upstream/slot` is read-only.** It is a submodule pinned to a specific
 upstream commit. Never commit changes inside it. Port work lives in this
 repo's own tree. If a change must land in upstream files, write it as a patch
@@ -75,12 +83,17 @@ which upstream commit it applies to.
 
 The architectural seam, and the reason this is feasible at all:
 
-- `slot-ui` has **no** graphics calls. It emits `Vec<Draw>` — five variants,
+- `slot-ui` has **no** graphics calls. It emits `Vec<Draw>` — six variants,
   defined in `upstream/slot/crates/slot-gfx/src/draw.rs`.
 - All GL lives in `slot-gfx`, behind the `Surface` trait
   (`crates/slot-gfx/src/surface.rs`) and selected by cargo feature:
   `host` (winit + glutin, for a desktop window) or `device`
   (`fbdev.rs`: dlopen `libEGL.so`, GLES2 on `/dev/fb0`).
+
+Upstream's own `Layout`/`Canvas` (`layout.rs`) widens that canvas towards a
+4:3 panel's shape; here `OUT_W`/`OUT_H` *are* the panel, so `Native` and
+`Framed` are the same canvas and the port's patches live below that choice
+rather than against it.
 
 The port adds a third backend — a CPU rasteriser over mmapped `/dev/fb0` —
 and changes nothing above the seam. **If a port change requires editing

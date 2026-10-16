@@ -1,0 +1,443 @@
+draw the console's own bezel without redrawing it
+
+Upstream's per-platform bezel is a full-frame image with a hole where the
+picture goes, drawn over the game pass every frame. A full-frame blit is
+345,600 pixels; this device has about a millisecond of headroom at 60 fps, so
+every frame is not a price it can pay.
+
+It does not have to. The band the bezel covers is the paper around the
+picture, and the paper never changes: only the picture does. So the game pass
+is cropped to the picture itself (`Game::crop`, set from `set_game_bezel`) and
+the bezel is composited into the surround -- the panel-sized image painted when
+the output rect moves and left alone otherwise, where the Advance SP shell
+already lives. In play the bezel costs nothing per frame.
+
+The canvas path still draws it per frame, as upstream does: a menu is up, the
+canvas covers the panel, and the surround is not in view. Those frames belong
+to a menu rather than to a game.
+
+Two sizes that are the same upstream and differ here:
+
+  - the art is made at the *picture's* frame, 720x480, not at the canvas,
+    which is the 752x560 panel. The hole has to land on the picture, and
+    `game_bezel_face` scaling it to the canvas put it 39px out on every side.
+  - a still (`Draw::Shot`, the frame kept behind a menu) is drawn at the whole
+    frame, paper and all, so it is not cropped.
+
+`the_picture_fills_the_hole_in_the_art` pins the two together: the hole is
+measured off bezel_gb.png and the crop is arithmetic, and nothing lines them
+up at run time.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+index a2c79d4..5ea7492 100644
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -224,6 +224,10 @@ struct Game {
+     /// A strip along the bottom of the canvas the picture keeps clear of: the
+     /// carousel footer, which the pause and quick menus share.
+     bottom: f32,
++    /// Draw the picture alone, without the paper around it. Set while a game
++    /// bezel is shown: the bezel covers that paper, and leaving the game pass
++    /// to write it would mean redrawing the bezel over it every frame.
++    crop: bool,
+     fbo_scale: [f32; 2],
+     /// Scratch that would otherwise be heap-allocated twice a frame. Two
+     /// allocations per frame is a poor way to spend a 16 ms budget, and the
+@@ -243,6 +247,7 @@ impl Game {
+             src: WHOLE_TEXTURE,
+             base: crate::power::PICTURE,
+             bottom: 0.0,
++            crop: false,
+             fbo_scale: [1.0, 1.0],
+             col: Vec::new(),
+             col_key: None,
+@@ -285,21 +290,51 @@ impl Game {
+     /// canvas -- 720x480 in 752x560 -- so there is nothing of it under the
+     /// footer to lose: it only moves up, and keeps all of itself.
+     fn rect(&self) -> (f32, f32, f32, f32) {
+-        let (x, _, w, h) = screen_rect(self.power, self.base);
++        self.rect_of(self.drawn())
++    }
++
++    fn rect_of(&self, base: [f32; 2]) -> (f32, f32, f32, f32) {
++        let (x, _, w, h) = screen_rect(self.power, base);
+         let view = OUT_H as f32 - self.bottom.max(0.0);
+         (x, (view - h) / 2.0, w, h)
+     }
+ 
++    /// The part of the texture that is drawn, as `src` wants it: the whole of
++    /// it, or the picture inside the paper when cropped. `pic` is a pair of
++    /// bounds rather than a rect, which is why this is not just a copy.
++    fn window(&self) -> [f32; 4] {
++        if !self.crop {
++            return self.src;
++        }
++        let [x0, y0, x1, y1] = self.pic;
++        [x0, y0, x1 - x0, y1 - y0]
++    }
++
++    /// The picture's size on the canvas, `base` less whatever the crop takes.
++    fn drawn(&self) -> [f32; 2] {
++        let w = self.window();
++        match self.crop {
++            true => [self.base[0] * w[2], self.base[1] * w[3]],
++            false => self.base,
++        }
++    }
++
+     fn draw_inner(&mut self, mut dest: Dest<'_>, tex: Option<&Image>, mirror: bool) -> u8 {
+         let img = tex.unwrap_or(&self.frame);
+-        let (rx, ry, rw, rh) = self.rect();
++        // A still -- `Draw::Shot`, the frame kept behind a menu -- is the whole
++        // frame as it was, paper and all, so the crop that belongs to the live
++        // picture would shrink it.
++        let (rx, ry, rw, rh) = match tex.is_some() {
++            true => self.rect_of(self.base),
++            false => self.rect(),
++        };
+         if !(rw > 0.0 && rh > 0.0) || img.w == 0 || img.h == 0 {
+             return 0;
+         }
+         let src = if tex.is_some() {
+             WHOLE_TEXTURE
+         } else {
+-            self.src
++            self.window()
+         };
+         let (sw, sh) = (img.w as f32, img.h as f32);
+ 
+@@ -729,6 +764,10 @@ pub struct Compositor {
+     /// The bezel that belongs to the console being played, drawn in the band
+     /// of canvas the picture does not reach: `App::shown_game_bezel`.
+     game_bezel: Option<TexId>,
++    /// `bezel` with `game_bezel` composited into it, panel sized: what the
++    /// surround is actually painted from. Built when either changes rather
++    /// than per frame -- see `surround`.
++    surround: Option<Image>,
+     /// Whether the bezel belongs under what is playing. The art is a Game Boy
+     /// Advance SP shell and says so in large letters, which is wrong under a
+     /// Game Boy game; `App::bezel_suits_platform` decides and says so here.
+@@ -760,6 +799,7 @@ impl Compositor {
+             screen: 0.0,
+             bezel: None,
+             game_bezel: None,
++            surround: None,
+             bezel_shown: true,
+             turn: None,
+         };
+@@ -805,7 +845,7 @@ impl Compositor {
+         }
+         self.pending_clear = false;
+         let covered = matches!(items.first(), Some(Draw::Game)) && {
+-            let (x, y, w, h) = screen_rect(self.game.power, self.game.base);
++            let (x, y, w, h) = self.game.rect();
+             x <= 0.0 && y <= 0.0 && w >= self.canvas.w as f32 && h >= self.canvas.h as f32
+         };
+         if covered {
+@@ -868,6 +908,7 @@ impl Compositor {
+                         }
+                         self.profile.path = path;
+                     }
++                    self.draw_game_bezel();
+                 }
+                 Draw::Shot { tex } => {
+                     self.draw_sprites(&items[from..i]);
+@@ -885,6 +926,31 @@ impl Compositor {
+         self.draw_sprites(&items[from..]);
+     }
+ 
++    /// The console's bezel over the game, as the GL compositor draws it.
++    ///
++    /// Only on the canvas path: a menu is up, the canvas covers the panel, and
++    /// the surround -- where the bezel is otherwise painted once and left --
++    /// is not in view. Those frames are a menu's, not a game's 60 a second.
++    fn draw_game_bezel(&mut self) {
++        let Some(img) = self.game_bezel.and_then(|id| self.take_image(id)) else {
++            return;
++        };
++        let (x, y, w, h) = self.game.rect_of(self.game.base);
++        raster::blit(
++            &mut self.canvas,
++            &img,
++            x,
++            y,
++            w,
++            h,
++            raster::to_storage([1.0, 1.0, 1.0, 1.0]),
++            &mut self.scratch,
++        );
++        if let Some(id) = self.game_bezel {
++            self.put_image(id, img);
++        }
++    }
++
+     fn take_image(&mut self, id: TexId) -> Option<Image> {
+         self.textures.get_mut(id.raw())?.take().map(|t: Tex| t.img)
+     }
+@@ -1176,6 +1242,7 @@ impl Compositor {
+             return;
+         }
+         self.bezel_shown = shown;
++        self.surround = None;
+         // The surround is painted only when the output rect moves, so without
+         // this the answer that was on the panel stays there -- the shell would
+         // survive into the next Game Boy game until something else happened to
+@@ -1188,6 +1255,8 @@ impl Compositor {
+             return;
+         }
+         self.game_bezel = tex;
++        self.game.crop = tex.is_some();
++        self.surround = None;
+         // Painted with the surround rather than per frame, so the panel has to
+         // be told to repaint: see `output_frame`.
+         self.clear_left = PAGES;
+@@ -1195,8 +1264,64 @@ impl Compositor {
+ 
+     pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
+         // Stored top-down, unlike the GL path which pre-flips for its FBO.
+-        // Unused until a 4:3 panel is supported; see the module note.
+         self.bezel = Some(Image::from_rgba(w, h, rgba));
++        self.surround = None;
++    }
++
++    /// The panel-sized image the surround is painted from: the Advance SP
++    /// shell, with the console's own bezel composited into it at the frame the
++    /// picture sits in.
++    ///
++    /// Built here rather than drawn per frame, which is the whole reason a
++    /// game bezel is affordable on this device. Upstream draws its bezel over
++    /// the game every frame; here the game pass is cropped to the picture
++    /// itself when a bezel is shown (`Game::crop`), so the band around it is
++    /// written by the surround and nothing redraws it until the rect moves.
++    ///
++    /// The bezel is placed at the picture's natural frame -- `PICTURE`,
++    /// centred -- not at the frame the power-on animation is passing through.
++    /// The animation is a few hundred ms and the surround is not repainted
++    /// during it.
++    fn surround(&mut self, size: (u32, u32)) -> Option<&Image> {
++        if self.surround.as_ref().is_some_and(|s| (s.w, s.h) == size) {
++            return self.surround.as_ref();
++        }
++        let shell = self
++            .bezel
++            .as_ref()
++            .filter(|_| self.bezel_shown)
++            .filter(|b| (b.w, b.h) == size);
++        let game = self
++            .game_bezel
++            .and_then(|id| self.textures.get(id.raw()))
++            .and_then(|t| t.as_ref());
++        if shell.is_none() && game.is_none() {
++            return None;
++        }
++        let mut out = match shell {
++            Some(b) => b.clone(),
++            None => {
++                let mut black = Image::new(size.0, size.1);
++                black.fill([0, 0, 0, 255]);
++                black
++            }
++        };
++        if let Some(t) = game {
++            let (x, y, w, h) = screen_rect(1.0, crate::power::PICTURE);
++            let mut scratch = raster::Scratch::default();
++            raster::blit(
++                &mut out,
++                &t.img,
++                x,
++                y,
++                w,
++                h,
++                raster::to_storage([1.0, 1.0, 1.0, 1.0]),
++                &mut scratch,
++            );
++        }
++        self.surround = Some(out);
++        self.surround.as_ref()
+     }
+ 
+     /// Scale the canvas onto the panel and hand it to the framebuffer.
+@@ -1241,7 +1366,7 @@ impl Compositor {
+         // The game's own rect when it goes straight out, since that is what
+         // actually gets written; otherwise the canvas blit's.
+         let rect = if self.direct_game {
+-            let (gx, gy, gw, gh) = screen_rect(self.game.power, self.game.base);
++            let (gx, gy, gw, gh) = self.game.rect();
+             (x + gx as i32, y + gy as i32, gw as i32, gh as i32)
+         } else {
+             (x, y, w, h)
+@@ -1262,11 +1387,7 @@ impl Compositor {
+             // Only when it is exactly panel-sized. `bezel_face` scales the art
+             // to the panel before it gets here, so a mismatch means something
+             // changed underneath us and black is the safe answer.
+-            let bezel = self
+-                .bezel
+-                .as_ref()
+-                .filter(|_| self.bezel_shown)
+-                .filter(|b| b.w == target.w && b.h == target.h);
++            let bezel = self.surround((target.w, target.h));
+             let bw = bezel.map_or(0, |b| b.w as usize * 4);
+             for py in 0..ph {
+                 // SAFETY: one row inside the mapping.
+@@ -1803,3 +1924,80 @@ mod direct_path_tests {
+         let _ = Dest::Canvas(&mut canvas);
+     }
+ }
++
++#[cfg(test)]
++mod game_bezel_tests {
++    use super::Game;
++    use crate::pipeline::{SRC_H, SRC_W};
++    use crate::surface::{OUT_H, OUT_W};
++
++    /// The transparent hole in `assets/bezel_gb.png` and `assets/bezel_gbc.png`,
++    /// measured off both files: 478x429 at (121, 27) of 720x480. The art is
++    /// drawn at the picture's frame, so the hole lands at the frame's offset
++    /// in the panel plus this.
++    const HOLE: (f32, f32, f32, f32) = (121.0, 27.0, 478.0, 429.0);
++
++    /// A Game Boy picture inside the 240x160 texture, as `App::picture_rect`
++    /// gives it: bounds, not a rect.
++    fn gb() -> Game {
++        let mut g = Game::new();
++        let (w, h) = (160.0, 144.0);
++        let (sw, sh) = (SRC_W as f32, SRC_H as f32);
++        let (x, y) = ((sw - w) / 2.0, (sh - h) / 2.0);
++        g.pic = [x / sw, y / sh, (x + w) / sw, (y + h) / sh];
++        g.crop = true;
++        g
++    }
++
++    /// Cropped, the game pass draws the 160x144 picture at 3x and no paper:
++    /// the band the bezel covers is left for the surround to paint.
++    #[test]
++    fn a_cropped_game_draws_the_picture_alone() {
++        let (x, y, w, h) = gb().rect();
++        // Within a float's worth of 480x432: the crop is a ratio of the
++        // texture, not a count of pixels.
++        assert!(
++            (w - 480.0).abs() < 0.01 && (h - 432.0).abs() < 0.01,
++            "{w}x{h}"
++        );
++        assert!(
++            (x - (OUT_W as f32 - w) / 2.0).abs() < 0.01
++                && (y - (OUT_H as f32 - h) / 2.0).abs() < 0.01,
++            "at {x},{y}"
++        );
++    }
++
++    /// And it lands in the hole. Nothing lines these two up at run time -- the
++    /// art is one file and the crop is arithmetic -- so a change to either that
++    /// leaves paper showing, or clips the picture, is caught here.
++    #[test]
++    fn the_picture_fills_the_hole_in_the_art() {
++        let g = gb();
++        let (px, py, pw, ph) = g.rect();
++        let (fx, fy, _, _) = g.rect_of(g.base);
++        let (hx, hy, hw, hh) = (fx + HOLE.0, fy + HOLE.1, HOLE.2, HOLE.3);
++        // The picture covers the hole, by a few pixels of the art's own dark
++        // inner edge at most: never short of it, which would show paper.
++        for (edge, got, want) in [
++            ("left", px, hx),
++            ("top", py, hy),
++            ("right", hx + hw, px + pw),
++            ("bottom", hy + hh, py + ph),
++        ] {
++            let over = want - got;
++            assert!(
++                (0.0..=4.0).contains(&over),
++                "{edge}: picture {px},{py} {pw}x{ph} against hole {hx},{hy} {hw}x{hh}"
++            );
++        }
++    }
++
++    /// The whole frame is still what a still is drawn at, and what the bezel
++    /// itself is drawn at: 720x480, paper included.
++    #[test]
++    fn the_frame_keeps_its_own_size() {
++        let g = gb();
++        let (_, _, w, h) = g.rect_of(g.base);
++        assert_eq!((w, h), (crate::power::PICTURE[0], crate::power::PICTURE[1]));
++    }
++}
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+index ab1d54f..2b2107e 100644
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -19,6 +19,7 @@
+ /// the single biggest saving in the backend. Textures are converted once when
+ /// they are created rather than on every blit, and `Compositor::read_frame`
+ /// converts back, since callers expect RGBA as the GL path returns.
++#[derive(Clone)]
+ pub struct Image {
+     pub w: u32,
+     pub h: u32,
+diff --git a/crates/slot-ui/src/backdrop.rs b/crates/slot-ui/src/backdrop.rs
+index 7fd980a..ef0c1ef 100644
+--- a/crates/slot-ui/src/backdrop.rs
++++ b/crates/slot-ui/src/backdrop.rs
+@@ -1,7 +1,7 @@
+ use std::path::Path;
+ use std::sync::OnceLock;
+ 
+-use slot_gfx::{Canvas, Draw, TexId, OUT_H, OUT_W};
++use slot_gfx::{Canvas, Draw, TexId, OUT_H, OUT_W, PICTURE};
+ 
+ use crate::art;
+ 
+@@ -20,13 +20,19 @@ pub fn bezel_face(path: &Path, w: u32, h: u32) -> Option<Vec<u8>> {
+     art::cover(path, w, h)
+ }
+ 
++/// A console's own bezel is the size of the *picture's* frame, not of the
++/// canvas. Upstream's two are the same 720x480; here the canvas is the
++/// 752x560 panel and the frame is still 720x480, and it is the frame the art
++/// is drawn around -- its hole has to land on the picture.
++pub const GAME_BEZEL: (u32, u32) = (PICTURE[0] as u32, PICTURE[1] as u32);
++
+ pub fn game_bezel_face(path: &Path) -> Option<Vec<u8>> {
+-    art::cover(path, OUT_W, OUT_H)
++    art::cover(path, GAME_BEZEL.0, GAME_BEZEL.1)
+ }
+ 
+ pub fn default_game_bezel_face(colour: bool) -> Option<Vec<u8>> {
+     let png = if colour { BEZEL_GBC_PNG } else { BEZEL_GB_PNG };
+-    art::cover_bytes(png, OUT_W, OUT_H)
++    art::cover_bytes(png, GAME_BEZEL.0, GAME_BEZEL.1)
+ }
+ 
+ /// The carousel ground, scaled to cover the whole screen, including behind the footer.
+diff --git a/crates/slot-ui/src/lib.rs b/crates/slot-ui/src/lib.rs
+index 8d625ef..fd61536 100644
+--- a/crates/slot-ui/src/lib.rs
++++ b/crates/slot-ui/src/lib.rs
+@@ -32,7 +32,7 @@ mod toast;
+ 
+ pub use backdrop::{
+     bezel_face, blur_background, default_background, default_game_bezel_face, draw_backdrop,
+-    draw_ground, game_bezel_face, wallpaper_face,
++    draw_ground, game_bezel_face, wallpaper_face, GAME_BEZEL,
+ };
+ pub use barcode::{code39, CODE39_NARROW, CODE39_WIDE};
+ pub use battery::{draw_gauge, BOLT_PX, GAUGE_H, GAUGE_W, WALL};
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 5188926..b780eb3 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -945,13 +945,14 @@ fn sync_game_bezel(app: &mut App, compositor: &mut Compositor, state: &mut Bezel
+                 })
+                 .and_then(|path| game_bezel_face(&path)),
+         };
++        let (bw, bh) = slot_ui::GAME_BEZEL;
+         let tex = rgba.map(|rgba| match state.tex {
+             Some(id) => {
+-                compositor.update_texture(id, OUT_W, OUT_H, &rgba);
++                compositor.update_texture(id, bw, bh, &rgba);
+                 id
+             }
+             None => {
+-                let id = compositor.create_texture(OUT_W, OUT_H, &rgba);
++                let id = compositor.create_texture(bw, bh, &rgba);
+                 state.tex = Some(id);
+                 id
+             }

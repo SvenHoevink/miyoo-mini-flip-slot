@@ -506,28 +506,87 @@ is square and fits the panel -- and was confirmed to fail on the broken version
 before being trusted. **When two numbers are multiplied downstream, test the
 product.**
 
+## The console's bezel sits at the picture's frame, not at the canvas
+
+Upstream's per-platform bezels (`assets/bezel_gb.png`, `bezel_gbc.png`, baked
+into `slot-ui`) are 720x480 with a transparent hole **478x429 at (121, 27)**,
+measured off both files. That hole is the 160x144 picture at 3x, where it sits
+inside the 240x160 texture: 480x432 at (120, 24), to within the art's own dark
+inner edge.
+
+Upstream makes the art canvas-sized, because its canvas *is* 720x480. Here the
+canvas is the 752x560 panel, so `art::cover`-ing the bezel to it put the hole
+39px out on every side. The port builds the faces at `PICTURE` -- the frame,
+720x480 -- and draws them there, which lines the hole up with the picture by
+construction: both are centred in the same canvas.
+
+It is drawn with the surround rather than over the game. The band the bezel
+covers is paper, and paper does not change between frames; only the picture
+does. So the game pass is cropped to the picture (`Game::crop`) and the bezel
+is composited into the panel-sized surround that `output_frame` paints when
+the output rect moves. In play it costs nothing per frame, where upstream's
+full-frame draw would be 345,600 pixels of blit on every one of them. The
+canvas path -- a menu is up, the canvas covers the panel, the surround is not
+in view -- still draws it per frame, as upstream does.
+
+`the_picture_fills_the_hole_in_the_art` pins the hole's numbers above against
+the crop's arithmetic. Nothing lines the two up at run time.
+
+Seen under qemu on 2026-10-15 for GB (mGBA's DMG boot logo in the hole, the SP
+lettering correctly absent) and for GBA (SP shell unchanged). Not yet on the
+handheld.
+
 ## Working on the patch series without breaking it
 
-Two traps, both paid for on 2026-10-15.
+**Replay the series as commits, not as files.** `git apply` was how this port
+rebased for a year, and it does not survive a real upstream move: the 2026-10-15
+bump was 94 commits and rewrote the canvas and layout the renderer patches sit
+on. What worked, and is the recipe for the next one:
 
-**One patch owns a file.** `task patch` decides a patch is already applied by
-reverse-checking it, so a *later* patch that rewrites lines an earlier one
-introduced makes the earlier one unreplayable. The symptom is misdirecting: the
-failure is reported against whichever file `git apply` reaches first, which was
-`device_app.rs does not apply` for a change that touched neither
-`device_app.rs` nor anything near it. Keep edits to a file in the patch that
-owns it -- `grep -l "+++ b/<path>" patches/*.patch` says which -- and split a
-change along file ownership if it has to. 0009 is split from 0002 for exactly
-this reason, and each header points at the other.
+```sh
+task unpatch
+cd upstream/slot && git fetch origin main
+git checkout -B port <pinned-sha>
+# one commit per patch, in patch order
+for p in ../../patches/*.patch; do
+  git apply "$p" && git add -A && git commit -q -F <message>
+done
+git rebase origin/main          # git's merge machinery, not git apply's
+```
 
-**Do not run `cargo fmt` on a whole package.** `cargo fmt -p slot` reformats
-every file in the package, including ones the port patches, and neither 0003
-nor 0005 is rustfmt-clean -- the *pinned* 1.96 rustfmt reformats them too, so
-this is not a host-toolchain mismatch. It silently made both stale. Format the
-files you edited, or regenerate the patches you disturbed; `for p in
-patches/*.patch; do git -C upstream/slot apply --reverse --check "$PWD/$p"; done`
-tells you which are stale, one line each, which is far clearer than what
-`task patch` reports.
+Conflicts then arrive one patch at a time with a base to merge against, and
+the result is testable at the tip before a single patch file is rewritten.
+Regenerate them from the branch afterwards: the message is the commit message,
+the body is `git format-patch -1 --stdout --no-signature`, and the two are
+joined with a blank line.
+
+Three things to keep right when you do:
+
+**Order the branch by dependency, then renumber nothing.** A patch's hunks are
+cut against the tree its predecessors leave, so 0010's test helper has to exist
+before 0010 uses it (it comes from 0008), and 0009 needs 0002's canvas. The
+first rebase came out in a different order and renumbering would have stranded
+every `patches/00NN` reference in these notes; cherry-picking the finished
+commits back into the original order cost one conflict and kept them all.
+
+**Run `cargo fmt` as part of each commit, not once at the end.** Formatting the
+tip reformats code that belongs to earlier patches, which lands their changes in
+the wrong patch file -- and rustfmt 1.96 does reformat several of these files.
+Cherry-pick, `cargo fmt --all`, `--amend`, next.
+
+**Keep the generated message clean.** Several patch files begin with prose and
+then a bare `--- a/path` with no `diff --git` line; taking "everything before
+the first `diff --git`" as the commit message swallows the whole diff into it,
+and the regenerated file is then a patch git calls corrupt at the line where
+the duplicate begins. Cut the message at the first `--- a/` too.
+
+**One patch no longer has to own a file.** `task patch` used to decide a patch
+was already applied by reverse-checking it, which a later patch editing the
+same lines makes false; 0013 edits a file 0002 creates, and 0002 then read as
+stale on a tree it had just patched. It now stamps `upstream/slot/.port-patches`
+with a hash of the patch set instead, so the question is whether *this* set is
+what is on the tree. A mismatch on a modified tree asks for `task unpatch`
+rather than re-applying over it.
 
 ## Panel orientation
 

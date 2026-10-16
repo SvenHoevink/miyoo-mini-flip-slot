@@ -14,10 +14,10 @@ would catch a recurrence. No behaviour change.
 Applies to upstream 94a35a0.
 
 diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
-index 9806492..9694732 100644
+index 3ede943..75ea7f8 100644
 --- a/crates/slot/src/app.rs
 +++ b/crates/slot/src/app.rs
-@@ -2509,7 +2509,15 @@ impl App {
+@@ -3732,7 +3732,15 @@ impl App {
      }
  
      fn flush_eject(&mut self, stem: &str) {
@@ -33,7 +33,7 @@ index 9806492..9694732 100644
          let (Some(root), Some(snapshot)) = (&self.root, &self.snapshot) else {
              return;
          };
-@@ -2517,16 +2525,25 @@ impl App {
+@@ -3740,16 +3748,25 @@ impl App {
              eprintln!("slot: eject: the core gave up no state");
              return;
          };

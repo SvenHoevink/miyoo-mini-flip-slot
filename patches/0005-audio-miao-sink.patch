@@ -1,8 +1,10 @@
+audio miao sink
+
 diff --git a/crates/slot/src/audio/alsa.rs b/crates/slot/src/audio/alsa.rs
-index b9d1a71..7fa2cb4 100644
+index 7d7af27..64956ac 100644
 --- a/crates/slot/src/audio/alsa.rs
 +++ b/crates/slot/src/audio/alsa.rs
-@@ -78,7 +78,28 @@ impl Alsa {
+@@ -79,7 +79,28 @@ impl Alsa {
          }
      }
  
@@ -32,7 +34,7 @@ index b9d1a71..7fa2cb4 100644
          let mut last = AudioError::NoDevice;
          for name in DEVICES {
              let Ok(cname) = CString::new(name) else {
-@@ -196,23 +217,30 @@ struct Playback {
+@@ -197,23 +218,30 @@ struct Playback {
      pcm: Option<*mut c_void>,
      rate: u32,
      failing: bool,
@@ -68,7 +70,7 @@ index b9d1a71..7fa2cb4 100644
      })
  }
  
-@@ -230,9 +258,16 @@ impl Playback {
+@@ -232,9 +260,16 @@ impl Playback {
                      eprintln!("slot: audio released after silence");
                  }
                  (None, true) => match self.alsa.open_pcm(self.rate) {
@@ -86,7 +88,7 @@ index b9d1a71..7fa2cb4 100644
                          self.failing = false;
                      }
                      Err(e) => {
-@@ -256,6 +291,9 @@ impl Playback {
+@@ -259,6 +294,9 @@ impl Playback {
      }
  
      fn write(&self, pcm: *mut c_void, buf: &[i16]) -> bool {
@@ -96,7 +98,7 @@ index b9d1a71..7fa2cb4 100644
          let mut written = 0;
          while written < PERIOD_FRAMES {
              let at = written * CHANNELS as usize;
-@@ -267,7 +305,39 @@ impl Playback {
+@@ -270,7 +308,39 @@ impl Playback {
                  )
              };
              if frames < 0 {
@@ -138,10 +140,10 @@ index b9d1a71..7fa2cb4 100644
                      return false;
 diff --git a/crates/slot/src/audio/miao.rs b/crates/slot/src/audio/miao.rs
 new file mode 100644
-index 0000000..7e73c86
+index 0000000..390d0d0
 --- /dev/null
 +++ b/crates/slot/src/audio/miao.rs
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,450 @@
 +//! Audio over SigmaStar's MI_AO, for devices whose ALSA will not play.
 +//!
 +//! The Miyoo Mini Flip's ALSA is a thin shim: it refuses the core's 32768 Hz,
@@ -214,7 +216,7 @@ index 0000000..7e73c86
 +                        ($n:literal) => {{
 +                            let s: Symbol<_> = unsafe { lib.get(concat!($n, "\0").as_bytes()) }
 +                                .map_err(|e| AudioError::Device(format!("{}: {e}", $n)))?;
-+                            unsafe { *s }
++                            *s
 +                        }};
 +                    }
 +                    let open = sym!("slotao_open");
@@ -261,9 +263,7 @@ index 0000000..7e73c86
 +    /// Whether the shim is present at all, so the caller can fall back to ALSA
 +    /// without the cost of starting a thread that is only going to fail.
 +    pub fn available() -> bool {
-+        LIB_NAMES
-+            .iter()
-+            .any(|n| unsafe { Library::new(n) }.is_ok())
++        LIB_NAMES.iter().any(|n| unsafe { Library::new(n) }.is_ok())
 +    }
 +
 +    fn stop(&mut self) {
@@ -595,24 +595,26 @@ index 0000000..7e73c86
 +    }
 +}
 diff --git a/crates/slot/src/audio/mod.rs b/crates/slot/src/audio/mod.rs
-index b841d5f..d393527 100644
+index 643dc36..182bea1 100644
 --- a/crates/slot/src/audio/mod.rs
 +++ b/crates/slot/src/audio/mod.rs
-@@ -1,4 +1,5 @@
+@@ -1,6 +1,7 @@
  mod alsa;
-+mod miao;
  #[cfg(feature = "host")]
  mod host;
++mod miao;
+ mod pacer;
  mod ring;
-@@ -9,6 +10,7 @@ mod stub;
- pub mod volume;
- 
+ mod sfx;
+@@ -12,6 +13,7 @@ pub mod volume;
  pub use alsa::AlsaSink;
-+pub use miao::MiAoSink;
  #[cfg(feature = "host")]
  pub use host::HostAudio;
++pub use miao::MiAoSink;
+ pub use pacer::Pacer;
  pub use ring::{ring_capacity, Ring};
-@@ -37,5 +39,10 @@ pub fn open_sink() -> Box<dyn AudioSink> {
+ pub use sfx::Sfx;
+@@ -39,5 +41,10 @@ pub fn open_sink() -> Box<dyn AudioSink> {
  
  #[cfg(not(feature = "host"))]
  pub fn open_sink() -> Box<dyn AudioSink> {
@@ -715,10 +717,10 @@ index 1114105..3db2fef 100644
      capacity_frames / 2
  }
 diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
-index d9b2e62..539cb15 100644
+index f36c889..250a62f 100644
 --- a/crates/slot/src/emu.rs
 +++ b/crates/slot/src/emu.rs
-@@ -32,6 +32,11 @@ const SNAPSHOT_EVERY: u32 = 2;
+@@ -33,6 +33,11 @@ const SNAPSHOT_EVERY: u32 = 2;
  
  const STALL: Duration = Duration::from_millis(25);
  
@@ -730,7 +732,7 @@ index d9b2e62..539cb15 100644
  const RATE_WINDOW: u32 = 300;
  
  const TRACE_EVERY: u64 = 300;
-@@ -186,7 +191,22 @@ impl EmuHandle {
+@@ -190,7 +195,22 @@ impl EmuHandle {
          let worker_link = link.clone();
          let join = std::thread::Builder::new()
              .name("slot-emu".into())
@@ -754,7 +756,7 @@ index d9b2e62..539cb15 100644
              .ok();
          if join.is_none() {
              shared
-@@ -800,7 +820,8 @@ impl Worker {
+@@ -848,7 +868,8 @@ impl Worker {
                      if crate::session::trace() && paced.is_multiple_of(TRACE_EVERY) {
                          let (dropped, starved) = (ring.overruns(), ring.underruns());
                          eprintln!(
@@ -764,7 +766,7 @@ index d9b2e62..539cb15 100644
                          );
                      }
                  }
-@@ -843,7 +864,28 @@ impl Worker {
+@@ -891,7 +912,28 @@ impl Worker {
              let now = Instant::now();
              match deadline.checked_duration_since(now) {
                  Some(wait) => std::thread::sleep(wait),
