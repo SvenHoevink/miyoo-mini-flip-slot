@@ -1,0 +1,284 @@
+keep the cart faces that are drawn, not eighteen
+
+A GBA cart was OOM-killed mid-game on the handheld (exit 137, signal 9, no
+core). slot was holding 22.1 MB of texture art at the time, and 7.2 MB of that
+was eighteen cart faces at 312x337 -- fourteen for the current shelf and the
+rest for the neighbouring shelves' visible spans -- on a device with about
+60 MB free.
+
+Upstream's FACE_AHEAD of 8 and FACE_KEEP of 12 are a GPU device's numbers: on
+a shelf of fourteen carts, 12 is all of them, and shed_faces goes on keeping
+them while a game is playing and no cart is on screen at all. Both become the
+shelf's own drawn span, `Shelf::on_screen`, and a neighbouring shelf keeps its
+selected cart rather than its whole span: nine faces where there were eighteen.
+
+Three was tried first -- the selected cart and one either side -- and was
+visibly too few within a minute of being on the handheld: the shelf draws
+three either side, so the rest were flat label-coloured rectangles. The drawn
+span is the smallest set with nothing missing on screen.
+
+The two have to move together. What `face_wants` asks for is what `shed_faces`
+has to keep, or the workers spend every frame building faces that are shed
+before they are drawn; upstream can want a span and keep 12 because 12 is the
+wider of the two, and here both are FACE_AHEAD.
+
+The cost is a neighbouring shelf: moving to one now builds its faces as they
+arrive, where upstream had them ready. That is a shelf change, not a scroll,
+and it is the cheaper of the two places to spend the latency.
+
+Upstream's three tests for this encoded the old numbers, so they are rewritten
+to the same assertions against the new ones rather than deleted.
+
+While a game is playing, nothing of the shelf is drawn, so nothing is
+asked for beyond the seated cart and nothing is kept beyond it either.
+That half was not in the first version of this patch and had to be, for a
+reason the instrument in 0011 caught mid-game on the handheld:
+
+    slot: faces: compose waited  100.4 ms for a cart face
+    slot: faces: compose waited 1524.4 ms for a cart face
+    Killed
+
+CartFaces::sync blocks the frame loop until every face it asked for is
+built, and the two face workers are the only hot threads in slot with no
+priority -- audio and input are -10, emu -8, these are 0 on two cores. So
+a face asked for behind a running core is a frame loop stopped for as long
+as the core lets it be, which was reported from the handheld as locking up.
+Launching a game is what asks for one: it reorders the Recents shelf.
+
+It also gives the 3.4 MB back for the duration of the game, which is where
+it is actually wanted.
+
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 4b4971e..8912c90 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -411,9 +411,6 @@ pub struct App {
+     state_writer: crate::state_writer::StateWriter,
+ }
+ 
+-const FACE_AHEAD: i32 = 8;
+-const FACE_KEEP: i32 = 12;
+-
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub struct FaceWant {
+     pub shelf: usize,
+@@ -1308,17 +1305,39 @@ impl App {
+ 
+     pub fn face_wants(&self) -> Vec<FaceWant> {
+         let here = self.shelf();
++        // Only the selected cart while a game is playing: enough for the eject
++        // animation to have art to move, and nothing built behind the core.
++        if self.playing_only() {
++            return here
++                .around(0)
++                .into_iter()
++                .filter(|i| here.face(*i).is_none())
++                .map(|index| FaceWant {
++                    shelf: self.shelf_at,
++                    index,
++                    on_screen: false,
++                })
++                .collect();
++        }
++        // The shelf's own drawn span, and nothing beyond it.
++        //
++        // Upstream asks for this span and keeps twelve either side, which on a
++        // shelf of fourteen carts is all of them -- eighteen faces resident at
++        // 312x337, 7.2 MB of the 22.1 MB of texture art, kept even while a game
++        // is playing and no cart is on screen. That is how a GBA cart came to be
++        // OOM-killed on this handheld.
++        //
++        // Keeping exactly what is drawn is the smallest set with nothing missing
++        // on screen. Three faces was tried first and was visibly too few: the
++        // carts past them draw as flat label-coloured rectangles, which is
++        // upstream's placeholder and looks it. What is wanted and what is kept
++        // have to stay the same set, or the workers spend every frame building
++        // faces that are shed before they are drawn.
+         let screen = here.on_screen();
+         let mut wants: Vec<(usize, usize)> = screen.iter().map(|i| (self.shelf_at, *i)).collect();
+         for at in self.neighbour_shelves() {
+-            wants.extend(self.shelves[at].1.on_screen().into_iter().map(|i| (at, i)));
++            wants.extend(self.shelves[at].1.around(0).into_iter().map(|i| (at, i)));
+         }
+-        wants.extend(
+-            here.around(FACE_AHEAD)
+-                .into_iter()
+-                .filter(|i| !screen.contains(i))
+-                .map(|i| (self.shelf_at, i)),
+-        );
+         wants
+             .into_iter()
+             .filter(|(at, i)| self.shelves[*at].1.face(*i).is_none())
+@@ -1344,12 +1363,20 @@ impl App {
+ 
+     pub fn shed_faces(&mut self) -> Vec<TexId> {
+         let neighbours = self.neighbour_shelves();
++        let playing = self.playing_only();
+         let mut shed = std::mem::take(&mut self.orphaned);
+         for (at, (_, shelf)) in self.shelves.iter_mut().enumerate() {
+-            let keep = if at == self.shelf_at {
+-                shelf.around(FACE_KEEP)
+-            } else if neighbours.contains(&at) {
++            // A neighbouring shelf keeps only its selected cart, not its whole
++            // drawn span: upstream holds `on_screen()` for each of the two
++            // neighbours so that moving between shelves is instant, which is
++            // another fourteen faces at this shelf's width. Moving to one now
++            // builds the rest as it arrives.
++            let keep = if at == self.shelf_at && playing {
++                shelf.around(0)
++            } else if at == self.shelf_at {
+                 shelf.on_screen()
++            } else if neighbours.contains(&at) {
++                shelf.around(0)
+             } else {
+                 Vec::new()
+             };
+@@ -1658,6 +1685,20 @@ impl App {
+         self.colour_correction_for(self.playing_platform())
+     }
+ 
++    /// Whether a game is on the screen, with no shelf behind it.
++    ///
++    /// Cart faces are neither wanted nor kept while this is true: nothing of
++    /// the shelf is drawn, the two face workers are the only hot threads with
++    /// no priority -- audio and input are -10, emu -8, these are 0 on two
++    /// cores -- and `CartFaces::sync` blocks the frame loop until what it
++    /// asked for is built. Measured on the handheld, mid-game, with the
++    /// instrument 0011 added: "compose waited 1524.4 ms for a cart face",
++    /// immediately before the OOM kill. Launching a game is what asks, since
++    /// it reorders the Recents shelf.
++    pub fn playing_only(&self) -> bool {
++        matches!(self.phase, Phase::Playing { .. })
++    }
++
+     pub fn playing_platform(&self) -> Platform {
+         self.seated_cart().map_or(self.platform, |c| c.platform)
+     }
+diff --git a/crates/slot/src/cart_faces.rs b/crates/slot/src/cart_faces.rs
+index ea0b3d5..34b06e4 100644
+--- a/crates/slot/src/cart_faces.rs
++++ b/crates/slot/src/cart_faces.rs
+@@ -66,10 +66,14 @@ impl CartFaces {
+             self.requeue(app, &wants);
+             self.asked = wants;
+         }
++        // Nothing on screen is waited for while a game is playing: `face_wants`
++        // marks nothing on-screen then, and this is the other half of it --
++        // the frame loop must not block on a worker that is being starved by
++        // the core. See `App::playing_only`.
+         let mut waiting: Vec<Key> = self
+             .asked
+             .iter()
+-            .filter(|w| w.on_screen)
++            .filter(|w| w.on_screen && !app.playing_only())
+             .map(|w| (w.shelf, w.index))
+             .collect();
+         while !waiting.is_empty() {
+diff --git a/crates/slot/tests/cart_faces.rs b/crates/slot/tests/cart_faces.rs
+index a88ed72..14bae87 100644
+--- a/crates/slot/tests/cart_faces.rs
++++ b/crates/slot/tests/cart_faces.rs
+@@ -22,15 +22,13 @@ fn library(gba: usize, gb: usize) -> App {
+     App::new(carts)
+ }
+ 
++/// Upstream asks for eight either side on top of the visible span; this port
++/// asks for the visible span and no more, because that is what it keeps.
+ #[test]
+ fn a_big_library_asks_only_for_the_carts_near_the_cursor() {
+     let app = library(500, 0);
+     let wants = app.face_wants();
+-    assert_eq!(
+-        wants.len(),
+-        17,
+-        "eight either side of the selected cart, and it"
+-    );
++    assert_eq!(wants.len(), 7, "the drawn span, and nothing beyond it");
+     let screen: Vec<usize> = wants
+         .iter()
+         .filter(|w| w.on_screen)
+@@ -38,11 +36,13 @@ fn a_big_library_asks_only_for_the_carts_near_the_cursor() {
+         .collect();
+     assert_eq!(screen, vec![0, 1, 499, 2, 498, 3, 497]);
+     assert!(
+-        wants[..7].iter().all(|w| w.on_screen),
+-        "an off-screen cart was asked for before an on-screen one"
++        wants.iter().all(|w| w.on_screen),
++        "nothing off-screen should be asked for"
+     );
+ }
+ 
++/// A neighbouring shelf is asked for last and only for its selected cart,
++/// where upstream asks for its whole visible span.
+ #[test]
+ fn the_neighbouring_shelf_is_asked_for_after_what_is_on_screen() {
+     let app = library(40, 30);
+@@ -50,8 +50,13 @@ fn the_neighbouring_shelf_is_asked_for_after_what_is_on_screen() {
+     let gba = wants[0].shelf;
+     assert!(wants[..7].iter().all(|w| w.shelf == gba && w.on_screen));
+     assert!(
+-        wants[7..14].iter().all(|w| w.shelf != gba && !w.on_screen),
+-        "the next shelf's on-screen carts are not queued right after this one's"
++        wants[7..].iter().all(|w| w.shelf != gba && !w.on_screen),
++        "the next shelf's carts are not queued after this shelf's"
++    );
++    assert_eq!(
++        wants[7..].len(),
++        1,
++        "a neighbouring shelf should cost one face, not a span"
+     );
+ }
+ 
+@@ -68,11 +73,50 @@ fn faces_far_from_the_cursor_are_shed_and_near_ones_kept() {
+     let mut app = library(500, 0);
+     let gba = app.face_wants()[0].shelf;
+     app.set_cart_face(gba, 0, TexId::from_raw(1));
+-    app.set_cart_face(gba, 12, TexId::from_raw(2));
+-    app.set_cart_face(gba, 13, TexId::from_raw(3));
++    app.set_cart_face(gba, 3, TexId::from_raw(2));
++    app.set_cart_face(gba, 4, TexId::from_raw(3));
+     app.set_cart_face(gba, 250, TexId::from_raw(4));
+     let mut shed = app.shed_faces();
+     shed.sort_by_key(|t| format!("{t:?}"));
++    // Kept: the drawn span, three either side. 4 is one past it, which
++    // upstream would have kept and this port sheds.
+     assert_eq!(shed, vec![TexId::from_raw(3), TexId::from_raw(4)]);
+     assert!(app.shed_faces().is_empty());
+ }
++
++mod common;
++
++/// The lockup this exists to prevent: mid-game, `compose` waited 1.5 seconds
++/// for a cart face on the handheld, because launching a game reorders the
++/// Recents shelf and the face workers are the only hot threads with no
++/// priority. Nothing of the shelf is drawn then, so nothing is asked for
++/// beyond the seated cart, and nothing is marked on-screen for `sync` to block
++/// the frame loop on.
++#[test]
++fn a_playing_game_asks_for_almost_nothing_and_blocks_on_none_of_it() {
++    let d = common::tmp_root_with_carts(&["Emerald", "Ruby", "Sapphire", "FireRed"]);
++    let mut app = common::app_playing_in(d.path(), "Emerald");
++    assert!(app.playing_only(), "the test did not reach Playing");
++
++    let wants = app.face_wants();
++    assert!(
++        wants.len() <= 1,
++        "a game is playing; {} faces were asked for",
++        wants.len()
++    );
++    assert!(
++        wants.iter().all(|w| !w.on_screen),
++        "nothing is on screen while a game is playing, so nothing may be waited for"
++    );
++
++    // And what is already held is shed down to the seated cart. The shelf
++    // index comes from the want rather than being assumed: shelf 0 is Recents.
++    let shelf = wants[0].shelf;
++    for i in 0..4 {
++        app.set_cart_face(shelf, i, TexId::from_raw(i + 1));
++    }
++    assert!(
++        app.shed_faces().len() >= 3,
++        "faces for carts that cannot be seen should not survive a launch"
++    );
++}

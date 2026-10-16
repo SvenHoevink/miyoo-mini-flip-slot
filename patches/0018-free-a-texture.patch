@@ -1,0 +1,284 @@
+free a texture, rather than parking it on a list to be recycled
+
+There was no way to give a texture's memory back. A shed one went onto
+CartFaces' free list and was reused by update_texture when something else
+wanted a texture, so everything freed today -- nine cart faces instead of
+eighteen, one while a game plays -- reduced how many were ever *created* and
+returned nothing to the system. That is why each fix moved the deadline
+instead of removing it.
+
+Measured on the handheld, which is what finally made the shape plain:
+
+    shelf, no core loaded   RSS 44 MB   anon 27 MB   heap 16.9 MB
+    playing, gpSP loaded    RSS 78.5    anon 61.4    heap 16.9
+
+78.5 MB of a device with 101 MB and about 20 MB of system. gpSP's 34 MB is
+mostly irreducible -- 8 MB of ROM and the JIT cache that makes it fast -- and
+slot's 44 MB is almost all art that is not on the screen while a game is.
+
+So: `free_texture` on both backends, emptied slots reused by the next create
+rather than growing the table, and two callers to start with. The shelf's two
+full-screen grounds and the user's wallpaper, 1.68 MB each, are handed back
+while a game is on the screen and rebuilt by the paths that built them. The
+cart faces shed on launch are freed for real rather than recycled, since in
+play nothing else is going to want them.
+
+Drawing with a freed id is a miss rather than a panic, which the frontend
+needs for the frame between freeing the art and rebuilding it, and there is a
+test for exactly that.
+
+The cost is a beat of plain background and placeholder carts on the way back
+to the shelf. Whether that is worth about 8 MB is a thing to look at on the
+handheld rather than argue about, which is where this is going next.
+
+diff --git a/crates/slot-gfx/src/draw.rs b/crates/slot-gfx/src/draw.rs
+index 059cd0e..bd8cd2e 100644
+--- a/crates/slot-gfx/src/draw.rs
++++ b/crates/slot-gfx/src/draw.rs
+@@ -124,8 +124,24 @@ impl Sprites {
+         self.push(w, h, rgba, gl::NEAREST)
+     }
+ 
++    /// Give a texture's memory back; the slot is reused by the next create.
++    /// The software backend's note says why this exists.
++    pub fn free_texture(&mut self, id: TexId) {
++        let Some(tex) = self.textures.get_mut(id.0) else {
++            return;
++        };
++        if *tex != 0 {
++            unsafe { gl::DeleteTextures(1, tex) };
++            *tex = 0;
++        }
++    }
++
+     fn push(&mut self, w: u32, h: u32, rgba: &[u8], filter: gl::types::GLenum) -> TexId {
+         let tex = crate::gl::texture(w, h, filter, gl::CLAMP_TO_EDGE, gl::RGBA, Some(rgba));
++        if let Some(id) = self.textures.iter().position(|t| *t == 0) {
++            self.textures[id] = tex;
++            return TexId(id);
++        }
+         self.textures.push(tex);
+         TexId(self.textures.len() - 1)
+     }
+diff --git a/crates/slot-gfx/src/fbo.rs b/crates/slot-gfx/src/fbo.rs
+index b4c49ec..304f03d 100644
+--- a/crates/slot-gfx/src/fbo.rs
++++ b/crates/slot-gfx/src/fbo.rs
+@@ -176,6 +176,11 @@ impl Compositor {
+         self.sprites.update_texture(id, w, h, rgba);
+     }
+ 
++    /// Give a texture's memory back; see the software backend's own note.
++    pub fn free_texture(&mut self, id: TexId) {
++        self.sprites.free_texture(id);
++    }
++
+     pub fn set_blue_light(&mut self, step: u8) {
+         self.gain = blue_light_gain(step);
+     }
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+index 5ea7492..2b89730 100644
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -1128,16 +1128,45 @@ impl Compositor {
+     }
+ 
+     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
+-        let id = self.textures.len();
++        let tex = Tex {
++            img: Image::from_rgba(w, h, rgba),
++        };
++        // An emptied slot is reused before the table grows: `free_texture`
++        // leaves holes, and a shelf that is rebuilt after a game would
++        // otherwise add a new slot for every face it had already had.
++        let id = match self.textures.iter().position(Option::is_none) {
++            Some(id) => {
++                self.textures[id] = Some(tex);
++                id
++            }
++            None => {
++                self.textures.push(Some(tex));
++                self.textures.len() - 1
++            }
++        };
+         if self.profiling {
+             report_alpha(id, w, h, rgba);
+         }
+-        self.textures.push(Some(Tex {
+-            img: Image::from_rgba(w, h, rgba),
+-        }));
+         TexId::from_raw(id)
+     }
+ 
++    /// Give a texture's memory back.
++    ///
++    /// There was no way to do this until the handheld ran out of memory: a
++    /// shed texture went on a free list and was recycled by `update_texture`,
++    /// so the bytes were held until something else happened to want a texture,
++    /// and nothing was ever returned to the system. On a device with 101 MB
++    /// and a frontend holding 22 MB of art beside a 34 MB emulator core, the
++    /// difference between recycling and freeing is whether a GBA cart runs.
++    ///
++    /// The id becomes invalid and the slot is reusable; drawing with it is a
++    /// miss, which `draw_sprites_inner` already tolerates.
++    pub fn free_texture(&mut self, id: TexId) {
++        if let Some(slot) = self.textures.get_mut(id.raw()) {
++            *slot = None;
++        }
++    }
++
+     /// Nearest and linear are the same here: everything is nearest-sampled.
+     /// The UI draws its faces at 1:1, so this costs nothing visible yet.
+     pub fn create_texture_nearest(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
+@@ -2001,3 +2030,70 @@ mod game_bezel_tests {
+         assert_eq!((w, h), (crate::power::PICTURE[0], crate::power::PICTURE[1]));
+     }
+ }
++
++#[cfg(test)]
++mod texture_table_tests {
++    use super::*;
++    use crate::surface::GfxError;
++
++    struct NoSurface;
++    impl Surface for NoSurface {
++        fn make_current(&mut self) -> Result<(), GfxError> {
++            Ok(())
++        }
++        fn window_size(&self) -> (u32, u32) {
++            (OUT_W, OUT_H)
++        }
++        fn swap(&mut self) -> Result<(), GfxError> {
++            Ok(())
++        }
++        fn proc_address(&self, _name: &str) -> *const std::ffi::c_void {
++            std::ptr::null()
++        }
++    }
++
++    fn pixels(n: usize) -> Vec<u8> {
++        vec![0x7f; n * n * 4]
++    }
++
++    /// Freeing hands the bytes back, rather than parking them on a list to be
++    /// recycled later: that difference is why a GBA cart was being OOM-killed.
++    #[test]
++    fn a_freed_texture_gives_its_bytes_back_and_its_slot() {
++        let mut c = Compositor::new(&NoSurface).expect("compositor");
++        let big = c.create_texture(64, 64, &pixels(64));
++        let before = c.textures.len();
++        c.free_texture(big);
++        assert!(
++            c.textures[big.raw()].is_none(),
++            "the texture is still holding its image"
++        );
++
++        // And the hole is reused rather than the table growing.
++        let next = c.create_texture(8, 8, &pixels(8));
++        assert_eq!(
++            next.raw(),
++            big.raw(),
++            "a new texture did not reuse the hole"
++        );
++        assert_eq!(c.textures.len(), before, "the table grew past the hole");
++    }
++
++    /// Drawing with a freed id is a miss, not a panic: the frontend can hold a
++    /// stale id for a frame between freeing the shelf's art and rebuilding it.
++    #[test]
++    fn drawing_a_freed_texture_is_a_miss() {
++        let mut c = Compositor::new(&NoSurface).expect("compositor");
++        let tex = c.create_texture(16, 16, &pixels(16));
++        c.free_texture(tex);
++        c.begin_frame(Layout::Framed);
++        c.draw_list(&[Draw::Tex {
++            x: 0.0,
++            y: 0.0,
++            w: 16.0,
++            h: 16.0,
++            tex,
++            alpha: 1.0,
++        }]);
++    }
++}
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 8912c90..7d260a1 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -1189,6 +1189,30 @@ impl App {
+         }
+     }
+ 
++    /// Hand back the shelf's own art while a game is on the screen, and say
++    /// what to free.
++    ///
++    /// None of this is drawn in play: two full-screen grounds at 752x560 and
++    /// the user's wallpaper, 1.68 MB each. Measured on the handheld, slot held
++    /// 44 MB before a core was loaded and 78.5 MB with gpSP in -- 61 MB of it
++    /// anonymous -- against about 80 MB a device with 101 MB and a system to
++    /// run can give. Everything else tried today freed two or three megabytes
++    /// into a gap of fifteen.
++    ///
++    /// They come back by the path that built them: `upload_ground` runs again
++    /// and `sync_wallpaper` sees its own state cleared. The cost is a beat of
++    /// plain background on the way back to the shelf.
++    pub fn take_shelf_art(&mut self) -> Vec<TexId> {
++        [self.ground.take(), self.blur.take(), self.wallpaper.take()]
++            .into_iter()
++            .flatten()
++            .collect()
++    }
++
++    pub fn has_ground(&self) -> bool {
++        self.ground.is_some()
++    }
++
+     pub fn set_ground(&mut self, face: TexId) {
+         self.ground = Some(face);
+     }
+diff --git a/crates/slot/src/cart_faces.rs b/crates/slot/src/cart_faces.rs
+index 34b06e4..70d823c 100644
+--- a/crates/slot/src/cart_faces.rs
++++ b/crates/slot/src/cart_faces.rs
+@@ -58,6 +58,16 @@ impl CartFaces {
+ 
+     pub fn sync(&mut self, app: &mut App, compositor: &mut Compositor) {
+         self.free.extend(app.shed_faces());
++        // The free list is a recycling bin, not a release: a shed face is held
++        // until something else happens to want a texture. That is the right
++        // trade on the shelf, where another face is wanted a moment later, and
++        // the wrong one in play, where nothing is -- and where the memory is
++        // the difference between a GBA cart running and being OOM-killed.
++        if app.playing_only() {
++            for tex in self.free.drain(..) {
++                compositor.free_texture(tex);
++            }
++        }
+         while let Ok((key, face, interior)) = self.built.try_recv() {
+             self.place(app, compositor, key, face, interior);
+         }
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index f519f3e..5c04070 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -548,6 +548,20 @@ impl Frontend {
+         sync_about(self.session.app_mut(), compositor, &mut self.about);
+         sync_quick_clock(self.session.app_mut(), compositor, &mut self.quick_clock);
+         sync_quick_palette(self.session.app_mut(), compositor, &mut self.quick_palette);
++        // The shelf's art is freed for as long as a game is on the screen, and
++        // rebuilt on the way back: see `App::take_shelf_art`. This is where
++        // both halves meet, because `upload_ground` and `sync_wallpaper` are
++        // the two things that put it there.
++        if self.session.app().playing_only() {
++            if self.session.app().has_ground() {
++                for tex in self.session.app_mut().take_shelf_art() {
++                    compositor.free_texture(tex);
++                }
++                self.wallpaper = WallpaperSync::default();
++            }
++        } else if !self.session.app().has_ground() {
++            self.upload_ground(compositor);
++        }
+         sync_wallpaper(self.session.app_mut(), compositor, &mut self.wallpaper);
+         sync_game_bezel(self.session.app_mut(), compositor, &mut self.game_bezel);
+         compositor.set_game_bezel(self.session.app().shown_game_bezel());

@@ -29,19 +29,25 @@ usage() {
 }
 
 patches="upstream/slot/cores/gpsp"
-# -DSMALL_TRANSLATION_CACHE and -DROM_BUFFER_SIZE: gpSP's defaults assume a
-# device with memory to spare, and this one has about 60 MB free with Allium
-# resident. Its ROM translation cache is a 10 MB static array that becomes
-# resident as code is translated, which is the shape of the failure that made
-# this necessary: Kirby & the Amazing Mirror ran for 137 seconds and was then
-# OOM-killed (exit=137, signal 9), with slot holding 22 MB of texture art of
-# its own. Small takes the JIT caches to 2 MB + 384 KB.
+# -DROM_BUFFER_SIZE caps a loop that otherwise mallocs 1 MB at a time until it
+# fails -- "try to allocate up to 32 blocks of 1MB each" in init_gamepak_buffer,
+# regardless of how big the ROM is. 16 covers every GBA cart here without
+# swapping; a larger ROM swaps from the card, which gpSP is built to do and
+# which beats being killed.
 #
-# ROM_BUFFER_SIZE caps a loop that otherwise mallocs 1 MB at a time until it
-# fails -- "try to allocate up to 32 blocks of 1MB each", regardless of how big
-# the ROM is. 16 covers every GBA cart here without swapping; a larger ROM
-# swaps from the card, which gpSP is built to do and which beats being killed.
-device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=16"
+# -DSMALL_TRANSLATION_CACHE was here for a day and is deliberately not. gpSP
+# mmaps ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE at core start
+# -- 10.5 MB, becoming resident as code is translated -- and that was the shape
+# of a GBA cart being OOM-killed 137 seconds into play. Small takes it to
+# 2.4 MB and bought the memory back, but Kirby & the Amazing Mirror fills
+# 2 MB of translations and then thrashes: flush, re-translate, flush, reported
+# from the handheld as "a massive slowdown, it's chugging now".
+#
+# The memory came from elsewhere instead, which is the better place for it:
+# nine cart faces rather than eighteen (patches/0016) and a crash that no
+# longer leaves Allium resident alongside slot (card/.tmp_update/updater),
+# together worth far more than the 8 MB this was saving.
+device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DROM_BUFFER_SIZE=16"
 
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
 

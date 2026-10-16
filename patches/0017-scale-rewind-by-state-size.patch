@@ -1,0 +1,263 @@
+scale rewind by the size of a state, not a 1 GB device's numbers
+
+Reported from the handheld: a GBA cart "works for a little bit, then major
+slowdown, then crash", and the crash was the OOM killer. Neither gpSP's
+translation cache nor slot's cart faces turned out to be the cause, and both
+were chased first; this is.
+
+slot snapshots every two frames into a 20 MB ring. Each push copies the state,
+XORs it against the last and LZ4s the result, so for a GBA state of 425,984
+bytes that is thirty pushes a second and about 12 MB/s of memory traffic on a
+1.2 GHz Cortex-A7, beside the emulator it is recording. The ring then fills
+20 MB of a 101 MB device inside a minute. The slowdown and the kill are the
+same cause arriving at different speeds.
+
+Both now scale with the state, because a Game Boy state is some thirty times
+smaller and costs proportionally less -- which is why upstream's numbers are
+fine there and ruinous here:
+
+    GBA, 425,984 bytes: every 9 frames (6.7 a second), 6.5 MB, 2.7 MB/s
+    Game Boy, 24,576:   every 2 frames, upstream's, 2.0 MB, 0.7 MB/s
+
+The interval holds the byte rate near RATE; the budget holds a fixed number of
+states rather than a fixed number of megabytes, with a 2 MB floor because
+deltas of a small state compress to very little and 2 MB of them is a long way
+back. Past EVERY_MAX rewind would be too coarse to be worth having, and the
+answer there is to turn it off rather than stretch it further.
+
+The plan is made from the first state the core hands over, since nothing knows
+the size before that, and sent to the rewind thread as a budget message. The
+tests pin the rate rather than the constants: whatever the state size, the
+traffic stays near RATE.
+
+Dean chose this over capping the budget alone, which would have left the
+13 MB/s in place, and over disabling GBA rewind, which would have fixed it by
+removing it.
+
+diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
+index 250a62f..6f2608e 100644
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -576,6 +576,12 @@ impl Worker {
+         let mut out = Vec::new();
+         let mut gated = (false, false);
+         let rewind = RewindThread::spawn(REWIND_BYTES);
++        // Both of these are upstream's until the first state says how big a
++        // state is, and `rewind::plan`'s from then on: see the note there for
++        // why a GBA state cannot be recorded at a Game Boy's rate on this
++        // hardware.
++        let mut snapshot_every = SNAPSHOT_EVERY;
++        let mut planned = false;
+         let mut since_snapshot = 0;
+         let mut cost = FrameCost::seed();
+         let mut post_cost = PRESENT - FAST_TARGET;
+@@ -828,13 +834,25 @@ impl Worker {
+                 {
+                     since_snapshot = 0;
+                 }
+-                if since_snapshot >= SNAPSHOT_EVERY {
++                if since_snapshot >= snapshot_every {
+                     since_snapshot = 0;
+                     let state = match shown {
+                         true => Ok(std::mem::take(&mut runahead.state)),
+                         false => core.serialize(),
+                     };
+                     if let Ok(state) = state {
++                        if !planned {
++                            planned = true;
++                            let plan = crate::rewind::plan(state.len());
++                            snapshot_every = plan.every;
++                            rewind.set_budget(plan.budget);
++                            eprintln!(
++                                "slot: rewind: {} byte state, every {} frames, {} KB budget",
++                                state.len(),
++                                plan.every,
++                                plan.budget / 1024,
++                            );
++                        }
+                         rewind.push(state);
+                         self.shared
+                             .rewind_fill
+diff --git a/crates/slot/src/rewind.rs b/crates/slot/src/rewind.rs
+index d086b0e..a30607a 100644
+--- a/crates/slot/src/rewind.rs
++++ b/crates/slot/src/rewind.rs
+@@ -2,6 +2,58 @@ use std::collections::VecDeque;
+ 
+ pub const REWIND_BYTES: usize = 20 * 1024 * 1024;
+ 
++/// How often to snapshot, and how much to keep, for a state of this size.
++///
++/// Upstream snapshots every two frames into a 20 MB ring. For a GBA state of
++/// 425,984 bytes that is thirty pushes a second, and each push copies the
++/// state, XORs it against the last one and LZ4s the result: about 13 MB/s of
++/// memory traffic on a 1.2 GHz Cortex-A7, beside the emulator it is supposed
++/// to be recording. The ring then fills 20 MB of a 101 MB device in well under
++/// a minute. Both halves were reported from the handheld as the same symptom
++/// -- "works for a little bit, then major slowdown, then crash" -- and the
++/// crash was the OOM killer.
++///
++/// So both scale with the state. A Game Boy state is some thirty times smaller
++/// than a GBA one and costs proportionally less, which is why upstream's
++/// numbers are fine there and ruinous here: the interval holds the byte rate
++/// near `RATE`, and the budget holds a fixed number of states rather than a
++/// fixed number of megabytes.
++///
++///   - GBA, 425,984 bytes: every 9 frames (6.7 a second) and 6.5 MB
++///   - Game Boy, ~24 KB:   every 2 frames, upstream's, and the 2 MB floor
++///
++/// The floor matters more than it looks: deltas of a small state compress to
++/// very little, so 2 MB of them is a long way back.
++pub struct Plan {
++    pub budget: usize,
++    pub every: u32,
++}
++
++/// The byte rate the snapshot interval is chosen to stay under.
++const RATE: usize = 3 * 1024 * 1024;
++
++/// How many states' worth of deltas to keep, and the bounds on that.
++const STATES: usize = 16;
++const BUDGET_MIN: usize = 2 * 1024 * 1024;
++const BUDGET_MAX: usize = 8 * 1024 * 1024;
++
++/// The widest snapshot interval: past this, rewind is too coarse to be worth
++/// having and the answer is to turn it off rather than to stretch it further.
++const EVERY_MAX: u32 = 12;
++
++pub fn plan(state_len: usize) -> Plan {
++    let every = state_len
++        .saturating_mul(60)
++        .div_ceil(RATE.max(1))
++        .clamp(2, EVERY_MAX as usize) as u32;
++    Plan {
++        budget: state_len
++            .saturating_mul(STATES)
++            .clamp(BUDGET_MIN, BUDGET_MAX),
++        every,
++    }
++}
++
+ pub struct Rewind {
+     budget: usize,
+     cur: Option<Vec<u8>>,
+@@ -44,6 +96,18 @@ impl Rewind {
+         }
+     }
+ 
++    /// Shrink or grow the ring, dropping the oldest deltas if it no longer
++    /// fits. Growing keeps what is there.
++    pub fn set_budget(&mut self, bytes: usize) {
++        self.budget = bytes;
++        while self.bytes > self.budget {
++            match self.deltas.pop_front() {
++                Some(oldest) => self.bytes -= oldest.len(),
++                None => break,
++            }
++        }
++    }
++
+     pub fn pop(&mut self) -> Option<Vec<u8>> {
+         let cur = self.cur.take()?;
+         let Some(entry) = self.deltas.pop_back() else {
+@@ -91,6 +155,9 @@ pub struct RewindThread {
+ enum Msg {
+     Push(Vec<u8>),
+     Pop(std::sync::mpsc::SyncSender<Option<Vec<u8>>>),
++    /// Sent once, when the first state has shown how big a state is: see
++    /// `plan`. Until then the thread holds upstream's budget.
++    Budget(usize),
+ }
+ 
+ impl RewindThread {
+@@ -113,6 +180,10 @@ impl RewindThread {
+                             published.store(rewind.fill(), std::sync::atomic::Ordering::Relaxed);
+                             let _ = reply.send(out);
+                         }
++                        Msg::Budget(bytes) => {
++                            rewind.set_budget(bytes);
++                            published.store(rewind.fill(), std::sync::atomic::Ordering::Relaxed);
++                        }
+                     }
+                 }
+             })
+@@ -124,6 +195,10 @@ impl RewindThread {
+         let _ = self.tx.send(Msg::Push(state));
+     }
+ 
++    pub fn set_budget(&self, bytes: usize) {
++        let _ = self.tx.send(Msg::Budget(bytes));
++    }
++
+     pub fn pop(&self) -> Option<Vec<u8>> {
+         let (tx, rx) = std::sync::mpsc::sync_channel(0);
+         if self.tx.send(Msg::Pop(tx)).is_err() {
+@@ -136,3 +211,68 @@ impl RewindThread {
+         self.fill.load(std::sync::atomic::Ordering::Relaxed)
+     }
+ }
++
++#[cfg(test)]
++mod plan_tests {
++    use super::*;
++
++    /// The state sizes this runs into: a GBA state from mGBA, and a Game Boy
++    /// one, both as the cores report them.
++    const GBA: usize = 425_984;
++    const GB: usize = 24_576;
++
++    #[test]
++    fn a_gba_state_is_recorded_far_less_often_than_a_game_boy_one() {
++        let (gba, gb) = (plan(GBA), plan(GB));
++        assert_eq!(gb.every, 2, "a small state keeps upstream's interval");
++        assert!(
++            gba.every >= 8,
++            "a GBA state at every {} frames is {} MB/s of copy, xor and lz4",
++            gba.every,
++            GBA * 60 / gba.every as usize / 1024 / 1024
++        );
++    }
++
++    /// The rate is the point: whatever the state size, the traffic this makes
++    /// stays near RATE rather than scaling with the console.
++    #[test]
++    fn the_byte_rate_stays_bounded_across_state_sizes() {
++        for len in [GB, 64 * 1024, 128 * 1024, GBA, 1024 * 1024] {
++            let p = plan(len);
++            let rate = len * 60 / p.every as usize;
++            assert!(
++                rate <= RATE * 2,
++                "{len} byte state makes {rate} B/s at every {} frames",
++                p.every
++            );
++        }
++    }
++
++    #[test]
++    fn the_budget_holds_states_rather_than_megabytes() {
++        assert_eq!(plan(GB).budget, BUDGET_MIN, "a small state hits the floor");
++        assert!(plan(GBA).budget <= BUDGET_MAX);
++        assert!(
++            plan(GBA).budget >= GBA * 8,
++            "a GBA budget that holds fewer than eight states is not a rewind"
++        );
++        assert!(plan(usize::MAX).budget <= BUDGET_MAX, "no overflow");
++    }
++
++    /// Shrinking the ring under what it already holds drops the oldest, and
++    /// the accounting stays straight.
++    #[test]
++    fn a_smaller_budget_drops_the_oldest_deltas() {
++        let mut r = Rewind::new(BUDGET_MAX);
++        let mut state = vec![0u8; 4096];
++        for i in 0..32u8 {
++            state[i as usize % 4096] = i;
++            r.push(&state);
++        }
++        let before = r.bytes;
++        assert!(before > 0, "nothing was recorded");
++        r.set_budget(before / 2);
++        assert!(r.bytes <= before / 2, "the ring did not shrink");
++        assert!(r.pop().is_some(), "what is left is still usable");
++    }
++}
