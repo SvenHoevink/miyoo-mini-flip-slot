@@ -14,7 +14,18 @@
 # to have the sysfs paths they poke; see notes/hardware.md.
 SD="${SLOT_ROOT:-/mnt/SDCARD}"
 SYS="$SD/System"
+LOGS="$SD/Logs"
 export SLOT_ROOT="$SD"
+
+# Logs live in Logs/ since upstream moved them there, and upstream's
+# coresave.sh -- which this card still uses, through coresave-miyoo.sh --
+# writes the core and copies the log by that path. Anything left at the root
+# by an older build is moved rather than orphaned.
+mkdir -p "$LOGS" 2>/dev/null
+for f in slot.log slot.log.1 input-trace.log slot-launch.txt; do
+	[ -f "$SD/$f" ] && mv -f "$SD/$f" "$LOGS/$f"
+done
+[ -d "$SD/crash" ] && [ ! -e "$LOGS/crash" ] && mv "$SD/crash" "$LOGS/crash"
 
 # The Mini Flip's LCD is fitted upside down: a frame written top-down to
 # /dev/fb0 appears inverted on the panel, confirmed on the device.
@@ -32,6 +43,14 @@ export SLOT_FB_ROTATE=180
 # All three are off now that the pacing is settled, and they are not free: each
 # writes to the card from inside the frame loop, SLOT_TRACE_LATENCY once per
 # frame and SLOT_TRACE_INPUT once per event. Turn on only the one being read.
+#
+# Switched from the card rather than by editing this script, so a question
+# about frame times costs an empty file and a relaunch instead of a redeploy:
+#   touch Config/trace-latency.txt   -- per-frame latency, and the backend's
+#                                       per-stage profile every 60 frames
+#   touch Config/trace-input.txt     -- every input event and how it mapped
+[ -f "$SD/Config/trace-latency.txt" ] && export SLOT_TRACE_LATENCY=1
+[ -f "$SD/Config/trace-input.txt" ] && export SLOT_TRACE_INPUT=1
 #
 # Two more that change behaviour rather than reporting it:
 #   SLOT_FB_VSYNC=1       block in the page flip until the panel latches; off
@@ -83,7 +102,7 @@ if [ -f "$guard" ]; then
 	sed -i -e 's/^cart=.*/cart=/' -e 's/^cart_platform=.*/cart_platform=/' \
 		"$SD/Config/slot.state" 2>/dev/null
 	rm -f "$guard"
-	echo "slot: last launch did not survive; unseated the cart" >> "$SD/slot-launch.txt"
+	echo "slot: last launch did not survive; unseated the cart" >> "$LOGS/slot-launch.txt"
 fi
 : > "$guard"
 sync
@@ -92,7 +111,7 @@ sync
 # only costs starting at the shelf.
 ( sleep 25; rm -f "$guard" ) &
 
-[ -f "$SD/slot.log" ] && mv -f "$SD/slot.log" "$SD/slot.log.1"
+[ -f "$LOGS/slot.log" ] && mv -f "$LOGS/slot.log" "$LOGS/slot.log.1"
 
 # NOTE: this used to stop Allium's daemon for the session, because alliumd owns
 # the MENU button globally and draws a hotkeys overlay over the running game,
@@ -106,20 +125,21 @@ sync
 # Crash handling. slot's own handler prints the faulting pc and lr to the log
 # (see patches/0001 for the armv7 register read); this adds the kernel side:
 # upstream's coresave.sh writes the core, the process maps and a copy of the
-# log into $SD/crash. Kept per-boot so a crash is still there after a restart.
-mkdir -p "$SD/crash" 2>/dev/null
+# log into $SD/Logs/crash. Kept per-boot so a crash is still there after a
+# restart.
+mkdir -p "$LOGS/crash" 2>/dev/null
 echo "|/bin/sh $SYS/coresave-miyoo.sh %p %s %e %t" > /proc/sys/kernel/core_pattern 2>/dev/null
 ulimit -c unlimited 2>/dev/null
 
 # Not exec: the exit status is worth recording. An unexplained shutdown looks
 # the same as a clean exit from the outside, and this is what tells them apart.
 started="$(date '+%F %T' 2>/dev/null)"
-/lib/ld-linux-armhf.so.3 "$SYS/slot" > "$SD/slot.log" 2>&1
+/lib/ld-linux-armhf.so.3 "$SYS/slot" > "$LOGS/slot.log" 2>&1
 status=$?
-echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$SD/crash/exits.log"
+echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$LOGS/crash/exits.log"
 if [ "$status" -gt 128 ]; then
 	# 128 + signal: killed rather than returned. 139 is SIGSEGV, 134 SIGABRT.
-	echo "  killed by signal $((status - 128)); see crash/ and slot.log.1" >> "$SD/crash/exits.log"
-	cp -f "$SD/slot.log" "$SD/crash/slot-exit-$status.log" 2>/dev/null
+	echo "  killed by signal $((status - 128)); see Logs/crash and Logs/slot.log.1" >> "$LOGS/crash/exits.log"
+	cp -f "$LOGS/slot.log" "$LOGS/crash/slot-exit-$status.log" 2>/dev/null
 fi
 sync

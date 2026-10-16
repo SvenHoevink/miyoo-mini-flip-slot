@@ -5,7 +5,11 @@ The software backend writes XRGB8888 (B,G,R,X in memory). `task shot` points
 slot at a plain file with SLOT_FB_SIZE and this reads page 0 back out, so the
 rasteriser can be inspected without the handheld. Stdlib only, no Pillow.
 
-usage: fb2png.py <raw> <WxH> <page> <out.png>
+A page off the handheld's own /dev/fb0 comes out upside down -- the Mini
+Flip's panel is fitted that way and slot writes to suit the glass -- so pass
+`turn` to put it back the way a person saw it.
+
+usage: fb2png.py <raw> <WxH> <page> <out.png> [turn]
 """
 import struct
 import sys
@@ -13,10 +17,14 @@ import zlib
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
+    if len(sys.argv) not in (5, 6):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     path, size, page, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+    turn = int(sys.argv[5]) if len(sys.argv) == 6 else 0
+    if turn not in (0, 180):
+        print("turn is 0 or 180", file=sys.stderr)
+        return 2
     w, h = (int(v) for v in size.lower().split("x"))
 
     data = open(path, "rb").read()
@@ -29,8 +37,10 @@ def main() -> int:
     lit = 0
     for y in range(h):
         raw.append(0)  # PNG filter: none
-        row = data[off + y * w * 4 : off + (y + 1) * w * 4]
-        for x in range(w):
+        sy = h - 1 - y if turn else y
+        row = data[off + sy * w * 4 : off + (sy + 1) * w * 4]
+        xs = range(w - 1, -1, -1) if turn else range(w)
+        for x in xs:
             b, g, r, _ = row[x * 4 : x * 4 + 4]
             lit += bool(b or g or r)
             raw += bytes((r, g, b))

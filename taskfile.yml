@@ -654,20 +654,40 @@ tasks:
     deps: [device:check]
     cmds:
       - mkdir -p device-dump/crash
-      - curl -sS -o device-dump/crash/exits.log "{{.FTP}}/crash/exits.log" || true
-      - curl -sS -o device-dump/crash/cores.log "{{.FTP}}/crash/cores.log" || true
+      # Logs/ since upstream moved them there; the root is where an older build
+      # left them, and a card that has not been relaunched since still has them
+      # there.
+      - curl -sS -o device-dump/crash/exits.log "{{.FTP}}/Logs/crash/exits.log" || curl -sS -o device-dump/crash/exits.log "{{.FTP}}/crash/exits.log" || true
+      - curl -sS -o device-dump/crash/cores.log "{{.FTP}}/Logs/crash/cores.log" || curl -sS -o device-dump/crash/cores.log "{{.FTP}}/crash/cores.log" || true
       - 'echo "--- exits (status > 128 means a signal killed it) ---"'
       - tail -20 device-dump/crash/exits.log 2>/dev/null || echo "(none yet)"
       - 'echo "--- cores ---"'
       - tail -10 device-dump/crash/cores.log 2>/dev/null || echo "(none yet)"
+
+  device:shot:
+    desc: >-
+      Screenshot the handheld's panel over the network -- dd /dev/fb0, pull it
+      over FTP, turn it back the way a person saw it. The rule in CLAUDE.md is
+      to look at the screen before theorising about the UI; this is how
+    deps: [device:check]
+    vars:
+      OUT: '{{.OUT | default "target-miyoo/dev-shot.png"}}'
+    cmds:
+      # One page, not the whole mapping: the panel is triple-buffered and page
+      # 0 is what dd reaches first. The file lands on the card because telnet
+      # gives us no way to stream it back.
+      - sh tools/device-sh.sh {{.DEVICE}} 'dd if=/dev/fb0 of=/mnt/SDCARD/fb.raw bs=1M count=2 2>/dev/null; echo shot'
+      - curl -sS -o target-miyoo/dev-fb.raw "{{.FTP}}/fb.raw"
+      - sh tools/device-sh.sh {{.DEVICE}} 'rm -f /mnt/SDCARD/fb.raw'
+      - python3 -I tools/fb2png.py target-miyoo/dev-fb.raw 752x560 0 {{.OUT}} 180
 
   log:
     desc: Fetch slot.log (and any traces) off the handheld over FTP
     deps: [device:check]
     cmds:
       - mkdir -p device-dump
-      - curl -sS -o device-dump/slot.log "{{.FTP}}/slot.log"
-      - curl -sS -o device-dump/input-trace.log "{{.FTP}}/input-trace.log" || true
+      - curl -sS -o device-dump/slot.log "{{.FTP}}/Logs/slot.log" || curl -sS -o device-dump/slot.log "{{.FTP}}/slot.log"
+      - curl -sS -o device-dump/input-trace.log "{{.FTP}}/Logs/input-trace.log" || curl -sS -o device-dump/input-trace.log "{{.FTP}}/input-trace.log" || true
       - 'echo "--- stages ---"'
       - grep "soft:" device-dump/slot.log | tail -3 || true
       - 'echo "--- frame ---"'
