@@ -104,7 +104,29 @@ if [ -f "$ROOT"/.slot-boot ]; then
         # than retrying -- the same thing that had to be fixed for telnetd.
         setsid "$ROOT"/System/net-up.sh "$ROOT" "$ROOT"/slot-net.txt > /dev/null 2>&1 &
     fi
-    SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
+    # Relaunch slot rather than falling through to Allium when it dies. A
+    # crash used to cost about 20 MB on every launch afterwards, because
+    # alliumd starts below and stays resident: 60 MB free against 82 on a
+    # boot that goes straight to slot. On this handheld that is the margin
+    # between a GBA cart playing and being OOM-killed, and it showed up as
+    # "the first launch after a reboot lasts two minutes, the next eight
+    # seconds".
+    #
+    # Bounded at three quick deaths so a frontend that cannot start at all
+    # still lands on Allium instead of looping forever -- and a launch that
+    # lasted a while resets the count, since that death is a fresh story
+    # rather than a loop. launch_frontend.sh's own guard unseats the seated
+    # cart between attempts, so the second try comes up on the shelf.
+    slot_tries=0
+    while [ "$slot_tries" -lt 3 ]; do
+        slot_began=$(date +%s 2>/dev/null || echo 0)
+        SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
+        slot_tries=$((slot_tries + 1))
+        slot_ended=$(date +%s 2>/dev/null || echo 0)
+        if [ "$((slot_ended - slot_began))" -ge 60 ]; then
+            slot_tries=0
+        fi
+    done
 fi
 
 # run Allium

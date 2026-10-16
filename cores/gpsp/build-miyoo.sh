@@ -29,7 +29,19 @@ usage() {
 }
 
 patches="upstream/slot/cores/gpsp"
-device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+# -DSMALL_TRANSLATION_CACHE and -DROM_BUFFER_SIZE: gpSP's defaults assume a
+# device with memory to spare, and this one has about 60 MB free with Allium
+# resident. Its ROM translation cache is a 10 MB static array that becomes
+# resident as code is translated, which is the shape of the failure that made
+# this necessary: Kirby & the Amazing Mirror ran for 137 seconds and was then
+# OOM-killed (exit=137, signal 9), with slot holding 22 MB of texture art of
+# its own. Small takes the JIT caches to 2 MB + 384 KB.
+#
+# ROM_BUFFER_SIZE caps a loop that otherwise mallocs 1 MB at a time until it
+# fails -- "try to allocate up to 32 blocks of 1MB each", regardless of how big
+# the ROM is. 16 covers every GBA cart here without swapping; a larger ROM
+# swaps from the card, which gpSP is built to do and which beats being killed.
+device_cflags="-mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=16"
 
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
 

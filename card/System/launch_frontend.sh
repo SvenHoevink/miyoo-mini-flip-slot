@@ -109,7 +109,15 @@ sync
 # Long enough to be past loading a core and showing a frame, short enough that
 # a deliberate power-off mid-game does not usually trip it -- and tripping it
 # only costs starting at the shelf.
+#
+# The sleeper's pid is kept so it can be killed when slot returns. Backgrounded
+# and forgotten, it outlives the very crash the guard exists to catch: slot was
+# OOM-killed eight seconds into a GBA cart, this script exited, and the orphan
+# then cleared the guard anyway twenty-five seconds later. The next boot saw a
+# clean guard, re-seated the cart and died again -- a loop that needed FTP to
+# get out of, which is exactly what the guard was written to prevent.
 ( sleep 25; rm -f "$guard" ) &
+sleeper=$!
 
 [ -f "$LOGS/slot.log" ] && mv -f "$LOGS/slot.log" "$LOGS/slot.log.1"
 
@@ -136,6 +144,9 @@ ulimit -c unlimited 2>/dev/null
 started="$(date '+%F %T' 2>/dev/null)"
 /lib/ld-linux-armhf.so.3 "$SYS/slot" > "$LOGS/slot.log" 2>&1
 status=$?
+# Before anything else: if the sleeper is still pending, slot did not survive
+# its first seconds, and the guard has to stay for the next boot to find.
+kill "$sleeper" 2>/dev/null
 echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$LOGS/crash/exits.log"
 if [ "$status" -gt 128 ]; then
 	# 128 + signal: killed rather than returned. 139 is SIGSEGV, 134 SIGABRT.
