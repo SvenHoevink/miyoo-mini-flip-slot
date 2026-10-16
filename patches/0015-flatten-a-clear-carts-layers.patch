@@ -1,0 +1,262 @@
+composite a clear cart's layers once instead of three times a frame
+
+A clear cart is drawn as three sprites over the same rect: the game-coloured
+interior, the board, then the plastic and its label. On a device with no GPU
+that is three full-size blends of a 312x337 texture, two of which touch nearly
+every pixel. Measured on the handheld:
+
+    tex id 9  278x300  6.0 ms  72 ns/px -- skip 5082  copy 0     blend 78318
+    tex id 36 278x300  2.1 ms  25 ns/px -- skip 18214 copy 62516 blend 2670
+    tex id 6  278x300  4.2 ms  50 ns/px -- skip 5272  copy 35046 blend 43082
+
+13 ms for one cart, against 2 ms for a solid one, and three clear shells in
+view put the shelf at 30-41 ms a frame.
+
+The three layers never move relative to each other, so they are composited
+into the face once, on the worker thread that already builds it, and the shelf
+sends one sprite. After, on the same shelf:
+
+    sprites 25.6-37.3 ms over 18-20 draws  ->  15.4-16.0 over 14
+    whole frame ~30-41 ms, worst 44-78     ->  ~19-20 ms, worst 21-27
+    one clear cart 13 ms                   ->  1.9 ms, mostly a straight copy
+
+It also drops a full-size texture per clear cart from memory, which on a
+handheld with 101 MB is worth having on its own.
+
+The cost, which is a real difference and not a free win: a faded cart -- the
+ones either side of the selection -- now composites as one stack at that
+alpha, rather than layer over layer each at that alpha. Upstream's way darkens
+twice where the layers overlap and this does not. It is arguably the more
+correct of the two, and it is certainly not the same pixels, which is why the
+header says so and why it was looked at on the handheld before being kept.
+
+`a_clear_cart_flattens_to_what_its_three_layers_drew` composites the layers
+independently and checks the flattened face against them; the shelf keeps the
+three-draw path for any cart that still has an interior of its own.
+
+diff --git a/crates/slot-ui/src/cart.rs b/crates/slot-ui/src/cart.rs
+index 582cc4f..a461198 100644
+--- a/crates/slot-ui/src/cart.rs
++++ b/crates/slot-ui/src/cart.rs
+@@ -248,6 +248,68 @@ pub fn cart_backing(shell: Option<GbShell>) -> CartFace {
+     }
+ }
+ 
++/// The three layers a clear cart is drawn from, composited into one face:
++/// the coloured interior, the board, then the plastic and its label.
++///
++/// The shelf draws these as three sprites over the same rect. On a device with
++/// no GPU that is three full-size blends of a 312x337 texture, two of which
++/// touch nearly every pixel: measured on the handheld at 6.0, 2.1 and 4.2 ms,
++/// so **13 ms for one cart**, against 2 ms for a solid one. Three clear shells
++/// in view put the shelf at 30-41 ms a frame, which is also what made the
++/// settle spring ring (see `MAX_DT` in the frontend).
++///
++/// Flattening them costs a difference nobody asked for and should know about:
++/// a faded cart -- the ones either side of the selection -- now composites as
++/// one stack at that alpha rather than layer over layer, each at that alpha.
++/// Upstream's way darkens twice where the layers overlap; this does not. It is
++/// arguably the more correct of the two, and it is certainly not the same
++/// pixels, which is why it is said out loud here.
++///
++/// Returns the face untouched for a solid cart, and for any cart whose layers
++/// are not all one size -- then three draws is still the right answer.
++pub fn cart_stack(cart: &Cart, face: CartFace) -> CartFace {
++    if !is_clear(cart) {
++        return face;
++    }
++    let interior = cart_interior(cart);
++    let board = cart_backing(gb_shell_of(cart));
++    let size = (face.w, face.h);
++    if (interior.w, interior.h) != size || (board.w, board.h) != size {
++        return face;
++    }
++    let mut rgba = interior.rgba;
++    over(&mut rgba, &board.rgba);
++    over(&mut rgba, &face.rgba);
++    CartFace {
++        rgba,
++        w: face.w,
++        h: face.h,
++    }
++}
++
++/// src-over, straight alpha both sides, rounding as the rasteriser's blend
++/// does -- so a flattened stack is the same pixels the three draws made.
++fn over(dst: &mut [u8], src: &[u8]) {
++    let div255 = |v: u32| {
++        let v = v + 128;
++        (v + (v >> 8)) >> 8
++    };
++    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
++        let a = u32::from(s[3]);
++        if a == 0 {
++            continue;
++        }
++        if a == 255 {
++            d.copy_from_slice(s);
++            continue;
++        }
++        for c in 0..3 {
++            d[c] = div255(u32::from(s[c]) * a + u32::from(d[c]) * (255 - a)) as u8;
++        }
++        d[3] = (a + div255(u32::from(d[3]) * (255 - a))) as u8;
++    }
++}
++
+ pub fn label_size(cart: &Cart) -> (u32, u32) {
+     let (_, _, lw, lh) = spec(shape_of(cart)).label;
+     (lw, lh)
+diff --git a/crates/slot-ui/src/lib.rs b/crates/slot-ui/src/lib.rs
+index b541d6f..b1a0ec3 100644
+--- a/crates/slot-ui/src/lib.rs
++++ b/crates/slot-ui/src/lib.rs
+@@ -44,11 +44,11 @@ pub use board::{
+     SLIDE_SHARE, SLIDE_UP, SOCKET_H, SOCKET_U, SOCKET_V, SOCKET_W, TURN_PAD,
+ };
+ pub use cart::{
+-    cart_backing, cart_box, cart_face, cart_face_with, cart_interior, cart_shadow, clean_label,
+-    gb_cart_shadow, gb_label_panel, gb_shell_of, is_clear, label_colour, label_panel, label_size,
+-    label_tags, label_text, neutral_shell, seated_box, shows_interior, CartFace, CART_H, CART_W,
+-    GBC_LABEL_H, GBC_LABEL_W, GBC_LABEL_X, GBC_LABEL_Y, GB_CART_H, GB_CART_W, GB_LABEL_H,
+-    GB_LABEL_W, GB_LABEL_X, GB_LABEL_Y, LABEL_H, LABEL_W, LABEL_WELL, LABEL_X, LABEL_Y,
++    cart_backing, cart_box, cart_face, cart_face_with, cart_interior, cart_shadow, cart_stack,
++    clean_label, gb_cart_shadow, gb_label_panel, gb_shell_of, is_clear, label_colour, label_panel,
++    label_size, label_tags, label_text, neutral_shell, seated_box, shows_interior, CartFace,
++    CART_H, CART_W, GBC_LABEL_H, GBC_LABEL_W, GBC_LABEL_X, GBC_LABEL_Y, GB_CART_H, GB_CART_W,
++    GB_LABEL_H, GB_LABEL_W, GB_LABEL_X, GB_LABEL_Y, LABEL_H, LABEL_W, LABEL_WELL, LABEL_X, LABEL_Y,
+ };
+ pub use clock::{clock_label, date_time_text, hhmm, set_clock_hint_face, ClockPicker, Field};
+ pub use draw::{Canvas, Draw, Layout, TexId, OUT_H, OUT_W};
+diff --git a/crates/slot-ui/src/shelf.rs b/crates/slot-ui/src/shelf.rs
+index 7174897..7557427 100644
+--- a/crates/slot-ui/src/shelf.rs
++++ b/crates/slot-ui/src/shelf.rs
+@@ -493,7 +493,10 @@ impl Shelf {
+                 } else {
+                     Placed { x, y, w, h }
+                 };
+-                // Back plastic, then the board, then the front shell.
++                // Back plastic, then the board, then the front shell -- but
++                // only when there is an interior to put them under. A face
++                // built by `cart_stack` already carries both, and drawing them
++                // again would be two more full-size blends to no visible end.
+                 if let Some(tex) = self.interiors.get(i).copied().flatten() {
+                     out.push(Draw::Tex {
+                         x: bx,
+@@ -503,16 +506,16 @@ impl Shelf {
+                         tex,
+                         alpha: alpha * dim,
+                     });
+-                }
+-                if let Some(tex) = board {
+-                    out.push(Draw::Tex {
+-                        x: bx,
+-                        y: by,
+-                        w: bw,
+-                        h: bh,
+-                        tex,
+-                        alpha: alpha * dim,
+-                    });
++                    if let Some(tex) = board {
++                        out.push(Draw::Tex {
++                            x: bx,
++                            y: by,
++                            w: bw,
++                            h: bh,
++                            tex,
++                            alpha: alpha * dim,
++                        });
++                    }
+                 }
+             }
+             out.push(match self.face(i) {
+diff --git a/crates/slot-ui/tests/cart.rs b/crates/slot-ui/tests/cart.rs
+index 54d7d43..83d1442 100644
+--- a/crates/slot-ui/tests/cart.rs
++++ b/crates/slot-ui/tests/cart.rs
+@@ -774,3 +774,56 @@ fn a_gba_cart_is_backed_by_the_whole_picker_board() {
+     let mid = pak.rgba[(((pak.h / 2) * pak.w + pak.w / 2) * 4 + 3) as usize];
+     assert!(mid > 200, "the pak board is empty in the middle");
+ }
++
++/// The flattened stack is what the three draws made, so the shelf can send one
++/// sprite instead of three. Composited here independently of `cart_stack`'s own
++/// arithmetic, against the same layers in the same order.
++#[test]
++fn a_clear_cart_flattens_to_what_its_three_layers_drew() {
++    let d = tmp_root();
++    let mut rom = vec![0u8; 0x100];
++    rom[0xac..0xb0].copy_from_slice(b"U3IE");
++    std::fs::write(d.path().join("Games/GBA/Boktai.gba"), rom).expect("write rom");
++    let carts = scan(d.path()).unwrap();
++    let cart = carts.iter().find(|c| c.stem == "Boktai").expect("scanned");
++
++    let face = cart_face(cart);
++    let stack = slot_ui::cart_stack(cart, cart_face(cart));
++    assert_eq!((stack.w, stack.h), (face.w, face.h));
++
++    let interior = slot_ui::cart_interior(cart);
++    let board = slot_ui::cart_backing(slot_ui::gb_shell_of(cart));
++    let mut want = interior.rgba.clone();
++    for layer in [&board.rgba, &face.rgba] {
++        for (d, s) in want.chunks_exact_mut(4).zip(layer.chunks_exact(4)) {
++            let a = f32::from(s[3]) / 255.0;
++            for c in 0..3 {
++                d[c] = (f32::from(s[c]) * a + f32::from(d[c]) * (1.0 - a)).round() as u8;
++            }
++            d[3] = (f32::from(s[3]) + f32::from(d[3]) * (1.0 - a)).round() as u8;
++        }
++    }
++    let off = stack
++        .rgba
++        .iter()
++        .zip(&want)
++        .filter(|(a, b)| a.abs_diff(**b) > 1)
++        .count();
++    assert_eq!(
++        off, 0,
++        "{off} bytes differ from the three layers composited"
++    );
++}
++
++/// A solid cart has nothing under its plastic, and is handed back as it came.
++#[test]
++fn a_solid_cart_is_not_restacked() {
++    let d = tmp_root();
++    write_rom(&d, "Kururin.gba", "KURURIN");
++    let carts = scan(d.path()).unwrap();
++    let cart = carts.iter().find(|c| c.stem == "Kururin").expect("scanned");
++    assert_eq!(shell_for(cart).finish, Finish::Solid);
++    let face = cart_face(cart);
++    let stack = slot_ui::cart_stack(cart, cart_face(cart));
++    assert_eq!(stack.rgba, face.rgba);
++}
+diff --git a/crates/slot/src/cart_faces.rs b/crates/slot/src/cart_faces.rs
+index 3cdd5a0..ea0b3d5 100644
+--- a/crates/slot/src/cart_faces.rs
++++ b/crates/slot/src/cart_faces.rs
+@@ -6,7 +6,7 @@ use std::thread;
+ 
+ use slot_gfx::{Compositor, TexId};
+ use slot_store::Cart;
+-use slot_ui::{cart_face_with, cart_interior, shows_interior, CartFace};
++use slot_ui::{cart_face_with, cart_stack, CartFace};
+ 
+ use crate::app::{App, FaceWant};
+ use crate::label_cache::label_art;
+@@ -152,8 +152,12 @@ fn work(queue: &Shared, outbox: &Sender<Built>, root: &Path) {
+                 q = wake.wait(q).unwrap_or_else(|e| e.into_inner());
+             }
+         };
+-        let face = cart_face_with(&cart, label_art(root, &cart));
+-        let interior = shows_interior(&cart).then(|| cart_interior(&cart));
++        // The clear layers are composited into the face here, on the worker,
++        // rather than drawn over it three times a frame on the shelf. See
++        // `cart_stack`: it costs a difference in how a faded cart composites,
++        // and 9 ms a cart on this panel.
++        let face = cart_stack(&cart, cart_face_with(&cart, label_art(root, &cart)));
++        let interior: Option<CartFace> = None;
+         if outbox.send((key, face, interior)).is_err() {
+             return;
+         }
