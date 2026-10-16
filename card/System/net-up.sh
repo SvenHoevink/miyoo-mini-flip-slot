@@ -59,6 +59,23 @@ fi
 # wifi-on.sh insmods the driver, which would explain cold boots failing while
 # the same script works by hand from a menu later on.
 log "uptime at start: $(cut -d" " -f1 /proc/uptime 2>/dev/null)s"
+# Ask for a little CPU before anything else, best effort.
+#
+# Booting straight into slot puts this association next to slot's heaviest
+# moment -- core load, PNG decoding, cart faces on two workers -- on two
+# Cortex-A7s, and slot's threads are the ones with priority: emu at -8, audio
+# and input at -10, while wpa_supplicant, the driver insmod and udhcpc sit at
+# 0. The four-way handshake has timeouts, and a handshake dropped from cold is
+# what this card keeps showing; under Allium the same association happens
+# beside an idle launcher.
+#
+# renice on $$ rather than `nice` on the command: busybox nice does not run
+# the command at all when setpriority is refused, which in a boot script would
+# mean no network whenever this is not root. This way a refusal costs nothing
+# and the children -- wifi-on.sh, udhcpc, wpa_supplicant -- inherit it when it
+# works.
+renice -n -5 $$ > /dev/null 2>&1 || true
+
 log "wlan0 before wifi-on: $(ifconfig wlan0 > /dev/null 2>&1 && echo present || echo absent)"
 log "module before wifi-on: $(grep -c 8188fu /proc/modules 2>/dev/null)"
 log ""
@@ -169,4 +186,81 @@ log "telnet: $(pgrep telnetd > /dev/null 2>&1 && echo up || echo down)"
 log "ftp:    $(pgrep tcpsvd > /dev/null 2>&1 && echo up || echo down)"
 log ""
 log "on the computer:  export SLOT_DEVICE=$addr"
+sync
+
+# Stay on the network, rather than only getting onto it once.
+#
+# Everything above runs once and exits, which is fine until the radio drops --
+# and it drops whenever the handheld naps, which cost most of a working day in
+# "the device is off the network" when it was simply asleep and nothing
+# re-associated. Allium had no watchdog either; it just happened to be running
+# a menu that someone could pick "wifi on" from. When slot is the boot process
+# there is no such menu.
+#
+# A poll every WATCH_EVERY seconds: one wpa_cli call, nothing while the link is
+# up. On a drop it reassociates first, because that is what the radio usually
+# needs, and only brings the whole chip up again if that has failed twice --
+# the same lesson as the attempt loop above, where tearing the chip down on
+# every retry stopped a connection that was making progress.
+WATCH_EVERY=20
+WATCH_LOG_MAX=65536
+
+watch_log() {
+	# Bounded, because this runs for as long as the handheld is on.
+	[ "$(wc -c < "$out" 2>/dev/null || echo 0)" -gt "$WATCH_LOG_MAX" ] && : > "$out"
+	log "$@"
+}
+
+link_up() {
+	[ "$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')" = "COMPLETED" ] &&
+		[ -n "$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')" ]
+}
+
+# One watchdog, however many times this script is run: the "slot net" app and
+# the boot hook both call it, and two of these would fight over the radio.
+pidfile=/var/run/slot-netwatch.pid
+if [ -r "$pidfile" ] && [ -d "/proc/$(cat "$pidfile" 2>/dev/null)" ]; then
+	log "watchdog: already running as $(cat "$pidfile")"
+	exit 0
+fi
+
+watchdog() {
+	echo $$ > "$pidfile"
+	lost=0
+	while :; do
+		sleep "$WATCH_EVERY"
+		if link_up; then
+			if [ "$lost" -gt 0 ]; then
+				watch_log "watchdog: back at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s, address $(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')"
+				lost=0
+			fi
+			# The daemons are cheap to check and have been seen to die with a
+			# session; FTP reports through tcpsvd, not ftpd, which is spawned
+			# per connection.
+			pgrep telnetd > /dev/null 2>&1 || setsid telnetd -l sh > /dev/null 2>&1
+			pgrep tcpsvd > /dev/null 2>&1 || setsid tcpsvd -E 0.0.0.0 21 ftpd -w "$root" > /dev/null 2>&1 &
+			continue
+		fi
+		lost=$((lost + 1))
+		[ "$lost" = 1 ] && watch_log "watchdog: link lost at $(cut -d" " -f1 /proc/uptime 2>/dev/null)s"
+		if [ "$lost" -le 2 ]; then
+			wpa_cli -i wlan0 reassociate > /dev/null 2>&1
+		else
+			[ -x "$scripts/wifi-on.sh" ] && sh "$scripts/wifi-on.sh" > /dev/null 2>&1
+			watch_log "watchdog: reassociate did not take, brought the radio up again"
+		fi
+		# Give the supplicant a moment, then ask for a lease: wifi-on.sh runs
+		# udhcpc before the link is up, same as on a cold boot.
+		sleep 5
+		link_up ||
+			udhcpc -i wlan0 -n -q -t 5 -T 2 -s /etc/init.d/udhcpc.script > /dev/null 2>&1
+	done
+}
+
+# Backgrounded, not setsid'd: the boot hook already starts this script with
+# setsid, so the watchdog is orphaned to init when this exits and keeps going.
+# Run from the "slot net" app instead, it lives as long as Allium lets the app
+# live -- and there the menu is right there to run again.
+watchdog &
+log "watchdog: polling every ${WATCH_EVERY}s"
 sync
