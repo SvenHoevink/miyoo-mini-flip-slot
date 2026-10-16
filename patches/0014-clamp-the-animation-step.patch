@@ -1,0 +1,148 @@
+clamp the step the animations are integrated over
+
+The shelf settles on a critically damped spring stepped by the real frame
+time (`Shelf::update`, OMEGA = 16):
+
+    vel += (-2w*vel - w*w*(scroll - target)) * dt
+    scroll += vel * dt
+
+The velocity term is `vel * (1 - 2w*dt)`, which turns negative past
+dt = 1/2w = 31.25 ms: the velocity flips sign every frame and the carousel
+rings back and forth instead of settling. It was reported from the handheld as
+"it goes back and forth rapidly before it stops", and it was reported as
+happening on the Game Boy Color shelf and not the Game Boy one, which is the
+tell: a clear shell is the most expensive cart to draw and three of them in
+view is what pushed the frame over the line.
+
+Measured on the device the same evening, scrolling that run of three:
+
+    soft: clear 0.7 sprites 25.6-37.3 over 18 draws, out 3.0 ms/frame, worst 75.3
+
+30-41 ms a frame, either side of 31.25.
+
+Clamping the step restores what the spring is for rather than changing it:
+critical damping, no oscillation. An animation on a frame slower than the
+clamp runs slow rather than wrong, which is the right way round. 25 ms leaves
+the velocity term at 0.2 rather than near zero, so it damps hard instead of
+creeping up on the flip.
+
+OMEGA is public now because the clamp is derived from it, and the two tests
+check the derivation rather than the number.
+
+video_mode.rs is a one-line test import, not part of this: `OUT_W` was left
+unimported for the test module when 0009 dropped it from the file's own uses,
+and nothing compiled the test binary until this patch added a test to it.
+
+diff --git a/crates/slot-ui/src/lib.rs b/crates/slot-ui/src/lib.rs
+index fd61536..b541d6f 100644
+--- a/crates/slot-ui/src/lib.rs
++++ b/crates/slot-ui/src/lib.rs
+@@ -78,7 +78,7 @@ pub use quick_menu::{
+ };
+ pub use rebuild::{rebuild_count_face, rebuild_title_face, RebuildScreen};
+ pub use refusal::Refusal;
+-pub use shelf::{foot_y, repeat_gap, rest_y, Shelf, REPEAT_DELAY_MS, STAR_INK, STAR_SCALE};
++pub use shelf::{foot_y, repeat_gap, rest_y, Shelf, OMEGA, REPEAT_DELAY_MS, STAR_INK, STAR_SCALE};
+ pub use shell::{
+     gb_plastics, gb_table_shells, gba_plastics, gba_shell_for,
+     lookup_order_is_exact_then_family_then_default, shell_for, shell_presets, table_keys, Finish,
+diff --git a/crates/slot-ui/src/shelf.rs b/crates/slot-ui/src/shelf.rs
+index 31cc357..7174897 100644
+--- a/crates/slot-ui/src/shelf.rs
++++ b/crates/slot-ui/src/shelf.rs
+@@ -27,7 +27,9 @@ pub fn rest_y(h: f32) -> f32 {
+ pub fn foot_y(h: f32) -> f32 {
+     rest_y(h) + h
+ }
+-const OMEGA: f32 = 16.0;
++/// The settle spring's frequency. Public because the frontend's step clamp is
++/// derived from it: `Shelf::update` is stable only while `2 * OMEGA * dt < 1`.
++pub const OMEGA: f32 = 16.0;
+ const PART: f32 = 130.0;
+ 
+ const SLOTS: i32 = 3;
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index b780eb3..f519f3e 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -3,6 +3,26 @@ use std::time::{Duration, Instant};
+ use slot_gfx::{Compositor, Draw, ScreenEffect, TexId, OUT_H, OUT_W};
+ 
+ const PAPER: &[u8] = include_bytes!("../assets/paper.png");
++
++/// The longest step the animations are integrated over, whatever the frame
++/// took. 25 ms.
++///
++/// The shelf settles on a critically damped spring stepped by the real frame
++/// time (`Shelf::update`, OMEGA = 16): `vel += (-2w*vel - w*w*x) * dt`. The
++/// velocity term is `vel * (1 - 2w*dt)`, which turns **negative past
++/// dt = 1/2w = 31.25 ms** -- the velocity flips sign every frame and the
++/// carousel rings back and forth instead of settling. Upstream never meets
++/// that because it has a GPU; this panel's shelf was measured at 30-41 ms a
++/// frame with three clear Game Boy Color shells in view (2026-10-16, sprite
++/// stage 25.6-37.3 ms of it), and the ringing was reported from the handheld
++/// before it was explained.
++///
++/// Clamping restores what upstream intends rather than changing it: critical
++/// damping, no oscillation. The cost is that an animation runs slow rather
++/// than wrong on a frame slower than this, which is the right way round. 25 ms
++/// leaves the velocity term at 0.2 rather than near zero, so it damps hard
++/// instead of creeping up on the flip.
++const MAX_DT: f32 = 0.025;
+ use slot_input::{InputSource, Millis};
+ use slot_power::{Platform, Power};
+ use slot_store::{format_stamp, BezelPick, Platform as Console};
+@@ -683,7 +703,7 @@ impl Frontend {
+         self.session
+             .set_menu_dpad_display(input.menu_dpad_display());
+         self.session.feed(events, now);
+-        let dt = self.last.elapsed().as_secs_f32();
++        let dt = self.last.elapsed().as_secs_f32().min(MAX_DT);
+         self.last = Instant::now();
+         self.session.update(dt);
+     }
+@@ -1165,3 +1185,32 @@ fn upload_rgba(
+         }
+     }
+ }
++
++#[cfg(test)]
++mod step_clamp_tests {
++    use super::MAX_DT;
++
++    /// `Shelf::update`'s velocity step, which is the whole of the stability
++    /// question: `vel * (1 - 2w*dt)`. Positive and under one is a spring that
++    /// settles; negative is one that reverses every frame.
++    fn factor(dt: f32) -> f32 {
++        1.0 - 2.0 * slot_ui::OMEGA * dt
++    }
++
++    #[test]
++    fn the_clamp_keeps_the_settle_spring_damping() {
++        let k = factor(MAX_DT);
++        assert!(k > 0.0, "velocity reverses at the clamp: {k}");
++        assert!(k < 1.0, "the clamp stops damping: {k}");
++    }
++
++    /// The bound this exists for, named so the next person does not have to
++    /// re-derive it: the handheld's shelf was measured at 30-41 ms a frame
++    /// with three clear shells in view, and reversed.
++    #[test]
++    fn an_unclamped_slow_frame_is_what_reverses_it() {
++        assert!(factor(1.0 / (2.0 * slot_ui::OMEGA) + 0.001) < 0.0);
++        assert!(factor(0.035) < 0.0, "35 ms should reverse");
++        assert!(MAX_DT < 1.0 / (2.0 * slot_ui::OMEGA));
++    }
++}
+diff --git a/crates/slot/src/video_mode.rs b/crates/slot/src/video_mode.rs
+index fcea3f2..2029e7a 100644
+--- a/crates/slot/src/video_mode.rs
++++ b/crates/slot/src/video_mode.rs
+@@ -103,6 +103,7 @@ pub fn base_size(platform: Platform, mode: VideoMode) -> [f32; 2] {
+ #[cfg(test)]
+ mod fit_tests {
+     use super::*;
++    use slot_gfx::OUT_W;
+ 
+     /// What reaches the panel is the picture inside the texture, so that is
+     /// what these check rather than the base size itself.
