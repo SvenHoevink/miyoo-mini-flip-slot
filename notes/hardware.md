@@ -536,6 +536,69 @@ Seen under qemu on 2026-10-15 for GB (mGBA's DMG boot logo in the hole, the SP
 lettering correctly absent) and for GBA (SP shell unchanged). Not yet on the
 handheld.
 
+## Memory: slot is 44 MB before a core, 78 of ~80 with one (2026-10-16)
+
+A GBA cart kept being OOM-killed mid-game -- `exit=137`, signal 9, no core
+dumped. Measured with `/proc/<pid>/smaps` aggregated by mapping, which is the
+measurement that should have been taken first:
+
+| | RSS | `[anon]` | `[heap]` |
+|---|---|---|---|
+| shelf, no core loaded | 44 MB | 27 MB | 16.9 MB |
+| playing, gpSP loaded | **78.5 MB** | 61.4 MB | 16.9 MB |
+
+`MemAvailable` with slot up and a game running: **1.9 MB**. The device has
+101 MB and the system holds about 20, so the ceiling is near 80 and slot sits
+on it. Everything grows into that margin: the JIT cache as code is translated,
+the rewind ring as it fills, the gamepak buffers as the ROM is paged.
+
+Where it goes, from slot's own texture inventory (`SLOT_TRACE_LATENCY=1` logs
+every texture as it is created):
+
+| | |
+|---|---|
+| 18 cart faces, 312x337 | 7.2 MB |
+| 2 full-screen grounds, 752x560 | 3.4 MB |
+| 9 GBA-sized cart art, 360x212 | 2.6 MB |
+| 62 cart title faces, 242x24 | 1.4 MB |
+| 6 footer strips, 752x58 | 1.0 MB |
+| everything else | ~6 MB |
+| **slot's textures** | **22.1 MB over 300 textures** |
+
+gpSP's share is about 34 MB: 8 MB of ROM, a 10.5 MB JIT cache mmapped at core
+start (`map_jit_block(ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE)`),
+and gamepak buffers that `init_gamepak_buffer` mallocs 1 MB at a time "up to
+32 blocks" whatever the ROM's size -- capped to 16 in `cores/gpsp/build-miyoo.sh`.
+
+**There was no way to free a texture.** A shed one went onto `CartFaces`'s
+free list and was recycled by `update_texture`; nothing was returned to the
+system. Three separate savings were made before anyone noticed, and none of
+them moved RSS: they reduced how many textures were *created*. `free_texture`
+(`patches/0018`) is the fix, and it is what made a GBA cart playable.
+
+### What each thing was actually worth
+
+| | claimed | real |
+|---|---|---|
+| rewind scaled by state size (0017) | 13.5 MB + 9 MB/s of CPU | a cart that died in a minute lasted fourteen |
+| cart faces, drawn span only (0016) | 3.8 MB | fixed a 1.5 s lockup; freed nothing until 0018 |
+| grounds, wallpaper, faces freed in play (0018) | 8 MB | the one that made it playable |
+| gpSP cache cut to 2 MB | 8 MB | **reverted** -- Kirby thrashes on a 2 MB cache |
+
+The last line is the lesson: the JIT cache is what makes gpSP fast, and taking
+it is paying for memory with the thing the memory was for. Take the art
+instead, which is not on screen while a game is.
+
+### Rewind is a 1 GB device's feature
+
+`Rewind::push` copies the state, XORs it against the previous one and LZ4s the
+result, every `SNAPSHOT_EVERY` frames, into a `REWIND_BYTES` ring. Upstream's
+2 frames and 20 MB are fine for a 24 KB Game Boy state and ruinous for a
+425,984 byte GBA one: thirty pushes a second is ~12 MB/s of memory traffic
+beside the emulator, and the ring fills 20 MB of this device inside a minute.
+`rewind::plan` scales both with the state -- every 9 frames and 6.5 MB for
+GBA, upstream's numbers below about 150 KB.
+
 ## Working on the patch series without breaking it
 
 **Replay the series as commits, not as files.** `git apply` was how this port
