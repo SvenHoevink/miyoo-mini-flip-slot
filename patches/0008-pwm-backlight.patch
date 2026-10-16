@@ -21,13 +21,22 @@ the period the way the class backlight scales max_brightness would put step 1
 at 89 -- brighter than the device's own default -- and step 9 at 800. The
 ladder was stepped on the device and looked at; the values are what came back.
 
+The step table was re-floored after it was lived with. It began
+[0, 2, 3, 5, ...], from a first reading that called duty 2 the dimmest visible
+step -- true in a dark room, staring at the panel. In a lit one the handheld
+had been left on brightness 2 and booted to a screen that read as off, twice,
+before the report came back as "the bottom two brightness settings are off".
+The floor is duty 5 now, geometric from there to 112, which is nine usable
+steps instead of seven usable and two that lie. Upstream reached the same
+conclusion about its own ladder in #100.
+
 Applies on top of 0004, which also touches these two files.
 
 diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
-index 3010331..04dfc2a 100644
+index 3010331..f0e62da 100644
 --- a/crates/slot-power/src/device.rs
 +++ b/crates/slot-power/src/device.rs
-@@ -74,9 +74,45 @@ const EVIOCSFF: c_ulong = 0x4030_4580;
+@@ -74,9 +74,55 @@ const EVIOCSFF: c_ulong = 0x4030_4580;
  
  const DISPDBG_MAX: u32 = 255;
  
@@ -45,16 +54,26 @@ index 3010331..04dfc2a 100644
 +///
 +/// A table rather than a ratio of the period, because the response is steeply
 +/// non-linear and measured, on the device, by stepping a ladder and looking at
-+/// it: duty 1 is not visible at all, 2 is the dimmest step that is, the
-+/// firmware's own boot value of 6 is comfortable, 112 is as bright as anyone
-+/// wanted, and 400 -- half the period -- is "extra bright" and far past useful.
-+/// Scaling the period the way the `Class` backlight scales `max_brightness`
-+/// would put step 1 at 89, brighter than the device's own default, and step 9
-+/// at 800.
++/// it: the firmware's own boot value of 6 is comfortable, 112 is as bright as
++/// anyone wanted, and 400 -- half the period -- is "extra bright" and far past
++/// useful. Scaling the period the way the `Class` backlight scales
++/// `max_brightness` would put step 1 at 89, brighter than the device's own
++/// default, and step 9 at 800.
++///
++/// The bottom of the ladder was wrong until it was used. It began
++/// [0, 2, 3, 5, ...] on a first reading that called duty 2 "the dimmest step
++/// that is visible" -- true in a dark room, with the panel being stared at.
++/// In a lit one the handheld simply looked broken: it had been left on
++/// brightness 2 and booted to a screen that read as off, twice, before the
++/// report came back as "the bottom two brightness settings are off".
++///
++/// So the floor is duty 5 and the rungs are spaced geometrically from there to
++/// 112, which keeps nine usable steps instead of seven usable ones and two
++/// that lie. A setting that does nothing is worse than a short ladder.
 +///
 +/// Step 0 is off, matching every other backlight here: it is what
 +/// `Power::on_close` writes when the lid shuts.
-+const PWM_STEPS: [u32; 10] = [0, 2, 3, 5, 9, 15, 25, 41, 68, 112];
++const PWM_STEPS: [u32; 10] = [0, 5, 7, 11, 16, 23, 34, 49, 72, 112];
 +
  enum Backlight {
      Class(PathBuf),
@@ -73,7 +92,7 @@ index 3010331..04dfc2a 100644
  }
  
  enum Led {
-@@ -115,6 +151,7 @@ impl DevicePlatform {
+@@ -115,6 +161,7 @@ impl DevicePlatform {
                  dbg.join("param")
                      .is_file()
                      .then_some(Backlight::Dispdbg(dbg))
@@ -81,7 +100,7 @@ index 3010331..04dfc2a 100644
              }
          };
          let battery = first_dir(&sysfs.join("class/power_supply"), is_battery);
-@@ -131,6 +168,13 @@ impl DevicePlatform {
+@@ -131,6 +178,13 @@ impl DevicePlatform {
                  Led::Mono { dir, max }
              }
          });
@@ -95,7 +114,7 @@ index 3010331..04dfc2a 100644
          DevicePlatform {
              root,
              sysfs: sysfs.to_path_buf(),
-@@ -174,6 +218,7 @@ impl DevicePlatform {
+@@ -174,6 +228,7 @@ impl DevicePlatform {
          let backlight = match &self.backlight {
              Some(Backlight::Class(dir)) => leaf(dir),
              Some(Backlight::Dispdbg(_)) => "dispdbg".to_string(),
@@ -103,7 +122,7 @@ index 3010331..04dfc2a 100644
              None => "no backlight".to_string(),
          };
          let motor = match &self.motor {
-@@ -511,6 +556,21 @@ impl Platform for DevicePlatform {
+@@ -511,6 +566,21 @@ impl Platform for DevicePlatform {
                  write(dir.join("param"), value.to_string());
                  write(dir.join("start"), "1".to_string());
              }
@@ -126,7 +145,7 @@ index 3010331..04dfc2a 100644
      }
  
 diff --git a/crates/slot-power/tests/device.rs b/crates/slot-power/tests/device.rs
-index 13dfc57..f1deb63 100644
+index 13dfc57..6b4f4e9 100644
 --- a/crates/slot-power/tests/device.rs
 +++ b/crates/slot-power/tests/device.rs
 @@ -435,3 +435,76 @@ fn the_kernel_log_keeps_the_latest_card_lines() {
@@ -163,7 +182,7 @@ index 13dfc57..f1deb63 100644
 +    p.set_backlight(9);
 +    assert_eq!(duty(&d), 112);
 +    p.set_backlight(5);
-+    assert_eq!(duty(&d), 15);
++    assert_eq!(duty(&d), 23);
 +}
 +
 +#[test]

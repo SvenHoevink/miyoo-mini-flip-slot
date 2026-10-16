@@ -123,7 +123,7 @@ index 0066c43..a76d785 100644
          }
          unsafe {
 diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
-index 75ea7f8..e3d8f1c 100644
+index 3ede943..4b4971e 100644
 --- a/crates/slot/src/app.rs
 +++ b/crates/slot/src/app.rs
 @@ -1399,6 +1399,20 @@ impl App {

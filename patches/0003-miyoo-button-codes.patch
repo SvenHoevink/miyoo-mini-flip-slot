@@ -1,10 +1,40 @@
 miyoo button codes
 
+The hall sensor needs a lid cycle before it tells the truth. It reads 0 --
+closed -- from boot until the lid is actually opened once, whatever the lid is
+really doing, so slot's first poll believed the lid was shut on every boot,
+dozed, and left the handheld starting to a black screen that a POWER press
+woke. Reported as "still black on boot" and found by sampling hallvalue and
+the PWM duty together across a real lid cycle: 26 seconds of hallvalue=0 with
+the lid open and the panel lit, then correct readings for every cycle after.
+
+So nothing is believed until the sensor says open once. The cost is that the
+first close after a boot is not slot's to act on -- the kernel suspends a
+moment later and blanks the panel itself, which is what happens for that one
+cycle anyway -- and `lid_event` is pulled out of the poll so both halves can
+be tested without a device.
+
 diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
-index 3228cdb..544f03c 100644
+index 3228cdb..602f60f 100644
 --- a/crates/slot/src/input/device.rs
 +++ b/crates/slot/src/input/device.rs
-@@ -53,9 +53,20 @@ impl DeviceInput {
+@@ -21,6 +21,15 @@ pub struct DeviceInput {
+     pending: Arc<Mutex<Vec<RawEvent>>>,
+     hall: Option<PathBuf>,
+     lid_shut: Option<bool>,
++    /// Whether the hall sensor has been seen to report an open lid yet.
++    ///
++    /// It reads 0 -- closed -- from boot until the lid is actually opened
++    /// once, whatever the lid is really doing. slot's first poll therefore
++    /// believed the lid was shut on every boot, dozed, and left the handheld
++    /// starting to a black screen that a POWER press woke. Readings are
++    /// ignored until one of them says open, which is the first moment the
++    /// sensor is known to be telling the truth.
++    hall_armed: bool,
+     next_lid_poll: Millis,
+     menu_dpad_display: bool,
+ }
+@@ -53,9 +62,20 @@ impl DeviceInput {
              let queue = pending.clone();
              let name = node.display().to_string();
              let trace = trace.clone();
@@ -26,7 +56,15 @@ index 3228cdb..544f03c 100644
              if let Err(e) = spawned {
                  eprintln!("slot: input {name}: {e}");
              }
-@@ -94,7 +105,28 @@ fn quicken_poll(sys: &Path, node: &Path) {
+@@ -64,6 +84,7 @@ impl DeviceInput {
+             pending,
+             hall: find_hall(Path::new(PSY)),
+             lid_shut: None,
++            hall_armed: false,
+             next_lid_poll: 0,
+             menu_dpad_display,
+         }
+@@ -94,7 +115,28 @@ fn quicken_poll(sys: &Path, node: &Path) {
      }
  }
  
@@ -56,7 +94,7 @@ index 3228cdb..544f03c 100644
      let label = node
          .file_name()
          .map(|n| n.to_string_lossy().into_owned())
-@@ -128,6 +160,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
+@@ -128,6 +170,8 @@ fn read_node(node: &Path, queue: &Mutex<Vec<RawEvent>>, trace: Option<&Trace>) {
              }
              match ev.kind {
                  EV_ABS => events.extend(hat.feed(ev)),
@@ -65,10 +103,49 @@ index 3228cdb..544f03c 100644
                  _ => events.extend(to_raw(ev)),
              }
          }
-@@ -215,7 +249,24 @@ impl InputSource for DeviceInput {
+@@ -197,13 +241,8 @@ impl InputSource for DeviceInput {
+         if self.hall.is_some() && now >= self.next_lid_poll {
+             self.next_lid_poll = now + LID_POLL_MS;
+             if let Some(shut) = self.read_lid() {
+-                if self.lid_shut != Some(shut) {
+-                    self.lid_shut = Some(shut);
+-                    out.push(if shut {
+-                        RawEvent::Down(Btn::Lid)
+-                    } else {
+-                        RawEvent::Up(Btn::Lid)
+-                    });
++                if let Some(event) = lid_event(&mut self.hall_armed, &mut self.lid_shut, shut) {
++                    out.push(event);
+                 }
+             }
+         }
+@@ -215,7 +254,47 @@ impl InputSource for DeviceInput {
      }
  }
  
++/// What a lid reading means, given what has been read before.
++///
++/// Nothing is believed until the sensor says open once: it reads 0 -- closed
++/// -- from boot until the lid is actually opened, whatever the lid is doing,
++/// so slot's first poll believed the lid was shut on every boot and dozed to
++/// a black screen that a POWER press woke.
++///
++/// The cost is that the first close after a boot is not slot's to act on. The
++/// kernel suspends a moment after the lid shuts and blanks the panel itself,
++/// which is what happens today for that one cycle; every cycle after it is
++/// slot's again.
++fn lid_event(armed: &mut bool, last: &mut Option<bool>, shut: bool) -> Option<RawEvent> {
++    *armed |= !shut;
++    if !*armed || *last == Some(shut) {
++        return None;
++    }
++    *last = Some(shut);
++    Some(match shut {
++        true => RawEvent::Down(Btn::Lid),
++        false => RawEvent::Up(Btn::Lid),
++    })
++}
++
 +/// Where this device exposes its clamshell sensor.
 +///
 +/// slot looks for a `hallkey` under `/sys/class/power_supply`, and the Miyoo
@@ -90,6 +167,46 @@ index 3228cdb..544f03c 100644
      let mut supplies: Vec<PathBuf> = std::fs::read_dir(psy)
          .ok()?
          .filter_map(|e| e.ok())
+@@ -236,6 +315,39 @@ fn menu_dpad_display(target: Option<&str>) -> bool {
+ mod tests {
+     use super::*;
+ 
++    /// The boot this exists for: the sensor says closed with the lid open,
++    /// and slot must not doze on it.
++    #[test]
++    fn a_stale_closed_reading_at_boot_is_ignored() {
++        let (mut armed, mut last) = (false, None);
++        for _ in 0..5 {
++            assert!(lid_event(&mut armed, &mut last, true).is_none());
++        }
++        assert!(!armed, "a closed reading should not arm the sensor");
++    }
++
++    /// And once it has told the truth once, every cycle is slot's.
++    #[test]
++    fn the_lid_is_followed_after_it_first_reads_open() {
++        let (mut armed, mut last) = (false, None);
++        assert!(lid_event(&mut armed, &mut last, true).is_none());
++        assert_eq!(
++            lid_event(&mut armed, &mut last, false),
++            Some(RawEvent::Up(Btn::Lid)),
++            "the first open reading is the one that arms it, and it is real"
++        );
++        assert_eq!(lid_event(&mut armed, &mut last, false), None, "no change");
++        assert_eq!(
++            lid_event(&mut armed, &mut last, true),
++            Some(RawEvent::Down(Btn::Lid)),
++            "a close after arming is slot's to act on"
++        );
++        assert_eq!(
++            lid_event(&mut armed, &mut last, false),
++            Some(RawEvent::Up(Btn::Lid))
++        );
++    }
++
+     #[test]
+     fn only_the_rg34xx_baseos_target_enables_the_menu_dpad_display_gesture() {
+         for (target, want) in [
 diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
 index 02cc4bb..c4de188 100644
 --- a/crates/slot/src/input/evdev.rs
