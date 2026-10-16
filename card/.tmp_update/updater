@@ -125,6 +125,16 @@ if [ -f "$ROOT"/.slot-boot ]; then
         slot_ended=$(date +%s 2>/dev/null || echo 0)
         if [ "$((slot_ended - slot_began))" -ge 60 ]; then
             slot_tries=0
+        else
+            # A quick death relaunches, but not instantly. Booting slot is the
+            # busiest the handheld gets -- core load, PNG decoding, cart faces
+            # on two workers -- and doing it again immediately lands on
+            # whatever the last one disturbed. Measured once: a boot where slot
+            # was OOM-killed at 93 s and relaunched took three attempts and
+            # nearly five minutes to associate the radio, where a quiet boot
+            # takes 38 s. A deliberate Restart, which survives a while first,
+            # skips this and comes straight back.
+            sleep 5
         fi
     done
 fi
