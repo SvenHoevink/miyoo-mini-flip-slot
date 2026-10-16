@@ -28,8 +28,11 @@ needs for the frame between freeing the art and rebuilding it, and there is a
 test for exactly that.
 
 The cost is a beat of plain background and placeholder carts on the way back
-to the shelf. Whether that is worth about 8 MB is a thing to look at on the
-handheld rather than argue about, which is where this is going next.
+to the shelf. That was looked at on the handheld rather than argued about,
+and the verdict was "ejecting to the menu feels fine" -- so the rest of the
+shelf's art can follow the same way when it is wanted: the 62 cart title
+faces, the chrome, the GBA cart art, another 5-8 MB that is not on screen
+while a game is.
 
 diff --git a/crates/slot-gfx/src/draw.rs b/crates/slot-gfx/src/draw.rs
 index 059cd0e..bd8cd2e 100644
