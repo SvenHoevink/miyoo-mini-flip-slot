@@ -34,6 +34,13 @@ shelf's art can follow the same way when it is wanted: the 62 cart title
 faces, the chrome, the GBA cart art, another 5-8 MB that is not on screen
 while a game is.
 
+The two carousel grounds were also kept as decoded RGBA in a OnceLock for the
+life of the process -- 1.68 MB each, beside the textures made from them, for
+pictures that are not on the screen while a game is. They are decoded on
+demand now and dropped after upload, which is 3.4 MB of heap on top of the
+8 MB of textures, and costs a decode when the shelf comes back: the same beat
+the freed textures already pay for.
+
 diff --git a/crates/slot-gfx/src/draw.rs b/crates/slot-gfx/src/draw.rs
 index 059cd0e..bd8cd2e 100644
 --- a/crates/slot-gfx/src/draw.rs
@@ -204,6 +211,45 @@ index 5ea7492..2b89730 100644
 +        }]);
 +    }
 +}
+diff --git a/crates/slot-ui/src/backdrop.rs b/crates/slot-ui/src/backdrop.rs
+index ef0c1ef..3038161 100644
+--- a/crates/slot-ui/src/backdrop.rs
++++ b/crates/slot-ui/src/backdrop.rs
+@@ -1,5 +1,4 @@
+ use std::path::Path;
+-use std::sync::OnceLock;
+ 
+ use slot_gfx::{Canvas, Draw, TexId, OUT_H, OUT_W, PICTURE};
+ 
+@@ -36,17 +35,20 @@ pub fn default_game_bezel_face(colour: bool) -> Option<Vec<u8>> {
+ }
+ 
+ /// The carousel ground, scaled to cover the whole screen, including behind the footer.
+-pub fn default_background() -> Option<&'static [u8]> {
+-    static P: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+-    P.get_or_init(|| art::cover_bytes(DEFAULT_PNG, OUT_W, OUT_H))
+-        .as_deref()
++///
++/// Decoded on each call and handed over, rather than kept in a `OnceLock` for
++/// the life of the process. The caller uploads it and drops it; keeping it
++/// held 1.68 MB of decoded RGBA beside the texture made from it, and the same
++/// again for the blur -- 3.4 MB of a 101 MB handheld, for two pictures that
++/// are not on the screen while a game is. The cost is a decode when the shelf
++/// comes back, which is the same beat the freed textures already pay for.
++pub fn default_background() -> Option<Vec<u8>> {
++    art::cover_bytes(DEFAULT_PNG, OUT_W, OUT_H)
+ }
+ 
+ /// The blurred carousel ground, scaled to cover the whole screen the same way as the default.
+-pub fn blur_background() -> Option<&'static [u8]> {
+-    static P: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+-    P.get_or_init(|| art::cover_bytes(BLUR_PNG, OUT_W, OUT_H))
+-        .as_deref()
++pub fn blur_background() -> Option<Vec<u8>> {
++    art::cover_bytes(BLUR_PNG, OUT_W, OUT_H)
+ }
+ 
+ pub fn draw_ground(canvas: Canvas, face: Option<TexId>, out: &mut Vec<Draw>) {
 diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
 index 8912c90..7d260a1 100644
 --- a/crates/slot/src/app.rs
@@ -261,10 +307,24 @@ index 34b06e4..70d823c 100644
              self.place(app, compositor, key, face, interior);
          }
 diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
-index f519f3e..5c04070 100644
+index f519f3e..188e240 100644
 --- a/crates/slot/src/frontend.rs
 +++ b/crates/slot/src/frontend.rs
-@@ -548,6 +548,20 @@ impl Frontend {
+@@ -315,10 +315,11 @@ impl Frontend {
+         let Some(rgba) = slot_ui::default_background() else {
+             return;
+         };
+-        let id = compositor.create_texture(OUT_W, OUT_H, rgba);
++        let id = compositor.create_texture(OUT_W, OUT_H, &rgba);
+         self.session.app_mut().set_ground(id);
++        drop(rgba);
+         if let Some(rgba) = slot_ui::blur_background() {
+-            let id = compositor.create_texture(OUT_W, OUT_H, rgba);
++            let id = compositor.create_texture(OUT_W, OUT_H, &rgba);
+             self.session.app_mut().set_blur(id);
+         }
+     }
+@@ -548,6 +549,20 @@ impl Frontend {
          sync_about(self.session.app_mut(), compositor, &mut self.about);
          sync_quick_clock(self.session.app_mut(), compositor, &mut self.quick_clock);
          sync_quick_palette(self.session.app_mut(), compositor, &mut self.quick_palette);
@@ -285,3 +345,16 @@ index f519f3e..5c04070 100644
          sync_wallpaper(self.session.app_mut(), compositor, &mut self.wallpaper);
          sync_game_bezel(self.session.app_mut(), compositor, &mut self.game_bezel);
          compositor.set_game_bezel(self.session.app().shown_game_bezel());
+diff --git a/crates/slot/tests/render_shelves.rs b/crates/slot/tests/render_shelves.rs
+index 4094008..ef23677 100644
+--- a/crates/slot/tests/render_shelves.rs
++++ b/crates/slot/tests/render_shelves.rs
+@@ -100,7 +100,7 @@ fn field(px: &[u8]) -> [u32; 3] {
+ }
+ 
+ fn ground((x, y): (usize, usize)) -> [u32; 3] {
+-    patch(default_background().expect("the default wallpaper"), x, y)
++    patch(&default_background().expect("the default wallpaper"), x, y)
+ }
+ 
+ fn let_the_name_in(f: &mut Frontend, c: &mut Compositor, input: &mut Script) {
