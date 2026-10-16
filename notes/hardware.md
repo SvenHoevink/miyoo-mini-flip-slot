@@ -1067,7 +1067,9 @@ design -- the shelf must not show the cart out of the slot before the data is
 down -- and for a GBA cart that is 425,984 bytes of state plus 131,072 of save
 RAM, each fsync'd and followed by a directory fsync on vfat. A plausible 15 s.
 
-It is not. Measured on the device with patch 0006:
+It is not. Measured on the device with a timing patch (0006, dropped
+once it had answered -- `git log -- patches/0006-time-the-eject.patch` has it
+if a recurrence ever needs it back):
 
 ```
 slot: eject: join 0 ms, snapshot 19 ms, write 170 ms for 557056 bytes
