@@ -319,6 +319,15 @@ tasks:
       - task: image
       - task: dist
         vars: {OUT: '{{.OUT}}/stage'}
+      # Stripped, here and not in `dist`, so a development card keeps its
+      # symbols. `strip` drops .symtab and leaves .dynsym, which is the table
+      # `crash.rs` reads through dladdr -- so a crash in the shipped build
+      # still names its frames, and the zip is 600 KB smaller.
+      - task: sh
+        vars:
+          CMD: ${CROSS_COMPILE}strip {{.OUT}}/stage/System/slot
+      - task: verify:arm
+        vars: {FILE: '{{.OUT}}/stage/System/slot'}
       # The install page travels with the zip: whoever unpacks this on a card
       # months from now will not have the repo in front of them.
       - cp docs/INSTALL.md {{.OUT}}/stage/System/slot-install.md
