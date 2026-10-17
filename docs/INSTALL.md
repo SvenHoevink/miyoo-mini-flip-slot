@@ -8,7 +8,13 @@ You need: the handheld, its SD card, a computer with a card reader, and a
 (or `task release`, if you are building it yourself).
 
 Nothing here reflashes the device, deletes anything, or replaces your launcher.
-slot installs beside it as one more app.
+slot installs beside it as one more app, and works on stock firmware as well as
+on Onion or Allium — no custom firmware is required to run it.
+
+It is **tested on an Allium card**, since that is what the one handheld this
+was built against runs. Stock and Onion get the same launcher entry and the
+same binary, and nothing in the launch path depends on a particular firmware,
+but nobody has booted it on either yet.
 
 ## 1. back up the card
 
@@ -38,7 +44,11 @@ Then eject the card properly — `sync` above, and unmount before pulling it.
 
 ## 3. put the card back and find slot
 
-Boot the handheld. slot appears under **Apps → slot**.
+Boot the handheld. slot appears in the app list — **Apps → slot** on Allium,
+**App → slot** on stock firmware or Onion. The zip carries an entry in both
+layouts and the launcher you are not using ignores the other, so there is
+nothing to choose and no custom firmware to install first: slot runs as an
+app like any other.
 
 **If it isn't there, reboot once more.** The launcher caches its app list, and
 the first boot after adding files often doesn't show them.
@@ -69,16 +79,14 @@ file name.
 
 ## 5. the controls worth knowing
 
-> **These are the gestures of the build before 2026-10-15.** The upstream bump
-> on that date added an in-game menu on a tap of MENU and moved what the quick
-> menu holds. The table below has not been re-checked on the handheld since.
-
 | gesture | what it does |
 |---|---|
 | **hold MENU ~1 s** | **eject the cart, back to the shelf** |
-| tap MENU | quick menu — brightness and volume, on the shelf only |
-| double-tap MENU | polaroids |
+| tap MENU, on the shelf | quick menu |
+| tap MENU, in a game | the in-game menu: screen, bezels, palettes, states |
+| double-tap MENU, in a game | straight to States |
 | hold POWER ~1 s | power menu |
+| L1 / R1 in a GB or GBC game | stretch / actual size |
 | **START on the shelf, GBA cart selected** | core picker: left = mGBA, right = **gpSP** |
 
 **For GBA, pick gpSP.** mGBA interprets on this CPU and runs at roughly half
@@ -89,7 +97,7 @@ deliberate, not a fault. Eject to get the shelf back.
 
 ## if something is wrong
 
-slot writes **`slot.log`** to the card root. Read it first; it says what it was
+slot writes **`Logs/slot.log`** on the card. Read it first; it says what it was
 doing when it stopped. Then:
 
 | symptom | likely cause |
@@ -97,19 +105,24 @@ doing when it stopped. Then:
 | no slot in the app list | launcher cache — reboot again |
 | GBA games won't start | no `BIOS/gba_bios.bin` |
 | a GBA game runs at half speed | mGBA is selected; switch to gpSP |
-| MENU draws a hotkey bar over the game | that is Allium's overlay, not slot. Known, see the README |
-| nothing on screen at all | check `slot.log`, and that `System/slot` really is on the card |
+| MENU draws a hotkey bar over the game | that is your launcher's overlay, not slot. Known, see the README |
+| the screen looks off at boot | brightness is low, not broken — raise it in the menu |
+| nothing on screen at all | check `Logs/slot.log`, and that `System/slot` really is on the card |
 
-There is no battery indicator on this device, and the lid does nothing yet.
-Both are known and listed in the README.
+The battery indicator and the lid both work: closing the lid saves, darkens the
+panel and powers off after three minutes.
 
 ## going further
 
+- [booting straight into slot](../README.md#booting-straight-into-slot)
+  — have the handheld come up in slot instead of its launcher. Needs a shell on
+  the device and a launcher whose boot hook you are willing to edit, so it is
+  for people building this rather than installing it.
 - [working over the network](../README.md#working-over-the-network-instead-of-moving-the-card)
-  — WiFi, telnet and FTP, so new builds don't need the card moved.
-- [booting straight into slot](../README.md#booting-straight-into-slot-without-allium)
-  — skip Allium entirely.
-- [two-player link](link.md) — against another slot handheld.
+  — WiFi, telnet and FTP for pushing new builds without moving the card. Not in
+  the zip: it needs a launcher's own wifi script, and the only way to give it a
+  password is to type one into a file on the card.
+- [two-player link](link.md) — written, not yet played.
 
 slot is by [Brandon Kowalski](https://github.com/BrandonKowalski/slot). This is
 an unofficial port; please don't send slot's issue tracker Miyoo bugs.

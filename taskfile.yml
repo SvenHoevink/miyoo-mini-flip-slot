@@ -243,13 +243,20 @@ tasks:
         echo "content root: $n directories"
       # Both launcher layouts: App/<Name>/ for stock and Onion, Apps/<Name>.pak/
       # for Allium. The launcher that isn't in use simply ignores the other.
+      #
+      # The network app is left out of both. net-up.sh needs a launcher's own
+      # wifi script to reach this chip, and the only way to give it credentials
+      # is to type them into a file on the card -- which is fine for the person
+      # who builds this and wrong to ship to someone who installs it. `task
+      # deploy` still puts it on the development card.
       - cp -R card/App {{.OUT}}/App
       - cp -R card/Apps {{.OUT}}/Apps
+      - rm -rf "{{.OUT}}/Apps/slot net.pak" "{{.OUT}}/App/SlotNet"
       # Upstream's own card scripts first -- slot shells out to slotlink.sh and
       # friends, and logs an error for each one it cannot find -- then ours on
       # top, which replaces its launch_frontend.sh with the armv7 one.
       - cp -R {{.UPSTREAM}}/card/System/. {{.OUT}}/System/
-      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/net-up.sh card/System/coresave-miyoo.sh {{.OUT}}/System/
+      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/coresave-miyoo.sh {{.OUT}}/System/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
       - cp vendor-miyoo/libslotao.so {{.OUT}}/System/
