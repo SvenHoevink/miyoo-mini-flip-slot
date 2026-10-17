@@ -1,14 +1,15 @@
 # CLAUDE.md
 
 Porting [slot](https://slot-cfw.fyi/) to the **Miyoo Mini Flip**. Read
-`README.md` first for the target hardware, the blockers and the plan; this file
-is about how to work in the repo.
+`notes/port-log.md` first for the target hardware, the blockers and the plan —
+`README.md` is the short page for someone installing or building this, and
+deliberately stays that way. This file is about how to work in the repo.
 
 ## Where things stand
 
-The port runs games. See the README for status and what is still open; see
-`notes/hardware.md` for everything measured off the device, including the frame
-budget and the full button map.
+The port runs games. See `notes/port-log.md` for status and what is still
+open; see `notes/hardware.md` for everything measured off the device, including
+the frame budget and the full button map.
 
 Two hard-won rules from getting here:
 

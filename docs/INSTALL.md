@@ -150,8 +150,8 @@ panel and powers off after three minutes.
 
   **Do not do this on an Allium or Onion card.** They boot through that same
   file and this would replace theirs; see
-  [the README](../README.md#booting-straight-into-slot) for the Allium route.
-- [working over the network](../README.md#working-over-the-network-instead-of-moving-the-card)
+  [the port log](../notes/port-log.md#booting-straight-into-slot) for the Allium route.
+- [working over the network](../notes/port-log.md#working-over-the-network-instead-of-moving-the-card)
   — WiFi, telnet and FTP for pushing new builds without moving the card. Not in
   the zip: it needs a launcher's own wifi script, and the only way to give it a
   password is to type one into a file on the card.
