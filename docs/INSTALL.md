@@ -38,9 +38,9 @@ card alone, so slot can go on before or after it.
 
 Once the handheld's firmware is up to date, **a card needs none of that to run
 slot**: the OS lives in the handheld, not on the card, and a FAT32 card holding
-only slot's zip boots fine. Keep `miyoo285/zoneinfo/` if you want the clock
-sure of its timezone -- tested without it, and the time was right only because
-the RTC happens to hold local time.
+only slot's zip boots fine. The clock then follows the handheld's own RTC,
+since nothing on such a card carries a timezone database -- Allium does not
+ship one either.
 
 ## 1. back up the card
 

@@ -1374,11 +1374,15 @@ no card at all. `main` treats the card payload as an override, `if [ -d
 only for flashing internal storage, once.
 
 The clock still reads local time on such a card, and not for the reason it
-looks: there is no `zoneinfo` anywhere but the card, so `main`'s `ln -sf
-/mnt/SDCARD/miyoo285/zoneinfo/$timezone /tmp/localtime` dangles and libc falls
-back to UTC. It agrees because the RTC itself holds local time. A card whose
-firmware set the RTC to UTC would show the offset, so keep `miyoo285/zoneinfo`
-if the time matters.
+looks: the tz database is **only** in the card payload -- none of the three
+firmware partitions holds a `zoneinfo`, a `localtime`, or any file with the
+`TZif` magic -- so `main`'s `ln -sf /mnt/SDCARD/miyoo285/zoneinfo/$timezone
+/tmp/localtime` dangles and libc falls back to UTC. It agrees because the RTC
+itself holds local time, and would not on a handheld whose RTC was set to UTC.
+
+Not shipped here, and not worth the 7 MB: Allium carries no `zoneinfo` either
+(zero paths in its tree) while still offering a timezone setting, so it
+depends on whatever the card already has. The clock follows the RTC.
 
 **Stock swaps.** It creates `/mnt/SDCARD/cachefile`, 128 MB, and `swapon`s it
 at boot:
