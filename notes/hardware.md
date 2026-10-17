@@ -1363,6 +1363,23 @@ what the shipped v0.1.0 zip had; `card/App/*/config.json` now carries the full
 set and a 120x120 `icon.png`/`iconsel.png` pair. Allium never cared, which is
 why this went unnoticed for weeks.
 
+**The card needs none of that payload to run slot** (tested 2026-10-17). With
+`miyoo285/` and `miyoo285_fw.img` moved off the card entirely -- leaving slot,
+its content root and `.tmp_update/runtime.sh` -- the handheld boots straight
+into slot. The OS is in internal SPI flash: kernel, rootfs and `/customer`
+(MainUI, libs, `axp_test`) are all there, which is why the Flip comes up with
+no card at all. `main` treats the card payload as an override, `if [ -d
+/mnt/SDCARD/miyoo285/ ]`, and falls back to `/customer/app/MainUI`; the
+`.tmp_update/runtime.sh` hook is checked before either. The firmware `.img` is
+only for flashing internal storage, once.
+
+The clock still reads local time on such a card, and not for the reason it
+looks: there is no `zoneinfo` anywhere but the card, so `main`'s `ln -sf
+/mnt/SDCARD/miyoo285/zoneinfo/$timezone /tmp/localtime` dangles and libc falls
+back to UTC. It agrees because the RTC itself holds local time. A card whose
+firmware set the RTC to UTC would show the offset, so keep `miyoo285/zoneinfo`
+if the time matters.
+
 **Stock swaps.** It creates `/mnt/SDCARD/cachefile`, 128 MB, and `swapon`s it
 at boot:
 

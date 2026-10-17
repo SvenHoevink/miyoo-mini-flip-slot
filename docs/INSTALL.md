@@ -36,6 +36,12 @@ power off, hold MENU, and plug the charger in while still holding. Check the
 build in Settings afterwards. The update writes internal storage and leaves the
 card alone, so slot can go on before or after it.
 
+Once the handheld's firmware is up to date, **a card needs none of that to run
+slot**: the OS lives in the handheld, not on the card, and a FAT32 card holding
+only slot's zip boots fine. Keep `miyoo285/zoneinfo/` if you want the clock
+sure of its timezone -- tested without it, and the time was right only because
+the RTC happens to hold local time.
+
 ## 1. back up the card
 
 The stock firmware is particular and a known-good copy costs nothing. Copy the
