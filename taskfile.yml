@@ -249,14 +249,24 @@ tasks:
       # is to type them into a file on the card -- which is fine for the person
       # who builds this and wrong to ship to someone who installs it. `task
       # deploy` still puts it on the development card.
+      #
+      # The probe goes out too: it reports what this port found on the hardware
+      # and is a development tool, not something an install should offer. `task
+      # probe` assembles it on its own.
       - cp -R card/App {{.OUT}}/App
       - cp -R card/Apps {{.OUT}}/Apps
       - rm -rf "{{.OUT}}/Apps/slot net.pak" "{{.OUT}}/App/SlotNet"
+      - rm -rf "{{.OUT}}/Apps/slot probe.pak" "{{.OUT}}/App/SlotProbe"
       # Upstream's own card scripts first -- slot shells out to slotlink.sh and
       # friends, and logs an error for each one it cannot find -- then ours on
       # top, which replaces its launch_frontend.sh with the armv7 one.
       - cp -R {{.UPSTREAM}}/card/System/. {{.OUT}}/System/
-      - cp card/System/launch_frontend.sh card/System/probe.sh card/System/probe-run.sh card/System/coresave-miyoo.sh {{.OUT}}/System/
+      - cp card/System/launch_frontend.sh card/System/coresave-miyoo.sh {{.OUT}}/System/
+      # Autoboot, carried but not installed: .tmp_update/runtime.sh is how a
+      # launcher boots on this device, so dropping ours there would replace
+      # Allium's. See docs/INSTALL.md.
+      - mkdir -p {{.OUT}}/System/autoboot
+      - cp card/System/autoboot/runtime.sh {{.OUT}}/System/autoboot/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
       - cp vendor-miyoo/libslotao.so {{.OUT}}/System/
@@ -385,11 +395,12 @@ tasks:
       - |
         set -eu
         a=$(cd target-miyoo/root-check && find . -type d | sort)
-        # The two launcher trees, the licence texts and System/bezels are
-        # content this port ships, not directories slot makes for itself: the
-        # bezel art comes from upstream's own card/ and lands in a folder
-        # --init-root has never created.
-        b=$(cd target-miyoo/root-dist && find . -type d -not -path './App*' -not -path './System/licenses*' -not -path './System/bezels*' | sort)
+        # The two launcher trees, the licence texts, System/bezels and
+        # System/autoboot are content this port ships, not directories slot
+        # makes for itself: the bezel art comes from upstream's own card/ and
+        # lands in a folder --init-root has never created, and autoboot carries
+        # the stock boot hook for a user to install by hand.
+        b=$(cd target-miyoo/root-dist && find . -type d -not -path './App*' -not -path './System/licenses*' -not -path './System/bezels*' -not -path './System/autoboot*' | sort)
         if [ "$a" = "$b" ]; then
           echo "content root matches slot --init-root exactly"
         else

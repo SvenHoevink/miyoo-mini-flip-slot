@@ -1335,3 +1335,44 @@ Consequence worth knowing: the 30 tests in that file, including the PWM
 backlight ones, are only exercised by a plain `cargo test -p slot-power` on the
 host. Worth fixing the ordering dependency and widening `task test` to
 `--lib --tests`, so they run where everything else does.
+
+## Stock firmware: what an install needs, and it has swap (2026-10-17)
+
+Measured on a fresh 64 GB card carrying Miyoo's own firmware, build
+**202510011046** (the "20251001" download), with no launcher on it at all.
+
+The card layout stock expects, read out of `MainUI`'s own strings rather than
+guessed:
+
+| path | what it is |
+|---|---|
+| `/mnt/SDCARD/miyoo285/app`, `.../lib`, `.../zoneinfo` | the firmware payload — `MainUI` reads `miyoo285/app/lang` and `miyoo285/zoneinfo/` |
+| `/mnt/SDCARD/App` | where it scans for apps, `<Name>/config.json` |
+| `/mnt/SDCARD/Roms`, `/Imgs`, `/Emu`, `/RApp` | its own library; slot's `Games/` is separate and stock lists none of it |
+
+The payload belongs under `miyoo285/`, not at the root. The card is vfat and
+so case-insensitive: a root `app/` *is* `App/`, and slot's entry lands among
+the firmware's binaries.
+
+**An `App/<Name>/config.json` needs an icon or stock will not list it.** The
+parser reads `label`, `icon`, `iconsel`, `launch`, `description`, `autoflip`
+and `noaudiofix` — it logs `add %s icon(%s) iconsel(%s) launch(%s)
+autoflip(%d) noaudiofix(%d)` — and an entry carrying only label/launch/
+description does not appear, with no error anywhere a user can see. That is
+what the shipped v0.1.0 zip had; `card/App/*/config.json` now carries the full
+set and a 120x120 `icon.png`/`iconsel.png` pair. Allium never cared, which is
+why this went unnoticed for weeks.
+
+**Stock swaps.** It creates `/mnt/SDCARD/cachefile`, 128 MB, and `swapon`s it
+at boot:
+
+```
+dd if=/dev/zero of=/mnt/SDCARD/cachefile bs=1M count=128;chmod 600 ...;mkswap ...
+swapon /mnt/SDCARD/cachefile
+```
+
+Every memory number above it in this file was measured on Allium, which has no
+swap. GBA headroom on a stock card is therefore *not* the same problem, and
+the OOM work from 2026-10-16 may be unnecessary there — untested, and swapping
+to a vfat SD card has its own cost in frame time. Treat it as a hypothesis
+until something is measured on stock.

@@ -1,5 +1,9 @@
 {
 	"label": "slot probe",
+	"icon": "icon.png",
+	"iconsel": "iconsel.png",
 	"launch": "launch.sh",
-	"description": "Collect hardware facts the slot port needs"
+	"description": "hardware probe for slot",
+	"autoflip": 0,
+	"noaudiofix": 0
 }

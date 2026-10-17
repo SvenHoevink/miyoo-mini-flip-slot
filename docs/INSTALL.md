@@ -11,10 +11,30 @@ Nothing here reflashes the device, deletes anything, or replaces your launcher.
 slot installs beside it as one more app, and works on stock firmware as well as
 on Onion or Allium — no custom firmware is required to run it.
 
-It is **tested on an Allium card**, since that is what the one handheld this
-was built against runs. Stock and Onion get the same launcher entry and the
-same binary, and nothing in the launch path depends on a particular firmware,
-but nobody has booted it on either yet.
+It is tested on **stock Miyoo firmware** (build 202510011046) and on an
+**Allium card**. Onion gets the same launcher entry as stock and the same
+binary, and nothing in the launch path depends on a particular firmware, but
+nobody has booted it on Onion yet.
+
+## 0. if the card is blank
+
+Skip this if your card already boots the handheld.
+
+A blank card will not boot: the Flip loads its OS from the card. Format it
+**FAT32** -- not exFAT, which the launcher cannot read -- then install Miyoo's
+own firmware before slot. Get it from
+[lomiyoo's firmware page](https://lomiyoo.com/pages/firmware), Mini Flip entry,
+and unzip the inner `miyoo285.zip` into a **`miyoo285/` directory** on the card
+rather than at the root: `MainUI` reads `/mnt/SDCARD/miyoo285/app/lang` and
+`/mnt/SDCARD/miyoo285/zoneinfo/`, and `/mnt/SDCARD/App` is a separate place it
+scans for apps. On a case-insensitive card an `app/` at the root *is* `App/`,
+and slot's entry ends up buried among the firmware's own files.
+
+Put `miyoo285_fw.img` at the card root, plug the handheld into its charger
+first, then switch it on; it updates itself and reboots. If no rocket appears,
+power off, hold MENU, and plug the charger in while still holding. Check the
+build in Settings afterwards. The update writes internal storage and leaves the
+card alone, so slot can go on before or after it.
 
 ## 1. back up the card
 
@@ -114,10 +134,17 @@ panel and powers off after three minutes.
 
 ## going further
 
-- [booting straight into slot](../README.md#booting-straight-into-slot)
-  — have the handheld come up in slot instead of its launcher. Needs a shell on
-  the device and a launcher whose boot hook you are willing to edit, so it is
-  for people building this rather than installing it.
+- **booting straight into slot.** On stock firmware this is one file: copy
+  `System/autoboot/runtime.sh` from the zip to **`.tmp_update/runtime.sh`** at
+  the card root. The handheld then comes up in slot instead of MainUI; delete
+  that file and stock comes back, both doable with the card in a computer.
+  Stock's `/customer/main` runs `.tmp_update/runtime.sh` on every boot and
+  leaves it there, where a `.tmp_update/updater` is run once and the directory
+  deleted — which is why this is a `runtime.sh`.
+
+  **Do not do this on an Allium or Onion card.** They boot through that same
+  file and this would replace theirs; see
+  [the README](../README.md#booting-straight-into-slot) for the Allium route.
 - [working over the network](../README.md#working-over-the-network-instead-of-moving-the-card)
   — WiFi, telnet and FTP for pushing new builds without moving the card. Not in
   the zip: it needs a launcher's own wifi script, and the only way to give it a
