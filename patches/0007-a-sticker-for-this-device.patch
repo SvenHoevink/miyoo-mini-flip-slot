@@ -5,8 +5,8 @@ credits as its compliance block and an "ANBERNIC RG SP" wordmark. On the Miyoo
 it was describing hardware that is not there -- model AGS-102, BaseOS by
 pvaibhav -- and naming the wrong handheld in the largest type on the screen.
 
-So: the model row names the Mini Flip, the OS line names Miyoo's firmware and
-Allium, and the credits say in so many words that the frontend is slot, by
+So: the model row names the Mini Flip, the OS line names Miyoo's own
+firmware, and the credits say in so many words that the frontend is slot, by
 Brandon Kowalski, written for the Anbernic RG SP, and that this is an
 unofficial port -- which the sticker is the right place to say, because it is
 the only screen a user reads for provenance. Upstream's copyright line stays as
@@ -124,12 +124,12 @@ index 7f8c77c..0c09872 100644
 +    "AND GPSP. THE FRONTEND IS",
 +    "SLOT, BY BRANDON KOWALSKI,",
 +    "FOR THE ANBERNIC RG SP; THIS",
-+    "IS AN UNOFFICIAL PORT. THE",
-+    "OS IS MIYOO'S, LAUNCHED BY",
-+    "ALLIUM. TYPE IS OPEN SANS",
-+    "AND NERD FONTS SYMBOLS BY",
-+    "RYAN L MCINTYRE. THE PANEL",
-+    "MASK IS GIGAHERZ'S LCD3X.",
++    "IS AN UNOFFICIAL PORT TO",
++    "MIYOO'S OWN OS. TYPE IS",
++    "OPEN SANS AND NERD FONTS",
++    "SYMBOLS BY RYAN L MCINTYRE.",
++    "THE PANEL MASK IS",
++    "GIGAHERZ'S LCD3X.",
  ];
  
 -pub const ORIGIN: [&str; 2] = ["S/LOT-USA", "MADE IN ITHACA"];
@@ -196,7 +196,7 @@ index de52e54..96c106c 100644
          "MGBA",
          "GPSP",
 -        "BASEOS BY PVAIBHAV",
-+        "ALLIUM",
++        "MIYOO'S OWN OS",
          "OPEN SANS",
          "NERD",
          "LCD3X",
