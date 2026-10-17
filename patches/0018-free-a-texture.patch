@@ -87,10 +87,10 @@ index b4c49ec..304f03d 100644
          self.gain = blue_light_gain(step);
      }
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
-index 5ea7492..2b89730 100644
+index b527104..5afac41 100644
 --- a/crates/slot-gfx/src/soft/mod.rs
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -1128,16 +1128,45 @@ impl Compositor {
+@@ -1131,16 +1131,45 @@ impl Compositor {
      }
  
      pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
@@ -140,7 +140,7 @@ index 5ea7492..2b89730 100644
      /// Nearest and linear are the same here: everything is nearest-sampled.
      /// The UI draws its faces at 1:1, so this costs nothing visible yet.
      pub fn create_texture_nearest(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
-@@ -2001,3 +2030,70 @@ mod game_bezel_tests {
+@@ -2004,3 +2033,70 @@ mod game_bezel_tests {
          assert_eq!((w, h), (crate::power::PICTURE[0], crate::power::PICTURE[1]));
      }
  }
@@ -212,7 +212,7 @@ index 5ea7492..2b89730 100644
 +    }
 +}
 diff --git a/crates/slot-ui/src/backdrop.rs b/crates/slot-ui/src/backdrop.rs
-index ef0c1ef..3038161 100644
+index 63c00fd..67b1a83 100644
 --- a/crates/slot-ui/src/backdrop.rs
 +++ b/crates/slot-ui/src/backdrop.rs
 @@ -1,5 +1,4 @@
@@ -221,7 +221,7 @@ index ef0c1ef..3038161 100644
  
  use slot_gfx::{Canvas, Draw, TexId, OUT_H, OUT_W, PICTURE};
  
-@@ -36,17 +35,20 @@ pub fn default_game_bezel_face(colour: bool) -> Option<Vec<u8>> {
+@@ -161,17 +160,20 @@ fn plain_band(art: &[u8], aw: usize, ah: usize, axis: Axis) -> usize {
  }
  
  /// The carousel ground, scaled to cover the whole screen, including behind the footer.
