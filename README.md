@@ -24,12 +24,27 @@ install page is the short version. See also
 with working input and a software renderer standing in for the GPU this device
 does not have.
 
-**The submodule was last bumped on 2026-10-15, by 94 upstream commits.** That
-brings an in-game menu, favourites, a recents shelf, handmade cart and shelf
-art, per-console screen settings and per-platform bezels, along with a new
-canvas and layout model the port's own patches now sit on. All thirteen
-patches rebased and the device build is clean, but everything in that bump has
-been seen under qemu only; the device numbers quoted below are from before it.
+**The submodule was bumped on 2026-10-15, by 94 upstream commits**, and the
+port rebased onto it: an in-game menu, favourites, a recents shelf, handmade
+cart and shelf art, per-console screen settings and per-platform bezels, on a
+new canvas and layout model. Eighteen patches now, all replayed and all seen
+on the handheld.
+
+**The bump also broke the memory budget**, and fixing that took most of a day
+and is the bulk of what is new here. slot was holding 44 MB before a core was
+even loaded, against about 80 MB the device can give, and a GBA cart was being
+OOM-killed mid-game. The causes were five, and the measurements are in
+[notes/hardware.md](notes/hardware.md):
+
+| | freed |
+|---|---|
+| a ROM read into slot that gpSP never looks at (`need_fullpath`) | 8-32 MB |
+| textures that could only be recycled, never freed | ~8 MB |
+| carousel grounds kept decoded for the life of the process | 3.4 MB |
+| rewind sized for a 1 GB device: 20 MB ring, 12 MB/s of CPU | 13.5 MB |
+| cart faces kept while a game plays | 3.4 MB |
+
+Mother 3's 32 MB cart went from *cannot load* to playing on both cores.
 
 `task all` produces, from a clean tree, three armv7 artifacts that the handheld
 could load — verified as 32-bit ARMv7-A, VFPv4 hard-float, needing nothing
@@ -46,15 +61,20 @@ pipeline builds untouched, because the `gl` crate resolves entry points at
 runtime. The GPU problem was never a compile-time one — the binary built, ran,
 and died looking for `libEGL.so`. Replacing that is `patches/0002`.
 
-**Single-player is done.** Thirteen carts have been played on the handheld
-across all three platforms, and on GBA across both cores. Taken from the
+**Single-player is done.** Sixteen carts have been played on the handheld
+across all three platforms, and five of them on both GBA cores. Taken from the
 `States/` and `Saves/` trees the device itself wrote, not from memory:
 
 | | |
 |---|---|
 | GB, mGBA | Tetris, Tetris GB SRS Colorized, BurgerTime Deluxe, Trip World |
 | GBC, mGBA | Alleyway DX, Super Mario Land DX, Super Mario Land 2 DX, Donkey Kong Land III DX, Kirby's Pinball Land DX, Galaga & Galaxian DX, Rayman |
-| GBA, gpSP *and* mGBA | Kirby & the Amazing Mirror, Kurukuru Kururin |
+| GBA, gpSP *and* mGBA | Kirby & the Amazing Mirror, Golden Sun: The Lost Age, Mother 3 |
+| GBA, gpSP | Kurukuru Kururin, Mario Kart: Super Circuit |
+
+The last three are the ones that made the memory work necessary: Golden Sun
+and Kirby are 16 MB carts that fill a JIT cache, and Mother 3 is 32 MB, which
+is more than this device can hold twice.
 
 Where it stands:
 
@@ -69,7 +89,8 @@ Where it stands:
 | audio | yes, ~100 ms behind the picture |
 | battery indicator | yes, from `axp_test` |
 | saves and save states | yes, including MBC2's 512x4 bits |
-| bezels | the Advance SP shell under a GBA game |
+| bezels | a Game Boy body under GB, a Color one under GBC, the Advance SP shell under GBA — filling the panel, picked per console in the quick menu |
+| big carts | 32 MB ROMs play on both cores |
 
 The renderer, the cores and the input map are all working. What is left is in
 "Still open" at the bottom.
@@ -286,16 +307,6 @@ the frontend says rather than what it does.
   do AP mode at all is open: **Apps → slot link probe** answers it on the
   device. slot's link is mGBA-only, so GB/GBC is the realistic target and GBA
   would interpret at ~22 ms a frame. See [docs/link.md](docs/link.md).
-
-- **The per-platform bezels have not been on the handheld yet.** Upstream now
-  draws a bezel belonging to the console being played -- a DMG body for GB, a
-  GBC one, the SP shell for GBA -- picked per console in the quick menu under
-  Screen. The port draws it a different way than upstream does, because a
-  full-frame blit every frame is not something this device can afford: the
-  game pass is cropped to the picture and the bezel is painted into the
-  surround, where it costs nothing until the picture moves (`patches/0013`).
-  It is right under qemu, picture in the hole and nothing leaking, and qemu
-  says nothing about frame times. Pick **Default** for GB or GBC and look.
 
 - **GB palettes are off by default.** `gb_palettes=0` in `Config/slot.state`.
   Turn them on in the quick menu under Screen, then L2 and R2 cycle 48 of them,
