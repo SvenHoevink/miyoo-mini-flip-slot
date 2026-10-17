@@ -21,6 +21,17 @@ a core is loaded: Mother 3 could not be loaded on mGBA at all, and Kirby's
 Keyed on ENABLE_VFS rather than on the platform, since that is exactly the
 condition under which retro_load_game can open a path at all.
 
+Measured on the handheld with both halves in, Kirby & the Amazing Mirror on
+mGBA -- the cart that cost 16 MB across the two copies:
+
+    VmRSS 64.4 MB   anon 25.2 MB   MemAvailable 38.1 MB
+    16384 kB  /mnt/SDCARD/Games/GBA/Kirby & the Amazing Mirror (USA).gba
+
+The ROM is a file mapping now rather than anonymous memory, so the kernel
+pages it in on demand and can evict it under pressure -- which is the part
+that matters on a device with no swap. The same cart on gpSP, before any of
+this, had 1.9 MB free and was being killed.
+
 Paired with the frontend honouring need_fullpath (patches/0019 in this port).
 Without that, this removes mGBA's own copy and the frontend still reads the
 file into memory for nothing.
