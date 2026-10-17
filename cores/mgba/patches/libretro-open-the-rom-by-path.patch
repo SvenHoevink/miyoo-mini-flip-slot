@@ -1,0 +1,46 @@
+Ask the frontend for the path, not the bytes
+
+retro_get_system_info leaves need_fullpath false everywhere but GEKKO, so a
+frontend reads the whole ROM and hands over a pointer -- and retro_load_game
+then takes a second copy of it:
+
+    data = anonymousMemoryMap(game->size);
+    memcpy(data, game->data, game->size);
+    rom = VFileFromMemory(data, game->size);
+
+Two copies of a 32 MB cart on a handheld with 101 MB of RAM and no swap. The
+branch right below already does the better thing where ENABLE_VFS is defined,
+which it is for the libretro core (CMakeLists sets it in COMPILE_DEFINITIONS):
+VFileOpen on the path, with the kernel paging the file in and caching it like
+any other mapped file.
+
+Measured on a Miyoo Mini Flip, where slot holds about 44 MB of its own before
+a core is loaded: Mother 3 could not be loaded on mGBA at all, and Kirby's
+8 MB cart cost 16 MB across the two copies.
+
+Keyed on ENABLE_VFS rather than on the platform, since that is exactly the
+condition under which retro_load_game can open a path at all.
+
+Paired with the frontend honouring need_fullpath (patches/0019 in this port).
+Without that, this removes mGBA's own copy and the frontend still reads the
+file into memory for nothing.
+
+diff --git a/src/platform/libretro/libretro.c b/src/platform/libretro/libretro.c
+index d4de13f..ae85234 100644
+--- a/src/platform/libretro/libretro.c
++++ b/src/platform/libretro/libretro.c
+@@ -1327,7 +1405,13 @@ void retro_set_input_state(retro_input_state_t input) {
+ }
+ 
+ void retro_get_system_info(struct retro_system_info* info) {
+-#ifdef GEKKO
++#ifdef ENABLE_VFS
++	/* Ask for the path, not the bytes: retro_load_game opens it with VFileOpen
++	 * below, where the kernel pages the file in and caches it. Saying false
++	 * here has the frontend read the whole ROM and hand over a pointer, and
++	 * then this core takes a second copy of it with anonymousMemoryMap and
++	 * memcpy -- two copies of a 32 MB cart on a 101 MB handheld with no swap,
++	 * which is more than it has to spare. */
+ 	info->need_fullpath = true;
+ #else
+ 	info->need_fullpath = false;
