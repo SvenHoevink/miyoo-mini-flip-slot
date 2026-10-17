@@ -179,12 +179,11 @@ Choices worth knowing, with the reasoning in the scripts themselves:
 
 - **`arm-linux-gnueabihf`, glibc, dynamic** — not musl-static. slot `dlopen`s
   its libretro cores, and a fully static binary has no dynamic loader. The
-  toolchain and triple are the ones the Miyoo Mini community settled on
-  (Allium, a Rust launcher for this same SoC, uses the same image).
+  toolchain and triple are the ones the Miyoo Mini community settled on.
 - **`armv7-unknown-linux-gnueabihf`** for Rust and `platform=classic_armv7_a7`
   for gpSP, both with `-mtune=cortex-a7 -mfpu=neon-vfpv4`, so frontend and
-  cores target one ISA. Allium uses the lower `arm-unknown-linux-gnueabihf`
-  baseline; this device is a Cortex-A7, so there is no reason to give up armv7.
+  cores target one ISA. This device is a Cortex-A7, so there is no reason to
+  settle for a lower armv6 baseline.
 - **Patches, not edits.** `upstream/slot` is a pinned submodule and stays
   pristine; `task patch` applies `patches/*.patch` to its working tree and
   `task unpatch` reverts. A patch that no longer applies is a hard error, not a
@@ -202,12 +201,26 @@ touched: the UI emits the same display list it always did.
 | `0002` | the software rendering backend |
 | `0003` | input: Miyoo button codes, the event struct, thread priority, the lid |
 | `0004` | evdev bitmaps as 32-bit words; the battery's vendor tool |
-| `0005` | audio: an MI_AO sink, and a rate fallback for ALSA |
-| `0006` | timing around the eject |
+| `0005` | audio: an MI_AO sink, a rate fallback for ALSA, and the emulator's clock |
 | `0007` | the about-box sticker |
 | `0008` | the backlight as a PWM channel |
 | `0009` | picture geometry for this panel |
 | `0010` | naming the battery's source in the probe line |
+| `0011` | timing the wait for a cart face |
+| `0012` | a 4:3 tolerance, so this panel gets a console body at all |
+| `0013` | the bezel of the console being played, filling the panel |
+| `0014` | clamping the step the animations are integrated over |
+| `0015` | compositing a clear cart's layers once, not three times a frame |
+| `0016` | keeping the cart faces that are drawn, and none while playing |
+| `0017` | scaling rewind by the size of a state |
+| `0018` | freeing a texture, rather than only recycling it |
+| `0019` | not reading a ROM the core is going to open itself |
+
+`0006` is a gap: it timed the eject, answered its question — the stall was a
+deploy writing to the same card, not the eject — and was retired. `task patch`
+applies the glob in order and does not care, where renumbering would stale
+every `patches/00NN` reference in these notes. `cores/` carries two core
+patches of its own, one of them the other half of `0019`.
 
 ### Toolchain and cores
 
@@ -229,6 +242,16 @@ panel is mounted upside down, so the card's launch script sets
 `SLOT_FB_ROTATE=180`; `0009` sizes the picture for it, at 3x actual with a
 height-filling stretch.
 
+`0013` draws the bezel of the console being played — a Game Boy body under a
+GB cart, a Color one under GBC, the Advance SP shell under GBA. Upstream blits
+its bezel over the game every frame, which 345,600 pixels a frame is not
+affordable here, so the game pass is cropped to the picture instead and the
+bezel is painted into the surround, where it costs nothing until the picture
+moves. The art is 720x480 — the picture's frame — and the panel is 752x560, so
+rather than stretch it the plastic at each edge is mirrored outward to fill
+the margin: the art itself is never resampled and its screen hole stays
+exactly on the picture.
+
 The sprite path draws the shelf and the menus — gameplay never reaches it
 (`sprites 0.0 over 0 draws`). Each source row is expanded once to destination
 width with the column mask folded in, then reused for the three-odd output rows
@@ -237,32 +260,59 @@ that map to it, and the remaining linear loop is hand-written NEON via inline
 186 draws. LLVM will not autovectorise it at any loop shape: the horizontal
 scale makes the source read a gather, and NEON has no gather instruction.
 
+### Memory
+
+The device has 101 MB, about 20 of which the system holds, and upstream's art
+is sized for a GPU handheld with a gigabyte. slot was holding 44 MB before a
+core was even loaded and 78.5 with one, against a ceiling near 80 — a GBA cart
+would run for a few minutes and then be OOM-killed. Five patches and a core
+flag between them:
+
+| | |
+|---|---|
+| `0019` | gpSP sets `need_fullpath` and opens the ROM itself; slot read it anyway and held it. 8-32 MB a cart, for nothing. `cores/mgba/patches/` does the same on mGBA's side, which also stopped it taking a second copy |
+| `0018` | there was no way to free a texture at all — shed ones went on a recycle list — so three earlier savings had returned nothing to the system |
+| `0017` | rewind snapshotted every 2 frames into a 20 MB ring: for a 425,984-byte GBA state that is 12 MB/s of copy, XOR and LZ4 beside the emulator. Both scale with the state now |
+| `0016` | cart faces are kept for the span the shelf draws, and only the seated cart while a game plays |
+| `0015` | a clear cart was three full-size blends a frame; its layers are composited once instead |
+
+Worth knowing if you are tuning this further: `cores/gpsp/build-miyoo.sh` caps
+gpSP's gamepak buffer at 24 MB. A 32 MB cart then holds three quarters of its
+ROM and swaps the rest from the card, which is the only setting where rewind
+and a 32 MB cart both fit. The numbers behind all of it are in
+[notes/hardware.md](notes/hardware.md).
+
 ### Input
 
 `gpio_keys` reports keyboard codes rather than `BTN_*`, so `0003` carries the
-map; all 18 per-button codes are cross-checked against Allium's own.
+map; all 18 per-button codes were read off the device and cross-checked.
 
-MENU is contested. `alliumd` keeps running underneath whatever it launches and
-owns MENU globally, drawing a hotkeys overlay over the running game, so both it
-and slot answer every press. **Do not kill `alliumd`** — the card's boot hook
-falls through to a reboot loop without it. Boot slot *instead of* Allium from
-that same hook: see
-[Booting straight into slot](#booting-straight-into-slot-without-allium).
+MENU is contested when slot runs as an app under a launcher: the launcher's
+daemon keeps running underneath and owns MENU globally, drawing a hotkeys
+overlay over the running game, so both it and slot answer every press. **Do not
+kill that daemon** — the card's boot hook falls through to a reboot loop
+without it. Boot slot from the hook instead, and the problem goes away with it:
+see [Booting straight into slot](#booting-straight-into-slot).
 
 ### Power
 
 The backlight is a PWM channel at
-`soc/1f003400.pwm/pwm/pwmchip0/pwm0/duty_cycle`, the same file Allium writes;
-there is no `/sys/class/backlight` and no dispdbg here, so `0008` consults it
-only when neither exists. Its step ladder is measured rather than scaled,
+`soc/1f003400.pwm/pwm/pwmchip0/pwm0/duty_cycle`; there is no
+`/sys/class/backlight` and no dispdbg here, so `0008` consults it only when
+neither exists. Its step ladder is measured rather than scaled,
 because the panel's response is steeply non-linear: against an 800 ns period,
-duty 1 is not visible at all, the firmware boots at 6, and 112 is as bright as
-anyone wanted.
+the firmware boots at duty 6 and 112 is as bright as anyone wanted. The floor
+is 5, raised from 2 after the handheld spent a day booting to what looked like
+a dead screen — it was on brightness 2, which the first ladder put at duty 3,
+0.4% of the period. A setting that does nothing is worse than a short ladder.
 
 The lid is polled, not listened to — the hall sensor emits no evdev events at
 all. `0003` reads
 `/sys/devices/soc0/soc/soc:hall-mh248/hallvalue` (1 open, 0 closed), already
-the convention upstream expects. Closing dozes rather than suspends: `doze`
+the convention upstream expects. It also reads 0 from boot until the lid is
+actually opened once, whatever the lid is doing, so nothing is believed until
+it has said "open" at least once: without that, slot dozed on its first poll
+and every boot came up with the panel dark. Closing dozes rather than suspends: `doze`
 flushes the state writer and the resume snapshot, so **shutting the lid is a
 save point**, the core parks at `Speed::Paused`, the backlight goes to step 0,
 and `DOZE_TIMEOUT` powers the handheld off after 180 s. The SoC stays awake for
@@ -270,7 +320,7 @@ those three minutes, which is why FTP still answers with the lid shut.
 
 The battery is a vendor tool, not sysfs: there is no `/sys/class/power_supply`
 on this device at all. `/customer/app/axp_test` prints
-`{"battery":93, "voltage":4026, "charging":0}`, which is what Allium reads too.
+`{"battery":93, "voltage":4026, "charging":0}`.
 `0004` falls back to it; `0010` makes the probe line name whichever source will
 be read.
 
@@ -309,10 +359,26 @@ the frontend says rather than what it does.
   would interpret at ~22 ms a frame. See [docs/link.md](docs/link.md).
 
 - **GB palettes are off by default.** `gb_palettes=0` in `Config/slot.state`.
-  Turn them on in the quick menu under Screen, then L2 and R2 cycle 48 of them,
-  `GBC Red` included. mGBA does the recolouring -- slot passes the palette as a
-  core option, so the software renderer is not involved -- and it applies to
-  monochrome Game Boy carts, not to GBC titles that carry their own colour.
+  Turn them on in the in-game menu under Screen, then L2 and R2 cycle 48 of
+  them, `GBC Red` included. mGBA does the recolouring -- slot passes the
+  palette as a core option, so the software renderer is not involved -- and it
+  applies to monochrome Game Boy carts, not to GBC titles that carry their own
+  colour.
+
+- **Memory is comfortable now, not generous.** A 32 MB cart with rewind on
+  leaves about 15 MB free, and gpSP's JIT grows into whatever is left as new
+  code is translated. If a long session on a big cart is ever killed, rewind
+  is the first thing to turn off and `ROM_BUFFER_SIZE` in
+  `cores/gpsp/build-miyoo.sh` is the second thing to lower. The rest of the
+  shelf's art -- cart shadows, backings, chrome, another 2-3 MB -- could still
+  be freed while a game plays; it was left alone because those are computed
+  rather than decoded, so rebuilding them on every eject buys less and costs
+  more.
+
+- **Two fixes here belong upstream.** `need_fullpath` (`0019`) and the
+  animation-step clamp (`0014`) are not about this device at all, and
+  `notes/upstream-perf-issue.md` is the issue drafted for them. The branch is
+  on a fork at `deanmarano/slot`, cut against upstream `main`.
 
 ## Layout
 
@@ -325,9 +391,13 @@ card/                    what ships on the SD card
 cores/                   armv7 build scripts for the two libretro cores,
                          counterparts to upstream's aarch64 ones
   miyoo-toolchain.cmake  cross settings for mGBA's cmake build
+  .tmp_update/updater    the boot hook, for booting slot instead of a launcher
+cores/mgba/patches/      this port's own core patches, beside upstream's
 patches/                 changes to upstream files, applied to the submodule
 toolchain/Dockerfile     the cross build box
-notes/hardware.md        measured device facts (empty until probed)
+tools/                   fb2png, the wordmark generator, the telnet one-liner
+notes/hardware.md        measured device facts: panel, memory, audio, input
+notes/upstream-perf-issue.md   the fixes worth sending upstream, drafted
 upstream/slot            pinned submodule, read-only
 taskfile.yml             the armv7 build tasks
 ```
@@ -380,14 +450,27 @@ SLOT_DEVICE=192.168.1.x task sh:device CMD='free -m'
 ## Seeing what it draws
 
 ```sh
-task shot        # renders a frame under qemu into target-miyoo/frame.png
+task shot                            # render a frame under qemu, no handheld needed
+SLOT_DEVICE=<ip> task device:shot    # screenshot the handheld itself, over the network
 ```
 
-![slot's shelf, rendered by the software rasteriser](docs/shelf.png)
+![slot's shelf on the handheld, drawn entirely on the CPU](docs/shelf.png)
 
-That is slot's shelf drawn entirely on the CPU at 752x560 — no GPU, no EGL —
-with the 720x480 canvas centred and the panel's border around it. Carts, labels,
-text and alpha all land where the GL path puts them.
+That is slot's shelf on the device at 752x560, drawn entirely on the CPU — no
+GPU, no EGL. Carts, labels, shadows, text and alpha all land where the GL path
+puts them.
+
+![a Game Boy game inside its own console body](docs/bezel.png)
+
+And a Game Boy game inside the console it came from: the bezel of whichever
+machine is playing, filling the panel. The art is never stretched to get there
+— it sits at the picture's frame and the plastic at its edges is mirrored
+outward to cover the rest, so the screen hole stays exactly on the picture.
+
+`task device:shot` is how both of those were taken: `dd` off `/dev/fb0`, pull
+it over FTP, turn it back the right way up (the panel is mounted upside down).
+It is also the fastest way to settle an argument about the UI, which
+`CLAUDE.md` asks for before theorising.
 
 To get a populated shelf without ROMs, `task shot` writes a content root and
 slot needs `Config/slot.state` to hold **every** key its parser requires
@@ -474,27 +557,28 @@ The button map is in `patches/0003`; the gestures are upstream's, from
 | gesture | action |
 |---|---|
 | **hold MENU ~1 s** | **eject the cart, back to the shelf** |
-| tap MENU | quick menu (brightness, volume) — on the shelf only |
-| double-tap MENU | polaroids |
-| SELECT held, then MENU | game menu |
+| tap MENU, on the shelf | quick menu |
+| tap MENU, in a game | the in-game menu — Screen, Gameplay, bezels, palettes |
+| double-tap MENU, in a game | straight to States |
 | hold POWER ~1 s | power menu |
+| L1 / R1 in a GB or GBC game | stretch / actual |
 | **START on the shelf, GBA cart selected** | **core picker: left = mGBA, right = gpSP** |
 
-**The quick menu is shelf-only, as upstream intends.** In-game the menu button
-belongs to the link menu behind the select chord, and this device has no link
-support, so that chord answers "no link support" — there is no in-game settings
-menu here. That is upstream's design, kept deliberately; a patch to open the
-quick menu from a running game was written and then dropped in favour of
-matching upstream.
+**There is an in-game menu now**, from upstream's 2026-10 work: a tap of MENU
+opens it over the paused game, with a page per console under Screen. That is
+where the bezel for each console is chosen, and where GB palettes live. It
+replaces the older arrangement where the quick menu was shelf-only and a
+running game had no settings at all.
 
 **For GBA, pick gpSP.** mGBA has no GBA dynarec and interprets, while gpSP has
 an ARM JIT — the whole reason this port builds it. The choice is per game and
 is kept in `Config/selected_core.txt`.
 
-**slot has no quit.** Its power menu offers only Restart and Power Off, because
-on the Anbernic handhelds it replaces the launcher and there is nothing to
-return to. On an Allium card there is, so `task stop` kills it over telnet and
-hands the screen back — much better than rebooting, which also drops the WiFi.
+**slot has no quit.** Its power menu offers only Restart and Power Off,
+because on the Anbernic handhelds it replaces the launcher and there is nothing
+to return to. Where a launcher is installed there is, so `task stop` kills slot
+over telnet and hands the screen back — much better than rebooting, which also
+drops the WiFi.
 
 slot boots straight into whatever cart was last seated — that is intended, not
 a fault: the cart is remembered in `Config/slot.state` and re-seated at startup,
@@ -504,11 +588,12 @@ and the next boot lands on the shelf.
 On this device MENU is `KEY_ESC`, A is `KEY_SPACE`, B is `KEY_LEFTCTRL` — see
 `notes/hardware.md` for the full table.
 
-## Booting straight into slot, without Allium
+## Booting straight into slot
 
 slot wants the handheld to itself — on the Anbernic machines it *is* the
-launcher — and under Allium the daemon keeps running underneath and claims the
-MENU button, drawing a hotkeys overlay over the game.
+launcher — and run as an app under a launcher instead, that launcher's daemon
+keeps running underneath, claims the MENU button and draws a hotkeys overlay
+over the game.
 
 The card's boot hook is `.tmp_update/updater`, which the stock firmware runs: it
 sets up the backlight PWM and the LCD, detects the model, starts the audio
@@ -517,15 +602,24 @@ with one block added before the `alliumd` line:
 
 ```sh
 if [ -f "$ROOT"/.slot-boot ]; then
-    SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
+    [ -f "$ROOT"/.slot-net ] && setsid nice ... "$ROOT"/System/net-up.sh &
+    while [ "$slot_tries" -lt 3 ]; do
+        SLOT_ROOT="$ROOT" "$ROOT"/System/launch_frontend.sh
+        ...                       # a launch that lasted resets the count
+    done
 fi
 ```
 
-Booting slot means no Allium, and Allium was what brought up WiFi, telnet and
-FTP — without which the only way to put a new build on the handheld is to carry
-the card to a computer. So the hook starts the network itself, in the background
-so it never delays the frontend, when a `.slot-net` file is present.
-`System/net-up.sh` does that work and is shared with the **slot net** app.
+Booting slot means no launcher, and the launcher was what brought up WiFi,
+telnet and FTP — without which the only way to put a new build on the handheld
+is to carry the card to a computer. So the hook starts the network itself, in
+the background so it never delays the frontend, when a `.slot-net` file is
+present.
+`System/net-up.sh` does that work and is shared with the **slot net** app. It
+stays resident afterwards and polls the link every 20 seconds, reassociating
+when the radio drops — which it does whenever the handheld naps, and which
+used to mean the device simply vanished from the network until someone ran the
+app by hand.
 
 ```sh
 task boot:install        # put the hook on the card (once; it is boot-critical,
@@ -539,13 +633,24 @@ task boot:allium         # back to Allium
 **To turn it off:** delete `.slot-boot`. It needs no shell and no telnet — any
 computer with the card in it will do, which is the point of gating it on a file.
 
-If slot exits or fails to start, execution falls through to Allium below, so a
-bad build cannot leave a handheld that will not boot. The original is kept on
-the card as `.tmp_update/updater.allium-orig`.
+slot is relaunched rather than dropped, because falling through to the
+launcher costs about 20 MB — its daemon stays resident, and every launch after
+a crash then has 60 MB free instead of 82, which on this device is the
+difference between a GBA cart running and being killed. Bounded at three quick deaths so a build that
+cannot start at all still lands on the launcher rather than looping, with a five
+second wait between tries: booting slot is the busiest the handheld gets, and
+doing it again immediately once cost the radio three association attempts and
+five minutes. A launch that survives a while resets the count.
 
-**Never kill `alliumd` instead.** The boot hook ends with a `while true; do
-reboot; done` for when the launcher exits, so killing it makes the handheld
-reboot — which is exactly what happened when it was tried, and it looked like a
+`launch_frontend.sh` also drops a guard before starting and clears it once slot
+has lived 25 seconds. Finding it still there at boot means the last launch did
+not survive, and the seated cart is unseated so the handheld comes up on the
+shelf — which is what saves you when a cart kills the frontend on load. The
+original updater is kept on the card as `.tmp_update/updater.allium-orig`.
+
+**Never kill the launcher's daemon instead.** The boot hook ends with a
+`while true; do reboot; done` for when the launcher exits, so killing it makes
+the handheld reboot — which is exactly what happened when it was tried, and it looked like a
 power fault rather than a script doing as it was told.
 
 ## Caveats worth reading before you copy
@@ -555,7 +660,7 @@ power fault rather than a script doing as it was told.
 - **Card format:** whatever the device already boots from — don't reformat.
   FAT32 and exFAT are both routinely mounted `noexec`, which is why both launch
   scripts hand the binary to `ld.so` rather than executing it.
-- **`/mnt/SDCARD` is the card root**, confirmed against a live Allium install.
+- **`/mnt/SDCARD` is the card root**, confirmed on a live install.
   The scripts still derive it from their own location rather than hardcoding it,
   so a differently-mounted card works too.
 - **Three launcher layouts ship, and the unused ones are ignored.** Stock and
