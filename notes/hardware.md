@@ -1444,3 +1444,41 @@ read from the framebuffer at startup (`0020`), the picture is fitted to the
 width, and the console body is sized from the picture's frame. Everything
 else -- audio, backlight, battery, input codes, the card scripts -- worked
 unchanged from the Flip.
+
+## The Miyoo Mini, probed and run (2026-10-21)
+
+Onion 4.3.1-1 on a 64 GB card, the v0.2.0 zip installed beside it. Read from
+`slot-probe.txt` and `Logs/slot.log`; there is no WiFi on this handheld, so
+the card is the only way in and out.
+
+| | |
+|---|---|
+| SoC | `INFINITY2M SSC011A-S01A-S`, 2x Cortex-A7, NEON/VFPv4 -- the Flip's and the Plus's |
+| kernel | 4.9.84 #847 SMP PREEMPT, built 2022-04-19 |
+| panel | **640x480**, 32bpp, stride 2560, `virtual_size 640,1440`, `MStar FB0` -- the Mini Plus's exactly |
+| RAM | `MemTotal 103472 kB` |
+| **swap** | **131064 kB, active** -- Onion's `cachefile`. The Allium cards have none |
+| GLES | none on any path, as expected |
+| audio | `/config/lib/libmi_ao.so` present, with the rest of the MI stack |
+| input | one node, `event0`, `soc:gpio_keys` |
+| `power_supply` | **absent**, and the battery reads `no battery` |
+| backlight | PWM, 0 to 112, works |
+
+**The buttons need nothing.** The capability bitmap decodes to
+`1, 14, 15, 18, 20, 28, 29, 42, 56, 57, 97, 103, 105, 106, 108, 116` -- every
+code `0003` already maps. What it lacks is `114`/`115`, the volume keys, and
+that absence is the whole difference: this handheld's volume is a wheel. See
+`0021`.
+
+**Onion's `audioserver` owns MI_AO.** slot's sink came back
+`MI_AO open: error -1610276855` = `0xA0052009`, whose low nibble is
+`E_MI_ERR_NOT_PERM`, and the game played silently. `launch_frontend.sh` now
+stands the server down the way `/customer/main` does -- `/tmp/no_audioserver`
+plus `breakserver` -- and hands the device back on exit. Sound works after
+that, confirmed on the handheld.
+
+Still open on the Mini: **the battery**. Neither source `slot-power` knows
+exists here -- no `/sys/class/power_supply`, and Allium's own model detection
+says `axp_test` belongs to the Mini Plus. Onion runs a `batmon` process, so
+whatever it reads is where to look next. GBA is untested for want of a ROM on
+the card.

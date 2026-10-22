@@ -1,0 +1,118 @@
+hand the volume to the hardware when there are no volume keys
+
+The Miyoo Mini has a volume *wheel* -- an analogue pot on the amplifier --
+and no volume buttons. Its `soc:gpio_keys` bitmap carries the sixteen keys
+this port maps and neither KEY_VOLUMEUP nor KEY_VOLUMEDOWN, decoded off the
+device: `1c1682 0 3000400 3014c002` on a Flip against `101682 0 3000400
+3014c002` on the Mini, which is those two bits and nothing else.
+
+slot's volume defaults to 60 and is changed with those keys. On a wheel
+device that leaves a level at 60% that nothing on the handheld can raise:
+quiet, with no way up and no indication why.
+
+So when no input node advertises either key, both outputs go to 100 and
+neither is muted, and the wheel does the only job it can do. Read from the
+capability bitmaps rather than from a model name, because a bitmap is what is
+actually true -- the same reason `0004` reads them as 32-bit words.
+
+A device with volume keys is untouched: the Mini Flip and the Mini Plus keep
+their stored level and their HUD.
+
+Applies to upstream f4b7bc3.
+
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 9faaf89..511074c 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -2992,6 +2992,16 @@ impl App {
+         self.level()
+     }
+ 
++    /// Put slot's own volume out of the way, for a device whose only control
++    /// is a wheel. Both outputs, because a headphone level nothing can raise
++    /// is the same trap as a speaker one.
++    pub fn use_hardware_volume(&mut self) {
++        self.state.volume = 100;
++        self.state.volume_hp = 100;
++        self.state.muted = false;
++        self.state.muted_hp = false;
++    }
++
+     fn level(&self) -> u8 {
+         if self.headphones {
+             self.state.volume_hp
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+index 60689a0..6c13ad7 100644
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -172,6 +172,15 @@ pub fn run() {
+     slot::boot_time::mark("frontend");
+     let target = slot::baseos::var("BASEOS_TARGET").unwrap_or_default();
+     frontend.set_left_stick(slot::input::evdev::has_left_stick(&target));
++    // A handheld with a volume wheel and no volume keys -- the Miyoo Mini --
++    // leaves slot holding a level nothing on the device can raise. Hand the
++    // job to the wheel rather than ship a frontend that is quiet at 60% with
++    // no way up. Read from what the input nodes advertise, not from a model
++    // name, because that is the thing that is actually true.
++    if !slot::input::evdev::advertises_volume_keys(std::path::Path::new("/sys/class/input")) {
++        eprintln!("slot: no volume keys; volume is the hardware's");
++        frontend.use_hardware_volume();
++    }
+     frontend.upload_boot_faces(&mut compositor);
+     slot::boot_time::mark("faces");
+     frontend.upload_bezel(&mut compositor, window);
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 9d36fc2..310e8b3 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -754,6 +754,11 @@ impl Frontend {
+         self.session.app_mut().set_left_stick(present);
+     }
+ 
++    /// For a handheld whose volume is a wheel; see `App::use_hardware_volume`.
++    pub fn use_hardware_volume(&mut self) {
++        self.session.app_mut().use_hardware_volume();
++    }
++
+     pub fn core_settling(&self) -> bool {
+         self.session.core_settling()
+     }
+diff --git a/crates/slot/src/input/evdev.rs b/crates/slot/src/input/evdev.rs
+index 9e7e0d5..220b0bd 100644
+--- a/crates/slot/src/input/evdev.rs
++++ b/crates/slot/src/input/evdev.rs
+@@ -227,6 +227,34 @@ fn wanted_node(device: &Path) -> bool {
+     lid || WANTED.iter().any(|bit| has_bit(&keys, *bit))
+ }
+ 
++const KEY_VOLUMEDOWN: u16 = 114;
++const KEY_VOLUMEUP: u16 = 115;
++
++/// Whether any input node advertises the volume keys.
++///
++/// The Miyoo Mini has a volume *wheel*, an analogue pot on the amplifier, and
++/// no KEY_VOLUMEUP/KEY_VOLUMEDOWN at all -- its capability bitmap carries the
++/// other sixteen keys this port maps and not those two. slot's own volume is
++/// then a level nothing on the device can raise, so it is taken out of the way
++/// and the wheel is left to do the work. See `device_app`.
++pub fn advertises_volume_keys(sys: &Path) -> bool {
++    let Ok(entries) = std::fs::read_dir(sys) else {
++        return true;
++    };
++    entries
++        .filter_map(|e| e.ok())
++        .map(|e| e.path())
++        .filter(|p| {
++            p.file_name()
++                .is_some_and(|n| n.to_string_lossy().starts_with("event"))
++        })
++        .any(|node| {
++            let keys =
++                std::fs::read_to_string(node.join("device/capabilities/key")).unwrap_or_default();
++            has_bit(&keys, KEY_VOLUMEUP) || has_bit(&keys, KEY_VOLUMEDOWN)
++        })
++}
++
+ pub fn device_name(sys: &Path, node: &Path) -> String {
+     node.file_name()
+         .and_then(|n| std::fs::read_to_string(sys.join(n).join("device/name")).ok())

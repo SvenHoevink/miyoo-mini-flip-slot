@@ -139,6 +139,35 @@ mkdir -p "$LOGS/crash" 2>/dev/null
 echo "|/bin/sh $SYS/coresave-miyoo.sh %p %s %e %t" > /proc/sys/kernel/core_pattern 2>/dev/null
 ulimit -c unlimited 2>/dev/null
 
+# MI_AO has exactly one owner. Onion and stock both run `audioserver`, which
+# configures the device and holds it, so slot's open comes back
+# E_MI_ERR_NOT_PERM -- 0xA0052009, read out of Logs/slot.log on a Miyoo Mini
+# running Onion 4.3.1, where the game played silently.
+#
+# Stood down the way the firmware does rather than killed: /customer/main
+# honours /tmp/no_audioserver, and breakserver asks the server to exit. The
+# flag is dropped on the way out, so the launcher starts it again for whatever
+# runs next. Under Allium this does nothing -- its boot hook already skips the
+# server when slot is booting.
+audio_stood_down=
+if pgrep audioserver >/dev/null 2>&1; then
+	touch /tmp/no_audioserver
+	audio_stood_down=yes
+	for b in /customer/app/breakserver "$SD"/miyoo/app/breakserver; do
+		[ -x "$b" ] && "$b" && break
+	done
+	waited=0
+	while pgrep audioserver >/dev/null 2>&1 && [ "$waited" -lt 5 ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	# It can refuse: breakserver may be absent on a firmware this port has
+	# not seen. Silence is worse than a blunt instrument here, and the
+	# launcher restarts it either way.
+	pgrep audioserver >/dev/null 2>&1 && killall audioserver 2>/dev/null
+	echo "launch: audioserver stood down after ${waited}s" >> "$LOGS/crash/exits.log"
+fi
+
 # Not exec: the exit status is worth recording. An unexplained shutdown looks
 # the same as a clean exit from the outside, and this is what tells them apart.
 started="$(date '+%F %T' 2>/dev/null)"
@@ -147,6 +176,8 @@ status=$?
 # Before anything else: if the sleeper is still pending, slot did not survive
 # its first seconds, and the guard has to stay for the next boot to find.
 kill "$sleeper" 2>/dev/null
+# Hand the audio device back: the launcher's own loop starts its server again.
+[ -n "$audio_stood_down" ] && rm -f /tmp/no_audioserver
 echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$LOGS/crash/exits.log"
 if [ "$status" -gt 128 ]; then
 	# 128 + signal: killed rather than returned. 139 is SIGSEGV, 134 SIGABRT.
