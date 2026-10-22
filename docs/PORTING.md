@@ -73,12 +73,16 @@ What has *not* been checked there: GBC, the menus, buttons beyond play, saves
 and states, a clean install on stock firmware, and a frame time measured
 without the latency trace armed.
 
-The **Miyoo Mini** is the same SoC and panel again, and untried. Two things
-are known to differ, from Allium's own model detection: it has neither
-`/dev/input/event1` (the Flip's second input node) nor `/customer/app/axp_test`
-(the Mini Plus's battery tool), which are the two sources `slot-power` knows
-about -- so its charge lives somewhere this port has never looked, and it
-wants charger detection exported on GPIO 59. Its button codes are unread.
+The **Miyoo Mini** runs this too, tested 2026-10-21 on Onion 4.3.1: GB, GBC
+and GBA with sound, the same binary again. It needed two things the other two
+did not, both now in the series:
+
+  - its volume is a **wheel**, and it advertises no volume keys, so slot's
+    own level is handed to the hardware (`0021`);
+  - its battery is an **ADC** behind `/dev/sar` rather than a file or a
+    vendor tool (`0022`).
+
+Its buttons needed nothing: every code it advertises was already mapped.
 
 The **Miyoo A30** is not the same machine: an Allwinner A33 with a Mali-400
 and 512 MB, so it can run upstream's own GLES2 backend and wants none of this

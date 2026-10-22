@@ -1477,8 +1477,15 @@ stands the server down the way `/customer/main` does -- `/tmp/no_audioserver`
 plus `breakserver` -- and hands the device back on exit. Sound works after
 that, confirmed on the handheld.
 
-Still open on the Mini: **the battery**. Neither source `slot-power` knows
-exists here -- no `/sys/class/power_supply`, and Allium's own model detection
-says `axp_test` belongs to the Mini Plus. Onion runs a `batmon` process, so
-whatever it reads is where to look next. GBA is untested for want of a ROM on
-the card.
+**The battery is an ADC, not a file** (`0022`). No `/sys/class/power_supply`
+and no `axp_test`, so slot read `no battery` until it learned the third
+source: `/dev/sar`, `_IO('a', 0)` then `_IO('a', 1)` into `{channel, value}`,
+and gpio59 for the charger. `strings` on Onion's `batmon` named the device
+and the GPIO; the ioctls and the percentage curve came from Allium's
+`miyoo283.rs`, which runs on this handheld. The gauge reads on the device.
+
+**GBA plays.** Mother 3 -- the 32 MB cart that forced the memory work on the
+Flip -- runs at full speed with clean audio, on gpSP. This is the first
+device to meet it with swap, so the comparison with the Flip's numbers is not
+like for like; frame times from a card with no trace armed are still to be
+read.

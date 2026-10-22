@@ -1,0 +1,200 @@
+read the Miyoo Mini's battery off its ADC
+
+The Mini has no `/sys/class/power_supply` and no `axp_test`: the first is
+upstream's source and the second is the Mini Plus's, so slot showed
+`no battery` on a handheld whose charge is perfectly readable. It is an ADC
+reading rather than a file -- the SAR controller behind `/dev/sar`, two
+vendor ioctls on it, and a GPIO that says whether the charger is in.
+
+Found by `strings` on Onion's own `batmon`, which named `/dev/sar` and
+gpio59; implemented from Allium's
+`crates/common/src/platform/miyoo/battery/miyoo283.rs`, which runs on this
+handheld. Neither the ioctl numbers nor the curve are guessable, and reading
+the two projects that already do it is cheaper and more honest than fitting a
+curve to a battery nobody here can measure.
+
+  - `_IO('a', 0)` initialises the controller, `_IO('a', 1)` reads a channel
+    into `{ channel, value }`.
+  - The percentage is four straight segments of that value, Allium's: 578 and
+    up is full, 528..577 is `v - 478`, 512..527 and 480..511 each have their
+    own slope, and below that is empty.
+  - gpio59 reads non-zero while charging, exported first if the kernel has
+    not already.
+
+The curve is kept exactly as Allium has it, including a 2-point step down at
+the 527/528 join -- 51.9% then 50%. Smoothing it would be inventing a better
+fit for a cell that cannot be measured here, which is worse than inheriting a
+wart. A test pins the segment edges and allows that step while catching
+anything larger.
+
+Third in the chain, after the vendor tool and before sysfs: a handheld with
+`axp_test` has no `/dev/sar`, and one with sysfs is not a Miyoo.
+
+Read on the handheld: the gauge shows a percentage where it showed nothing.
+
+Applies to upstream f4b7bc3.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 05625cd..39c1406 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1902,6 +1902,7 @@ version = "0.1.0"
+ name = "slot-power"
+ version = "0.1.0"
+ dependencies = [
++ "libc",
+  "tempfile",
+ ]
+ 
+diff --git a/crates/slot-power/Cargo.toml b/crates/slot-power/Cargo.toml
+index 296b6e5..11265e9 100644
+--- a/crates/slot-power/Cargo.toml
++++ b/crates/slot-power/Cargo.toml
+@@ -6,6 +6,8 @@ rust-version.workspace = true
+ license.workspace = true
+ 
+ [dependencies]
++# For the Miyoo Mini's SAR ADC: two vendor ioctls, nothing else.
++libc = "0.2"
+ 
+ [dev-dependencies]
+ tempfile = { workspace = true }
+diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
+index 28b4ad1..8620554 100644
+--- a/crates/slot-power/src/device.rs
++++ b/crates/slot-power/src/device.rs
+@@ -510,6 +510,90 @@ fn read_number(path: &Path) -> Option<u32> {
+ /// vendor ioctls, which is a lot of machinery for the same number.
+ const AXP_TOOL: &str = "/customer/app/axp_test";
+ 
++/// The Miyoo Mini has neither: no `/sys/class/power_supply` and no vendor
++/// tool, because its charge is an ADC reading. Its gauge is the SAR
++/// controller behind `/dev/sar`, two ioctls on it, and a GPIO that says
++/// whether the charger is in.
++///
++/// Both the ioctl numbers and the curve are Allium's, which runs on this
++/// handheld: `crates/common/src/platform/miyoo/battery/miyoo283.rs`. They are
++/// not guessable -- the curve in particular is four straight segments fitted
++/// to this battery, and a reading means nothing without it.
++mod sar {
++    use super::{Battery, Charge};
++    use std::os::unix::io::AsRawFd;
++    use std::path::Path;
++
++    const DEV: &str = "/dev/sar";
++    /// `_IO('a', 0)` and `_IO('a', 1)`: direction none, so the number is just
++    /// the magic and the sequence.
++    const INIT: libc::c_ulong = (b'a' as libc::c_ulong) << 8;
++    const READ_CHANNEL: libc::c_ulong = ((b'a' as libc::c_ulong) << 8) | 1;
++
++    #[repr(C)]
++    struct AdcConfig {
++        channel: i32,
++        value: i32,
++    }
++
++    /// The charger line. Allium exports gpio59 and reads it; a value other
++    /// than zero is the charger in.
++    fn charging() -> Charge {
++        let gpio = Path::new("/sys/devices/gpiochip0/gpio/gpio59/value");
++        if !gpio.is_file() {
++            let _ = std::fs::write("/sys/class/gpio/export", "59");
++            let _ = std::fs::write("/sys/devices/gpiochip0/gpio/gpio59/direction", "in");
++        }
++        match super::read_number(gpio) {
++            Some(0) => Charge::Discharging,
++            Some(_) => Charge::Charging,
++            None => Charge::Unknown,
++        }
++    }
++
++    /// Four straight segments, Allium's, fitted to this cell.
++    ///
++    /// It is not quite continuous: 527 comes out at 51.9% and 528 at 50%, a
++    /// 2-point step down at the join. Kept exactly as Allium has it rather
++    /// than smoothed, because this is a curve fitted to a battery nobody here
++    /// can measure, and a gauge that is 2% out for one ADC count matters less
++    /// than one fitted by guesswork.
++    pub fn percent_of(adc: i32) -> u8 {
++        let p = match adc {
++            578..=i32::MAX => 100.0,
++            528..=577 => (adc - 478) as f64,
++            512..=527 => adc as f64 * 2.125 - 1068.0,
++            480..=511 => adc as f64 * 0.51613 - 243.742,
++            _ => 0.0,
++        };
++        p.clamp(0.0, 100.0) as u8
++    }
++
++    pub fn battery() -> Option<Battery> {
++        if !Path::new(DEV).exists() {
++            return None;
++        }
++        let fd = std::fs::File::open(DEV).ok()?;
++        let mut cfg = AdcConfig {
++            channel: 0,
++            value: 0,
++        };
++        // SAFETY: both are vendor ioctls on a file descriptor we just opened;
++        // the second writes the reading back into `cfg`, which outlives it.
++        let read = unsafe {
++            libc::ioctl(fd.as_raw_fd(), INIT, std::ptr::null::<libc::c_void>());
++            libc::ioctl(fd.as_raw_fd(), READ_CHANNEL, &mut cfg as *mut AdcConfig)
++        };
++        if read < 0 || cfg.value <= 0 {
++            return None;
++        }
++        Some(Battery {
++            percent: percent_of(cfg.value),
++            charge: charging(),
++        })
++    }
++}
++
+ fn axp_battery() -> Option<Battery> {
+     if !Path::new(AXP_TOOL).is_file() {
+         return None;
+@@ -629,6 +713,12 @@ impl Platform for DevicePlatform {
+         if let Some(b) = axp_battery() {
+             return Some(b);
+         }
++        // The Mini's ADC, after the Mini Plus's tool and before upstream's
++        // sysfs, because a handheld with the tool does not have `/dev/sar`
++        // and one with sysfs is not a Miyoo at all.
++        if let Some(b) = sar::battery() {
++            return Some(b);
++        }
+         let dir = self.battery.as_ref()?;
+         let percent = read_number(&dir.join("capacity"))?;
+         Some(Battery {
+@@ -881,6 +971,30 @@ mod miyoo_bitmap_tests {
+         has_bit_in_words(GPIO_KEYS, bit, 32)
+     }
+ 
++    /// Allium's curve, which is the only reason an ADC reading means
++    /// anything. Pinned at the segment edges, where an arithmetic slip shows.
++    #[test]
++    fn the_sar_curve_runs_from_empty_to_full_without_stepping_backwards() {
++        use super::sar::percent_of;
++        assert_eq!(percent_of(600), 100, "a full cell");
++        assert_eq!(percent_of(578), 100, "the top of the curve");
++        assert_eq!(percent_of(528), 50, "the flat middle segment");
++        assert_eq!(percent_of(479), 0, "below the curve is empty");
++        assert_eq!(percent_of(0), 0, "a failed read is not a full battery");
++        // Monotonic apart from the documented 2-point step at 528, which is
++        // Allium's curve and is kept. Anything larger is an arithmetic slip.
++        let mut last = 0u8;
++        for adc in 400..=600 {
++            let p = percent_of(adc);
++            assert!(
++                p + 2 >= last,
++                "{adc} reads {p}, more than 2 below the previous {last}"
++            );
++            assert!(p <= 100);
++            last = p;
++        }
++    }
++
+     #[test]
+     fn finds_every_button_the_device_advertises() {
+         // The 18 keys the probe decoded, cross-checked against Allium's map.

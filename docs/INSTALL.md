@@ -1,4 +1,4 @@
-# installing slot on a Miyoo Mini Flip or Mini Plus
+# installing slot on a Miyoo Mini Flip, Mini Plus or Mini
 
 This is the short version. The [README](../README.md) is the development log and
 explains *why*; this page is just what to do.
@@ -7,10 +7,10 @@ You need: the handheld, its SD card, a computer with a card reader, and a
 `slot-miyoo-*.zip` from [Releases](https://github.com/deanmarano/slot-miyoo/releases)
 (or `task release`, if you are building it yourself).
 
-**One zip covers the Mini Flip and the Mini Plus.** slot reads the panel from
-the framebuffer when it starts -- 752x560 on the Flip, 640x480 on the Mini
-Plus -- so the same card runs on either, and moving the card between them is
-all it takes.
+**One zip covers the Mini Flip, the Mini Plus and the Mini.** slot reads the
+panel from the framebuffer when it starts -- 752x560 on the Flip, 640x480 on
+the other two -- so the same card runs on any of them, and moving it between
+them is all it takes.
 
 Nothing here reflashes the device, deletes anything, or replaces your launcher.
 slot installs beside it as one more app, and works on stock firmware as well as
