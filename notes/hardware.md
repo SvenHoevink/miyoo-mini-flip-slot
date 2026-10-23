@@ -1526,3 +1526,33 @@ there were no pops and no stretching: the sink thread runs at `setpriority`
 falling over does not reach it. That is the first time the audio path has
 been pushed that hard, and it is the strongest evidence yet for the priority
 work in `0003` and the MI_AO sink in `0005`.
+
+## The radio will not do peer-to-peer (2026-10-23)
+
+rtl8188fu, on a Mini Flip and a Mini Plus. `wpa_cli get_capability modes`
+answers `IBSS AP`, and both are claims the driver does not honour.
+
+| tried | result |
+|---|---|
+| AP, `-Dnl80211` | never beacons; sits in `SCANNING` |
+| AP, `-Dwext` | `ioctl[SIOCSIWAP]: Operation not permitted` |
+| IBSS, `-Dnl80211` | **associates in 1 s**, two handhelds merge into one cell (same BSSID, each sees the other in a scan) -- and pass **no data**, 100% loss each way with static ARP in place |
+| IBSS, `-Dwext` | stuck `ASSOCIATING` |
+| through the house AP | works: 0% loss, but 6.7/147.5/469.2 ms min/avg/max, and 7.1/74.5/221.3 with `rtw_power_mgnt=0 rtw_ips_mode=0` on both ends after re-associating |
+
+A linked frame is 16.8 ms, so the last row is four to thirteen times over
+budget. This is not a CPU limit: the same device plays GBA in about 6 ms of
+that frame.
+
+Two things worth keeping from the attempt, because they cost an evening:
+
+  - **`/run` does not exist** on this firmware and `/` is read-only. Upstream's
+    `slotlink.sh` writes its session there, which is why the first attempts
+    reported "the radio did not come up" without touching the radio. It takes
+    `AGS_RUN`; the launch script now sets it, along with `AGS_LINK_FREQ=2437`
+    (upstream meets at 5745 MHz, which this 2.4 GHz-only radio cannot see) and
+    the vendor paths for `wpa_supplicant`/`wpa_cli`.
+  - **A bare shell has no `LD_LIBRARY_PATH`**, and the vendor `wpa_supplicant`
+    then dies with `libnl-tiny.so: cannot open shared object file`. The boot
+    hook exports it; telnet does not. Anything run by hand over telnet has to
+    set it, or it will look like the radio failing.

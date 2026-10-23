@@ -66,6 +66,36 @@ export SLOT_FB_ROTATE=180
 #   SLOTAO_FRAMES=N       MI_AO's hardware buffer, in 512-frame periods, 4 here
 #                         = 43 ms. The other half of the latency
 
+# Upstream's link script, slotlink.sh, is written for the Anbernic's BaseOS.
+# Three of its defaults are wrong on a Miyoo, and upstream made all three
+# overridable, so this needs no patch -- just the truth about this hardware.
+#
+#   - /run does not exist here and / is read-only, so the script could not
+#     write its session file and the link failed before the radio was touched:
+#     "can't create /run/slotlink.session: nonexistent directory", reported as
+#     "the radio did not come up".
+#   - 5745 MHz is 5 GHz. This radio is an rtl8188fu and reports Mode[B] and
+#     Mode[G] only -- channels 1-14, all 2.4 GHz. It cannot see that frequency,
+#     let alone host on it. 2437 is channel 6.
+#   - wpa_supplicant and wpa_cli are vendor binaries in /customer/app, and are
+#     not on PATH when slot is the boot process.
+export AGS_RUN=/tmp
+export AGS_LINK_FREQ="${AGS_LINK_FREQ:-2437}"
+# And hosting happens on the one radio there is. Upstream brings the AP up on
+# a second interface, wlan1, which the Anbernic has and this does not -- the
+# script waited four seconds for a device that is never going to appear and
+# reported it as the radio not coming up. Hosting here therefore means leaving
+# whatever network the handheld was on, which is the cost of having one radio.
+export AGS_LINK_AP_IFACE="${AGS_LINK_AP_IFACE:-wlan0}"
+export AGS_LINK_TRACE="${AGS_LINK_TRACE:-$LOGS/slotlink.log}"
+for d in /customer/app "$SD"/miyoo285/app "$SD"/miyoo354/app "$SD"/miyoo/app; do
+	if [ -x "$d/wpa_supplicant" ]; then
+		export AGS_WPA_SUPPLICANT="$d/wpa_supplicant"
+		export AGS_WPA_CLI="$d/wpa_cli"
+		break
+	fi
+done
+
 # The driver's FBIOPAN_DISPLAY costs 6.6 ms a frame here, which with 13.4 ms of
 # real work puts the loop near 20 ms. Drawing straight at the scanout
 # (SLOT_FB_PAGES=1) gives those 6.6 ms back but tears visibly, so the page flip

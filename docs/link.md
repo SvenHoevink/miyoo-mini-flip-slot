@@ -1,5 +1,12 @@
 # two-player, against an Anbernic
 
+**Link play does not work on these handhelds, and the reason is the radio.**
+Measured 2026-10-23 on a Mini Flip and a Mini Plus: the chip will not host an
+AP, will not carry data peer-to-peer in ad-hoc, and through an access point
+jitters by ten times a frame. The detail is below, under "hosting: answered".
+The rest of this page is kept because it is still true about slot's link and
+about what would be needed on a handheld that could.
+
 slot has a real two-player link, and most of it is hardware-independent, so
 the port gets it nearly for free. This page is what it is, what this device can
 and cannot do with it, and how to try it.
@@ -54,16 +61,76 @@ cart, not how to talk to another handheld.
 
 So: **try this with Tetris or Pokémon Gold before trying it with a GBA game.**
 
-### hosting: unknown, and the probe answers it
+### hosting: answered, and the answer is no (2026-10-23)
 
-Joining needs ordinary station mode, which this radio demonstrably does — that
-is how `task deploy` works. Hosting needs AP mode, and upstream gets it on a
-*second* interface (`wlan1`) that this chip does not have. Whether
-`wpa_supplicant` will bring up `mode=2` on `wlan0` here is the open question.
+Tested on a Mini Flip and a Mini Plus, both rtl8188fu, with the radio driven
+by hand rather than through the UI. The driver *claims* it can:
 
-Run **Apps → slot link probe** on the handheld. It tries it for real and
-writes `slot-linkprobe.txt` to the card root; the verdict at the bottom says
-which role this device can take. It puts the radio back when it is done.
+```
+wpa_cli get_capability modes   ->  IBSS AP
+wpa_cli get_capability channels ->  Mode[G] 1-14, Mode[B] 1-14   (no 5 GHz)
+```
+
+It cannot. AP mode was tried on wlan0 with both backends:
+
+| | result |
+|---|---|
+| `-Dnl80211` | `DISCONNECTED` then `SCANNING` for twelve seconds; never beacons |
+| `-Dwext` | `ioctl[SIOCSIWAP]: Operation not permitted`, then `SCANNING` |
+
+Asked to host, the interface goes looking for networks instead. So upstream's
+arrangement -- one handheld brings up an AP, the other joins it -- cannot work
+here, and not for want of a second interface: the one radio will not do it.
+
+### ad-hoc: forms, merges, and carries nothing
+
+IBSS looked like the answer. It is symmetric, which suits two identical
+handhelds better than an AP/station split, and the driver does bring it up:
+
+```
+0s: DISCONNECTED
+1s: COMPLETED      bssid 02:11:87:6c:e1:5e  freq 2437  mode=IBSS
+```
+
+Two handhelds, started a few seconds apart with `ap_scan=1`, **find each other
+and merge into one cell**: both report the same BSSID afterwards, and each
+sees the other's cell in a scan. Addresses and routes come up correctly.
+
+And then nothing crosses. Five pings each way, 100% loss, in both directions,
+with static ARP entries in place so the broadcast ARP cannot be blamed:
+
+```
+Flip: bssid 02:11:87:2c:5d:4f  arp 10.42.0.2 -> 98:03:cf:9d:48:1a (static)
+Plus: bssid 02:11:87:2c:5d:4f  arp 10.42.0.1 -> a8:b5:8e:a7:49:c0 (static)
+both: 5 packets transmitted, 0 received
+```
+
+The driver associates in IBSS and does not carry data in it.
+
+### over an access point: it works, and it is too slow
+
+Both handhelds on the same house WiFi can reach each other -- so if two people
+are in the same building with the same network, there is a path. The latency
+is the problem:
+
+| | min | avg | max |
+|---|---|---|---|
+| as shipped (`rtw_power_mgnt=2`) | 6.7 ms | 147.5 ms | 469.2 ms |
+| power save off, both ends, re-associated | 7.1 ms | 74.5 ms | 221.3 ms |
+
+A linked frame is **16.8 ms**. The floor is fast enough; the average is four
+times over it and the spikes are thirteen times over. Turning the driver's
+power saving off (`rtw_power_mgnt`, `rtw_ips_mode`) helps and does not fix it.
+
+### so: not on this radio
+
+Not for want of CPU -- in a GBA game this port uses about 6 ms of a 16.8 ms
+frame, and GB is lighter still. The radio is the limit: it will not host, it
+will not pass data peer-to-peer, and through an access point it jitters by ten
+times a frame.
+
+What would change the answer: a handheld whose WiFi driver does AP or a
+working IBSS, or a wired path. Neither is these three.
 
 ## the frequency, which is the thing that will bite
 
