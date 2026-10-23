@@ -1536,7 +1536,7 @@ answers `IBSS AP`, and both are claims the driver does not honour.
 |---|---|
 | AP, `-Dnl80211` | never beacons; sits in `SCANNING` |
 | AP, `-Dwext` | `ioctl[SIOCSIWAP]: Operation not permitted` |
-| IBSS, `-Dnl80211` | **associates in 1 s**, two handhelds merge into one cell (same BSSID, each sees the other in a scan) -- and pass **no data**, 100% loss each way with static ARP in place |
+| IBSS, `-Dnl80211` | **associates in 1 s**, two handhelds merge into one cell (same BSSID, each sees the other in a scan) -- and pass **no data**. `tx_pkts` in `/proc/net/dev` does not move while ping sends: the frames never leave the radio. Tested with power saving off *before* joining and HT disabled |
 | IBSS, `-Dwext` | stuck `ASSOCIATING` |
 | through the house AP | works: 0% loss, but 6.7/147.5/469.2 ms min/avg/max, and 7.1/74.5/221.3 with `rtw_power_mgnt=0 rtw_ips_mode=0` on both ends after re-associating |
 

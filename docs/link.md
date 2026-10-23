@@ -105,7 +105,27 @@ Plus: bssid 02:11:87:2c:5d:4f  arp 10.42.0.1 -> a8:b5:8e:a7:49:c0 (static)
 both: 5 packets transmitted, 0 received
 ```
 
-The driver associates in IBSS and does not carry data in it.
+The driver associates in IBSS and does not carry data in it. Frame counters
+say where it stops -- this is with power saving turned off *before* the cell
+was joined, since in ad-hoc there is no AP to hold frames for a sleeping
+radio, and with HT disabled in case the two ends were agreeing rates neither
+could receive:
+
+```
+Flip:  before rx_pkts=2539 tx_pkts=134   after rx_pkts=2539 tx_pkts=134
+Plus:  before rx_pkts=2601 tx_pkts=174   after rx_pkts=2601 tx_pkts=174
+both:  same bssid, 5 packets transmitted by ping, 0 received
+```
+
+`tx_pkts` does not move. The packets are handed to the driver and never go
+out. Not power save, not the receive path, not rates, not keys: the transmit
+path in ad-hoc is not there.
+
+Everything a script can reach has been tried -- mode, both driver backends,
+`ap_scan`, power management, HT, open and CCMP cells, static ARP. Fixing this
+means patching rtl8188fu's IBSS transmit path and building the module, for a
+chip whose vendor shipped it stubbed. That is a driver project, not a
+frontend one.
 
 ### over an access point: it works, and it is too slow
 
