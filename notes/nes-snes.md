@@ -112,8 +112,11 @@ presents:
 
 The core itself takes 8-10 ms a frame (`emu>pub`), so it was never the problem:
 the hitches were rewind's serialize and the core's own 60 Hz timer against a
-59.6 Hz panel. Overlap is switched on by `Config/drive-overlap.txt`; it has
-been played on the SNES only so far.
+59.6 Hz panel. Overlap is the card's default since the volume-HUD round, played
+on SNES and GBA; `Config/drive-timer.txt` goes back to the core's own clock.
+Input to screen, from the `latency:` lines' totals: ~40 ms overlapped against
+~53 unchained, so the overlap's one-frame pipeline costs no latency over the
+timer it replaced -- the timer's frames waited for the next draw anyway.
 
 Tapping MENU in a NES or SNES game overflowed the stack until `0030`, which
 looked like a frozen handheld: no log line, no power button. Found by

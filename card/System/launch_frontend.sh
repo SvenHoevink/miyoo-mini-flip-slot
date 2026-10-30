@@ -102,12 +102,16 @@ done
 # stays. Instead the core is unchained from the display: it keeps its own
 # 59.73 Hz and the display drops the frames it cannot fit, so the speed and the
 # audio pitch are right and the cost is judder rather than slow motion.
-export SLOT_DRIVE_EMU=0
-# Overlapped instead (patches/0029): the core is ticked by the panel and runs
-# beside the draw rather than before it, which takes out the judder of its own
-# 60 Hz timer. Not yet the default; switched from the card while it is measured:
-#   touch Config/drive-overlap.txt
-[ -f "$SD/Config/drive-overlap.txt" ] && export SLOT_DRIVE_EMU=overlap
+#
+# That unchained clock is a 60 Hz timer on a 100 Hz kernel tick against a
+# 59.6 Hz panel, and it judders on its own. So the default is overlapped
+# (patches/0029, 0031): the panel ticks the core, which runs on the second CPU
+# beside the draw. Measured on the Flip in Super Mario World, 0-5 of 600
+# presents late against 9-27 unchained, and input to screen ~40 ms against ~53.
+# The unchained clock stays one empty file away:
+#   touch Config/drive-timer.txt
+export SLOT_DRIVE_EMU=overlap
+[ -f "$SD/Config/drive-timer.txt" ] && export SLOT_DRIVE_EMU=0
 
 # Audio: upstream's ring depth, and the codec queue throttle on by default in
 # the binary (SLOTAO_QUEUE, five 512-frame periods, 53 ms).
