@@ -141,3 +141,15 @@ without it. Two causes, two patches:
 Played on the Flip with `0031`-`0033` together: volume changes, a GBA cart
 on gpSP and SNES play all held speed. A long present now logs its
 draw_list, end_frame and overlay times under `SLOT_TRACE_LATENCY`.
+
+Blue light was still the slow case (traced the same day, Pokemon Emerald on
+gpSP, blue light 5): 0032 sent a HUD through the canvas whenever the gain
+was on, 20-24 ms a frame with the bar up against 7.8 without it, 675
+presents over 25 ms with no overlay time in any of them. `0034` grades the
+overlay as it composes it and keeps the direct path; it also stops a GBA
+HUD from carrying the whole Advance shell with it, and from staying on the
+panel, faint, after it fades.
+
+Played on the Flip with `0034` (2026-10-31): volume changes on a GBA cart
+with blue light on hold speed, and the bar leaves nothing behind when it
+fades.
