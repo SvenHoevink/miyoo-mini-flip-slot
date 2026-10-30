@@ -10,12 +10,22 @@ surround and returned before the overlay was cleared: the HUD's last,
 nearly transparent frame and the full-canvas shell went on being composed
 on every frame after it, for as long as the cart ran.
 
+With blue light on, 0032 sent any HUD through the canvas, because the
+overlay was copied out ungraded. Traced on the Flip with Pokemon Emerald
+on gpSP at blue light 5: 7.8 ms a frame without the HUD, 20-24 ms with it
+(the game into the canvas, the 752x560 shell as a 7.7 ms sprite, a graded
+copy of the whole panel), and 675 presents over 25 ms, none of them with
+any overlay time.
+
 Now:
 - the shell goes into the surround whenever it is seated, and only what
-  follows it is the overlay, so a GBA HUD is the 752x41 plate alone (not
-  with blue light, whose overlay takes the canvas path and needs the shell
-  in the list);
+  follows it is the overlay, so a GBA HUD is the 752x41 plate alone;
 - the overlay is cleared on that path too;
+- the overlay is graded as it is composed -- the game's rows through the
+  same column mask the panel pass uses, the sprites tinted by the gain --
+  so blue light keeps the direct path. A gain is a per-channel scale, so
+  blending warmed sprites over warmed pixels is the canvas path's graded
+  copy, give or take rounding;
 - the rect an overlay covered is redrawn from the surround and the game on
   each page for PAGES frames after it changes or goes, since the direct
   pass writes only the game's rect and a HUD over the surround would
@@ -26,16 +36,44 @@ Now:
 
 Tests: a HUD over the shell leaves the shell out of the overlay; frames
 after a HUD has gone match, pixel for pixel, frames that never had one,
-upright and mirrored; a still HUD off the picture is not composed again.
-All three fail without this patch; run as armv7 under qemu with `task
-test`.
+upright and mirrored; a still HUD off the picture is not composed again;
+with blue light at its warmest a HUD over the shell stays direct and lands
+within 2 of the cold frame through the gain table, upright and mirrored.
+The first three fail without this patch; run as armv7 under qemu with
+`task test`.
 
 Applies on top of 0033, upstream 91499a9.
 
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 --- a/crates/slot-gfx/src/soft/mod.rs
 +++ b/crates/slot-gfx/src/soft/mod.rs
-@@ -561,6 +561,17 @@ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i3
+@@ -262,6 +262,9 @@ struct Game {
+     /// Rows the next pass is limited to, for redrawing only what an overlay
+     /// covers. `None` is every row.
+     band: Option<(i32, i32)>,
++    /// Grade a pass into the canvas too, for an overlay that is copied out to
++    /// the panel without a grade of its own.
++    grade_canvas: bool,
+ }
+ 
+ impl Game {
+@@ -282,6 +285,7 @@ impl Game {
+             col_key: None,
+             line: Vec::new(),
+             band: None,
++            grade_canvas: false,
+         }
+     }
+ 
+@@ -372,6 +376,7 @@ impl Game {
+         // already does, so the filter costs nothing per pixel here.
+         let grade = match dest {
+             Dest::Fb(_) => self.gain8,
++            Dest::Canvas(_) if self.grade_canvas => self.gain8,
+             Dest::Canvas(_) => [256; 3],
+         };
+         let img = tex.unwrap_or(&self.frame);
+@@ -561,6 +566,17 @@ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i3
      (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
  }
  
@@ -53,7 +91,7 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
  /// The blue-light gain as a byte table per channel, or `None` at step 0.
  ///
  /// The canvas and the panel are both in panel order, so the table for byte 0
-@@ -872,6 +883,14 @@ pub struct Compositor {
+@@ -872,6 +888,19 @@ pub struct Compositor {
      /// whole frame through the canvas for them, the game still goes straight
      /// to the panel and only the rect they cover is composed and copied out.
      overlay: Vec<Draw>,
@@ -65,20 +103,26 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +    /// otherwise stay there: the direct pass writes only the game's rect.
 +    overlay_stale: Option<(i32, i32, i32, i32)>,
 +    overlay_left: u32,
++    /// Multiplies every sprite's colour, RGB. The gain, while an overlay is
++    /// composed over a graded surround with blue light on: a gain is a
++    /// per-channel scale, so blending warmed sprites over warmed pixels is the
++    /// canvas path's graded copy, give or take rounding.
++    tint: [f32; 3],
      /// The last frame's draw_list, end_frame and overlay times, in us.
      stage_us: [u64; 3],
      textures: Vec<Option<Tex>>,
-@@ -916,6 +935,9 @@ impl Compositor {
+@@ -916,6 +945,10 @@ impl Compositor {
              was_direct: false,
              direct_game: false,
              overlay: Vec::new(),
 +            overlay_shown: Vec::new(),
 +            overlay_stale: None,
 +            overlay_left: 0,
++            tint: [1.0; 3],
              stage_us: [0; 3],
              textures: Vec::new(),
              white: TexId::from_raw(0),
-@@ -1041,7 +1063,7 @@ impl Compositor {
+@@ -1041,7 +1074,7 @@ impl Compositor {
              h,
              tex,
              alpha,
@@ -87,7 +131,7 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
          {
              let canvas = (self.canvas.w as f32, self.canvas.h as f32);
              let seated = *x == 0.0 && *y == 0.0 && *w == canvas.0 && *h == canvas.1;
-@@ -1051,8 +1073,17 @@ impl Compositor {
+@@ -1051,8 +1084,14 @@ impl Compositor {
              // then means nothing draws it at all. Reported as "the bezel only
              // shows when the HUD is up", because a HUD puts a third item in
              // the list and the strip comes back by the normal path.
@@ -95,18 +139,51 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +            // A HUD over the shell, as on every GBA cart: the shell still goes
 +            // into the surround and only the HUD is an overlay. Left in the
 +            // list, the shell made the overlay the whole canvas -- the canvas
-+            // path again, every frame the bar showed. Not with blue light,
-+            // whose overlay takes the canvas path and would lose the shell.
-+            let sprites =
-+                rest.is_empty() || (self.gain == [1.0, 1.0, 1.0] && rest.iter().all(is_sprite));
-+            if seated && *alpha == 1.0 && sprites {
++            // path again, every frame the bar showed.
++            if seated && *alpha == 1.0 && rest.iter().all(is_sprite) {
                  self.take_surround_shell(*tex);
 +                self.overlay.clear();
 +                self.overlay.extend_from_slice(rest);
                  self.direct_game = true;
                  self.was_direct = true;
                  return;
-@@ -1595,18 +1626,60 @@ impl Compositor {
+@@ -1221,6 +1260,8 @@ impl Compositor {
+             };
+             match *item {
+                 Draw::Rect { x, y, w, h, colour } => {
++                    let [r, g, b] = self.tint;
++                    let colour = [colour[0] * r, colour[1] * g, colour[2] * b, colour[3]];
+                     self.profile.rects += 1;
+                     raster::fill_rect(
+                         &mut self.canvas,
+@@ -1248,7 +1289,7 @@ impl Compositor {
+                             y,
+                             w,
+                             h,
+-                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]),
+                             &mut self.scratch,
+                         );
+                     }
+@@ -1270,7 +1311,7 @@ impl Compositor {
+                             y,
+                             w,
+                             h,
+-                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]),
+                             uv,
+                             &mut self.scratch,
+                         );
+@@ -1293,7 +1334,7 @@ impl Compositor {
+                             y,
+                             w,
+                             h,
+-                            raster::to_storage([1.0, 1.0, 1.0, alpha]),
++                            raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]),
+                             turn,
+                             &mut self.scratch,
+                         );
+@@ -1595,18 +1636,60 @@ impl Compositor {
      /// gets what the panel shows there first -- the surround, then the game's
      /// own rows -- so the sprites blend over the same pixels they would have on
      /// the canvas path, without reading the panel back.
@@ -174,7 +251,26 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
          let span = (bx1 - bx0) as usize * 4;
          self.surround((target.w, target.h));
          let surround = self.surround.take();
-@@ -1714,6 +1787,7 @@ impl Compositor {
+@@ -1623,12 +1706,18 @@ impl Compositor {
+             }
+         }
+         self.surround = surround;
++        // The surround is graded already and the copy below is straight, so
++        // the game's rows and the sprites are graded on the way in.
+         self.game.band = Some((by0, by1));
++        self.game.grade_canvas = true;
+         self.game.draw(&mut self.canvas, None);
++        self.game.grade_canvas = false;
+         self.game.band = None;
++        self.tint = self.gain;
+         let overlay = std::mem::take(&mut self.overlay);
+         self.draw_sprites(&overlay);
+         self.overlay = overlay;
++        self.tint = [1.0; 3];
+ 
+         let x_start = (x + bx0).max(0);
+         let x_end = (x + bx1).min(pw);
+@@ -1714,6 +1803,7 @@ impl Compositor {
              self.last_out = Some(rect);
              self.clear_left = PAGES;
          }
@@ -182,7 +278,26 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
          if self.clear_left > 0 {
              self.clear_left -= 1;
              // The bezel is the panel's background: a full-panel image of the
-@@ -1833,9 +1907,7 @@ impl Compositor {
+@@ -1785,14 +1875,10 @@ impl Compositor {
+         // The gain is not among these: the game pass carries it in its column
+         // mask and the surround was graded when it was taken, so everything
+         // this path writes is already warm. Blue light costs nothing here.
+-        // An overlay is composed on the canvas and copied out as it is, so the
+-        // gain it would get on the canvas path has to be absent for the two to
+-        // agree; with blue light on it takes the canvas path instead.
+-        let direct = self.direct_game
+-            && w == cw
+-            && h == ch
+-            && target.bgr
+-            && (self.overlay.is_empty() || identity);
++        // An overlay is graded as it is composed (`overlay_out`), so blue
++        // light keeps this path too: with the canvas path instead, a HUD on a
++        // GBA cart ran 20-24 ms a frame on the Flip against 7.8 without it.
++        let direct = self.direct_game && w == cw && h == ch && target.bgr;
+         if self.direct_game && !direct {
+             let t = std::time::Instant::now();
+             let path = self.game.draw(&mut self.canvas, None);
+@@ -1833,9 +1919,7 @@ impl Compositor {
                  self.profile.path = path;
                  self.profile.direct = true;
              }
@@ -193,7 +308,7 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
              return;
          }
  
-@@ -2294,6 +2366,141 @@ mod overlay_tests {
+@@ -2294,6 +2378,205 @@ mod overlay_tests {
              assert_eq!(differ, 0, "{differ} pixels differ from the canvas path");
          }
      }
@@ -204,6 +319,10 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +    type List = fn(TexId, TexId) -> Vec<Draw>;
 +
 +    fn run(mount: Mount, lists: &[List]) -> (Vec<u8>, Compositor) {
++        run_warm(mount, 0, lists)
++    }
++
++    fn run_warm(mount: Mount, blue: u8, lists: &[List]) -> (Vec<u8>, Compositor) {
 +        let (pw, ph) = (out_w(), out_h());
 +        let mut panel = vec![0u8; pw as usize * ph as usize * 4];
 +        let target = fb::Target {
@@ -217,6 +336,7 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +        unsafe { fb::set_current_for_test(Some(target)) };
 +        let mut c = Compositor::new(&NoSurface).expect("compositor");
 +        c.mount = mount;
++        c.set_blue_light(blue);
 +        let mut frame = vec![0u8; (SRC_W * SRC_H * 4) as usize];
 +        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
 +            let (x, y) = (i as u32 % SRC_W, i as u32 / SRC_W);
@@ -228,7 +348,11 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +            px.copy_from_slice(&[(i % 251) as u8, 90, (i % 13) as u8 * 19, 255]);
 +        }
 +        let shell = c.create_texture(pw, ph, &shell);
-+        let icon = c.create_texture(20, 30, &[200u8; 20 * 30 * 4]);
++        let mut art = vec![0u8; 20 * 30 * 4];
++        for (i, px) in art.chunks_exact_mut(4).enumerate() {
++            px.copy_from_slice(&[255, (i * 3) as u8, 40, (i * 11) as u8]);
++        }
++        let icon = c.create_texture(20, 30, &art);
 +        for list in lists {
 +            c.begin_frame();
 +            c.draw_list(&list(shell, icon));
@@ -272,6 +396,61 @@ diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 +            alpha: 0.1,
 +        });
 +        items
++    }
++
++    fn shell_and_bar(shell: TexId, icon: TexId) -> Vec<Draw> {
++        let mut items = shell_only(shell, icon);
++        let plate = [0.0, 0.0, 0.0, 0.72];
++        let fill = [0.9, 0.8, 0.3, 1.0];
++        items.push(Draw::Rect {
++            x: 0.0,
++            y: 0.0,
++            w: out_w() as f32,
++            h: 40.0,
++            colour: plate,
++        });
++        items.push(Draw::Tex {
++            x: 300.0,
++            y: 5.0,
++            w: 20.0,
++            h: 30.0,
++            tex: icon,
++            alpha: 1.0,
++        });
++        items.push(Draw::Rect {
++            x: 330.0,
++            y: 16.5,
++            w: 120.0,
++            h: 8.0,
++            colour: fill,
++        });
++        items
++    }
++
++    /// With blue light on, a HUD over the shell still goes out on its own:
++    /// via the canvas it was 20-24 ms a frame on the Flip against 7.8 without
++    /// it. The overlay is graded as it is composed. The canvas path's frame is
++    /// the cold frame through the gain table -- and the cold frame is the
++    /// canvas path's, by the test above -- so the warm one has to land within
++    /// rounding of that.
++    #[test]
++    fn a_hud_under_blue_light_stays_direct_and_grades_as_the_canvas_path_would() {
++        let warm = crate::grade::BLUE_LIGHT_MAX;
++        let lut = gain_table(crate::grade::blue_light_gain(warm)).expect("a gain");
++        for mount in [Mount::Normal, Mount::Half] {
++            let (a, c) = run_warm(mount, warm, &[shell_and_bar]);
++            let (cold, _) = run_warm(mount, 0, &[shell_and_bar]);
++            assert!(c.direct_game, "blue light sent the HUD through the canvas");
++            assert_eq!(c.overlay.len(), 3, "the shell went into the overlay");
++            let worst = a
++                .chunks_exact(4)
++                .zip(cold.chunks_exact(4))
++                .flat_map(|(p, q)| (0..3).map(move |i| p[i].abs_diff(lut[i][q[i] as usize])))
++                .max()
++                .unwrap_or(0);
++            assert!(worst <= 2, "a channel is {worst} off the graded frame");
++            assert_ne!(a, cold, "the gain did not reach the panel");
++        }
 +    }
 +
 +    /// A GBA cart draws its HUD over the Advance shell. The shell belongs in
