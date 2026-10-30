@@ -120,3 +120,21 @@ looked like a frozen handheld: no log line, no power button. Found by
 seating the real cart on the real core in a test under Docker; the device
 log was no help, because a frozen handheld that loses power loses the last
 seconds of `slot.log` with it.
+
+## the volume HUD (2026-10-30)
+
+Same handheld and firmware. With the core ticked by the panel, the volume
+HUD made the game slow down for as long as the bar showed: Super Mario World
+traced 247 of 600 presents missing a latch in a window with the bar up, 0-6
+without it. Two causes, two patches:
+
+- `0031`: a present that spanned two blanks ticked the core once, so the
+  game lost a frame each time. It now owes the core one tick per blank, up
+  to three (`0033` lets longer stalls go).
+- `0032`: any sprite over the game sent the whole frame through the canvas,
+  21.6 ms of render against ~10. The game now stays on the direct path and
+  only the HUD's rect is composed and copied out.
+
+Played on the Flip with `0031`-`0033` together: volume changes, a GBA cart
+on gpSP and SNES play all held speed. A long present now logs its
+draw_list, end_frame and overlay times under `SLOT_TRACE_LATENCY`.
