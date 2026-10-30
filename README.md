@@ -24,7 +24,7 @@ the root of your SD card, and find **slot** in your launcher's app list.
 
 That's the whole install — it needs no custom firmware and replaces nothing.
 It works on Miyoo's own firmware as well as on Allium, and your games go in
-`Games/GB`, `Games/GBC` and `Games/GBA` on the card.
+`Games/GB`, `Games/GBC`, `Games/GBA`, `Games/NES` and `Games/SNES` on the card.
 [**docs/INSTALL.md**](docs/INSTALL.md) is the full page: BIOS files, bezels,
 booting straight into slot, and what to do when something is wrong.
 
@@ -47,6 +47,7 @@ Everything here was seen running on the handheld, not inferred from a build.
 | | |
 |---|---|
 | GB, GBC, GBA | yes — GBA on gpSP, which has an ARM JIT; mGBA plays all three |
+| **NES, SNES** | **builds, not yet run on the handheld** — FCEUmm and Snes9x 2005; see [notes/nes-snes.md](notes/nes-snes.md) |
 | frame budget | backend 8.2 ms of a 16.86 ms frame, core 6.3 ms |
 | shelf | scrolls at 15-18 ms a frame |
 | saves, save states, rewind | yes, including MBC2's odd 512x4 bits |
@@ -80,7 +81,7 @@ emits a display list of six `Draw` variants, and all the GL sits behind one
 `/dev/fb0`; the port adds a third, a software rasteriser writing to a mmapped
 framebuffer. Nothing above that seam changed.
 
-The twenty-five patches, by what they are about:
+The twenty-seven patches, by what they are about:
 
 | | |
 |---|---|
@@ -92,6 +93,7 @@ The twenty-five patches, by what they are about:
 | panels | `0020` the layout sized from the panel at runtime, so one binary fits the Flip's 752x560 and the Mini and Mini Plus's 640x480 |
 | the Mini | `0021` volume handed to its wheel, `0022` its battery read off the SAR ADC |
 | these devices | `0007` the sticker, `0023` the handheld's own name on it |
+| more systems | `0027` NES and SNES: their cores, a frame of their own, their carts on the shelf. A feature, not a port fix, and it changes `slot-ui` -- see `notes/nes-snes.md` |
 
 `0019` and `0014` are not about this device and belong upstream;
 `notes/upstream-perf-issue.md` is the issue drafted for them.
@@ -112,9 +114,9 @@ task run:qemu   # run the device build on this machine, under qemu
 task shell      # poke around inside the toolchain container
 ```
 
-`task all` produces three armv7 artifacts: the 4.0 MB `slot` frontend and the
-`gpsp` and `mgba` libretro cores, all 32-bit ARMv7-A, VFPv4 hard-float, needing
-nothing beyond glibc 2.28. With a device on the network, `task deploy` pushes
+`task all` produces five armv7 artifacts: the 4.0 MB `slot` frontend and the
+`gpsp`, `mgba`, `fceumm` and `snes9x2005` libretro cores, all 32-bit ARMv7-A,
+VFPv4 hard-float, needing nothing beyond glibc 2.28. With a device on the network, `task deploy` pushes
 a build over FTP and `task log` pulls the log back.
 
 ```

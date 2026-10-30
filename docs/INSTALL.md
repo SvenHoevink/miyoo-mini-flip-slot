@@ -96,13 +96,21 @@ ROMs go **unzipped** in the folders the zip created:
 | Game Boy | `Games/GB` |
 | Game Boy Color | `Games/GBC` |
 | Game Boy Advance | `Games/GBA` |
+| NES | `Games/NES` (`.nes`) |
+| Super Nintendo | `Games/SNES` (`.sfc`, `.smc`) |
 
 These are slot's own folders and are **not** the `Roms/` your launcher uses —
 slot keeps its library separate. Saves and save states land beside them in
 `Saves/` and `States/`.
 
 GBA also needs a BIOS at **`BIOS/gba_bios.bin`**. Without it GBA games will not
-start. It is not included here and you have to supply it yourself.
+start. It is not included here and you have to supply it yourself. The NES and
+SNES need no BIOS.
+
+**NES and SNES are new and have not been played on the handheld yet.** They
+build, and the code is there, but nobody has timed a SNES game on this CPU.
+If one runs slow, that is the first thing to report. Label art goes in
+`Labels/NES` and `Labels/SNES`, named like the ROM, as for the other systems.
 
 Bezels -- the plastic body drawn around the picture -- are picked per console
 in the quick menu under Screen. A Game Boy and a Game Boy Color body ship
@@ -120,8 +128,12 @@ file name.
 | tap MENU, in a game | the in-game menu: screen, bezels, palettes, states |
 | double-tap MENU, in a game | straight to States |
 | hold POWER ~1 s | power menu |
-| L1 / R1 in a GB or GBC game | stretch / actual size |
+| L1 / R1 in a GB, GBC or NES game | stretch / actual size |
 | **START on the shelf, GBA cart selected** | core picker: left = mGBA, right = **gpSP** |
+
+On the SNES, L1 and R1 are the game's L and R, and X and Y are its X and Y --
+there is no turbo there. A NES or SNES game is drawn at 2x by default (512x448);
+stretch fills the screen's height instead.
 
 **For GBA, pick gpSP.** mGBA interprets on this CPU and runs at roughly half
 speed; gpSP has an ARM JIT and holds the frame budget. The choice is per game.

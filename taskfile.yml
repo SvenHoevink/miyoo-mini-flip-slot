@@ -30,6 +30,10 @@ vars:
   # Kept in step with upstream/slot/taskfile.yml. Bump both together.
   MGBA_COMMIT: e31759b24e7a4e3899285ff720d7b573ac328ae7
   GPSP_COMMIT: 7b2dd37394e2822110cacef321e9bb291a305b77
+  # The NES and SNES cores have no upstream pin to keep in step with; these are
+  # this port's own. Resolved 2026-10-30.
+  FCEUMM_COMMIT: ac0d00a7fc01166f84c7bac01d1084ebfd2b865e
+  SNES9X2005_COMMIT: a79dfe9047e7fec58808aefe48ad2bf499c7af11
 
 tasks:
   default:
@@ -180,11 +184,54 @@ tasks:
           CMD: >-
             ${CROSS_COMPILE}nm -D --defined-only vendor-miyoo/libslotao.so | grep -c slotao_
 
+  core:fceumm:
+    desc: Build fceumm_libretro.so for armv7 (the NES core)
+    deps: [image]
+    status:
+      - test -f vendor-miyoo/fceumm_libretro.so
+      - test "$(cat vendor-miyoo/fceumm_libretro.so.meta 2>/dev/null)" = "$(sh cores/fceumm/build-miyoo.sh stamp {{.FCEUMM_COMMIT}})"
+    cmds:
+      - mkdir -p third-party vendor-miyoo
+      - test -f third-party/fceumm-src.tar.gz || curl -fsSL -o third-party/fceumm-src.tar.gz "https://github.com/libretro/libretro-fceumm/archive/{{.FCEUMM_COMMIT}}.tar.gz"
+      - task: sh
+        vars:
+          CMD: sh cores/fceumm/build-miyoo.sh build {{.FCEUMM_COMMIT}} third-party/fceumm-src.tar.gz target-miyoo/fceumm vendor-miyoo/fceumm_libretro.so
+      - task: verify:arm
+        vars: {FILE: vendor-miyoo/fceumm_libretro.so}
+      # The same Makefile skips -static-libgcc here as gpSP's does; see core:gpsp.
+      - task: sh
+        vars:
+          CMD: >-
+            ! arm-linux-gnueabihf-readelf -d vendor-miyoo/fceumm_libretro.so
+            | grep -E "NEEDED.*(libstdc\+\+|libgcc_s)"
+
+  core:snes9x2005:
+    desc: Build snes9x2005_libretro.so for armv7 (the SNES core)
+    deps: [image]
+    status:
+      - test -f vendor-miyoo/snes9x2005_libretro.so
+      - test "$(cat vendor-miyoo/snes9x2005_libretro.so.meta 2>/dev/null)" = "$(sh cores/snes9x2005/build-miyoo.sh stamp {{.SNES9X2005_COMMIT}})"
+    cmds:
+      - mkdir -p third-party vendor-miyoo
+      - test -f third-party/snes9x2005-src.tar.gz || curl -fsSL -o third-party/snes9x2005-src.tar.gz "https://github.com/libretro/snes9x2005/archive/{{.SNES9X2005_COMMIT}}.tar.gz"
+      - task: sh
+        vars:
+          CMD: sh cores/snes9x2005/build-miyoo.sh build {{.SNES9X2005_COMMIT}} third-party/snes9x2005-src.tar.gz target-miyoo/snes9x2005 vendor-miyoo/snes9x2005_libretro.so
+      - task: verify:arm
+        vars: {FILE: vendor-miyoo/snes9x2005_libretro.so}
+      - task: sh
+        vars:
+          CMD: >-
+            ! arm-linux-gnueabihf-readelf -d vendor-miyoo/snes9x2005_libretro.so
+            | grep -E "NEEDED.*(libstdc\+\+|libgcc_s)"
+
   cores:
-    desc: Build both libretro cores for armv7
+    desc: Build the four libretro cores for armv7
     cmds:
       - task: core:gpsp
       - task: core:mgba
+      - task: core:fceumm
+      - task: core:snes9x2005
 
   build:
     desc: Build the slot binary for armv7
@@ -238,7 +285,7 @@ tasks:
         set -eu
         dirs=$(sed -n '/^pub const DIRS/,/^];/p' {{.UPSTREAM}}/crates/slot/src/root.rs                | grep -oE '"[^"]+"' | tr -d '"')
         n=$(echo "$dirs" | grep -c .)
-        [ "$n" = 24 ] || { echo "expected 24 dirs from root.rs, got $n" >&2; exit 1; }
+        [ "$n" = 32 ] || { echo "expected 32 dirs from root.rs, got $n" >&2; exit 1; }
         for d in $dirs; do mkdir -p "{{.OUT}}/$d"; done
         echo "content root: $n directories"
       # Both launcher layouts: App/<Name>/ for stock and Onion, Apps/<Name>.pak/
@@ -269,12 +316,18 @@ tasks:
       - cp card/System/autoboot/runtime.sh {{.OUT}}/System/autoboot/
       - cp target-miyoo/rust/{{.TARGET}}/device/slot {{.OUT}}/System/slot
       - cp vendor-miyoo/gpsp_libretro.so vendor-miyoo/mgba_libretro.so {{.OUT}}/System/
+      - cp vendor-miyoo/fceumm_libretro.so vendor-miyoo/snes9x2005_libretro.so {{.OUT}}/System/
       - cp vendor-miyoo/libslotao.so {{.OUT}}/System/
       - chmod +x {{.OUT}}/System/slot {{.OUT}}/System/*.sh {{.OUT}}/App/*/launch.sh {{.OUT}}/Apps/*/launch.sh
       # GPL-3.0: ship the licence texts and the cores' corresponding source refs.
       - cp -R {{.UPSTREAM}}/licenses {{.OUT}}/System/licenses
       - cp vendor-miyoo/gpsp_libretro.so.meta vendor-miyoo/mgba_libretro.so.meta {{.OUT}}/System/licenses/
       - cp third-party/gpsp-src.tar.gz {{.OUT}}/System/licenses/
+      # FCEUmm is GPL-2.0, so its source travels like gpSP's. Snes9x 2005 is
+      # under Snes9x's own non-commercial licence; its text goes with it.
+      - cp vendor-miyoo/fceumm_libretro.so.meta vendor-miyoo/snes9x2005_libretro.so.meta {{.OUT}}/System/licenses/
+      - cp third-party/fceumm-src.tar.gz third-party/snes9x2005-src.tar.gz {{.OUT}}/System/licenses/
+      - cp vendor-miyoo/snes9x2005_libretro.so.copyright {{.OUT}}/System/licenses/snes9x2005-LICENSE.txt
       # What built this tree, travelling with it. The cores already ship their
       # own .meta stamps above; this is the frontend's provenance, which nothing
       # recorded. A card found months from now should be able to name the commit
@@ -290,6 +343,8 @@ tasks:
           echo "toolchain   $(sed -n 's|^FROM ||p' toolchain/Dockerfile)"
           echo "mgba        {{.MGBA_COMMIT}}"
           echo "gpsp        {{.GPSP_COMMIT}}"
+          echo "fceumm      {{.FCEUMM_COMMIT}}"
+          echo "snes9x2005  {{.SNES9X2005_COMMIT}}"
           echo "target      {{.TARGET}}"
         } > "$out"
         cat "$out"
@@ -610,16 +665,18 @@ tasks:
       - 'echo "pushed to {{.DEVICE}} — relaunch slot on the handheld"'
 
   deploy:cores:
-    desc: Push the two libretro cores as well, which rarely change
+    desc: Push the four libretro cores as well, which rarely change
     deps: [device:check, cores]
     cmds:
       # Staged and renamed, like the binary and the shim: these are dlopen'ed,
       # so truncating one under a running slot is a crash in slot-emu.
       - curl -sS -T vendor-miyoo/gpsp_libretro.so "{{.FTP}}/System/gpsp_libretro.so.new"
       - curl -sS -T vendor-miyoo/mgba_libretro.so "{{.FTP}}/System/mgba_libretro.so.new"
+      - curl -sS -T vendor-miyoo/fceumm_libretro.so "{{.FTP}}/System/fceumm_libretro.so.new"
+      - curl -sS -T vendor-miyoo/snes9x2005_libretro.so "{{.FTP}}/System/snes9x2005_libretro.so.new"
       - >-
         sh tools/device-sh.sh {{.DEVICE}}
-        'cd /mnt/SDCARD/System; for c in gpsp mgba; do
+        'cd /mnt/SDCARD/System; for c in gpsp mgba fceumm snes9x2005; do
         [ -s $c\_libretro.so.new ] && mv $c\_libretro.so.new $c\_libretro.so && echo "renamed $c" || echo "upload incomplete, left $c alone"; done'
 
   sh:device:

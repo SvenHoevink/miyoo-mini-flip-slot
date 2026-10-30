@@ -9,6 +9,12 @@ building this; [docs/INSTALL.md](../docs/INSTALL.md) is the install page, and
 
 ## Status
 
+**NES and SNES added on 2026-10-30, not yet run on the handheld.** `patches/0027`
+and two new cores, FCEUmm and Snes9x 2005. Both cores load a test cart under
+qemu from the armv7 build and draw a full 256x224 frame; that says nothing
+about frame time on the A7. [nes-snes.md](nes-snes.md) has the design and the
+list of things to measure first.
+
 **Bumped to upstream `v1.8.1` on 2026-10-22**, 18 commits and two releases on
 from `f4b7bc3`. Four patches needed hand-work and one core patch went away:
 
