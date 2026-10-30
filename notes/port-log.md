@@ -13,7 +13,8 @@ building this; [docs/INSTALL.md](../docs/INSTALL.md) is the install page, and
 and two new cores, FCEUmm and Snes9x 2005. Both cores load a test cart under
 qemu from the armv7 build and draw a full 256x224 frame; that says nothing
 about frame time on the A7. [nes-snes.md](nes-snes.md) has the design and the
-list of things to measure first.
+list of things to measure first. `patches/0028` opens both full screen at the
+panel's 4:3 rather than at 2x with a border.
 
 **Bumped to upstream `v1.8.1` on 2026-10-22**, 18 commits and two releases on
 from `f4b7bc3`. Four patches needed hand-work and one core patch went away:

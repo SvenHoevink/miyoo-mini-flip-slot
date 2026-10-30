@@ -1,0 +1,211 @@
+fill the panel with a nes or snes picture
+
+A NES or SNES game now opens full screen: the picture is drawn across the
+whole panel, 752x560 on the Flip and 640x480 on the Mini. Both panels are
+4:3 or within 1% of it, which is the shape a television showed these
+consoles at -- their pixels were 8:7, not square, and the TV overscanned
+the edges -- so filling the panel is the console's own aspect rather than
+a distortion. It is 2.94x across by 2.5x down on the Flip, nearest-neighbour,
+so columns and rows come out two and three pixels wide in turn.
+
+This changes what the player sees, on purpose, and is a feature rather
+than something upstream needs to work here; upstream has no NES or SNES.
+
+Stretch is what draws it, and is now the default for the two consoles: a
+cart with no line in Config/video_mode.txt opens stretched, where a Game
+Boy family cart still opens at actual size. `video_mode_for` takes the
+platform to know which. Actual stays the 2x pixel-exact picture with a
+border; R1 picks it on a NES game and L1 goes back. The SNES leaves its
+shoulders to the game, so there `actual` in video_mode.txt is the way back.
+
+`the_effective_scale_is_never_doubled_up` asked every mode for square
+pixels; a stretched console is let off that, and still held to the panel.
+
+Not yet run on the handheld. Filling the panel is more output pixels than
+2x (421,120 against 229,376) and more than the 640x560 stretch it replaces,
+so the game pass costs more per frame; time it with the rest of
+notes/nes-snes.md.
+
+Applies to upstream 91499a9, after 0001-0027.
+
+diff --git a/crates/slot/src/video_mode.rs b/crates/slot/src/video_mode.rs
+index d09906e..5398b62 100644
+--- a/crates/slot/src/video_mode.rs
++++ b/crates/slot/src/video_mode.rs
+@@ -27,13 +27,23 @@ impl VideoMode {
+             _ => None,
+         }
+     }
++
++    /// What a cart with no line in `video_mode.txt` opens at. A NES or SNES
++    /// game fills the panel, as it filled a television; the Game Boy family
++    /// keeps upstream's pixel-exact default.
++    pub fn default_for(platform: Platform) -> VideoMode {
++        match platform.console() {
++            true => VideoMode::Stretch,
++            false => VideoMode::Actual,
++        }
++    }
+ }
+ 
+-pub fn video_mode_for(root: &Path, stem: &str) -> VideoMode {
++pub fn video_mode_for(root: &Path, stem: &str, platform: Platform) -> VideoMode {
+     ini::value(root, VIDEO_MODE_FILE, stem)
+         .as_deref()
+         .and_then(VideoMode::parse)
+-        .unwrap_or_default()
++        .unwrap_or(VideoMode::default_for(platform))
+ }
+ 
+ pub fn write_video_mode(root: &Path, stem: &str, mode: VideoMode) -> std::io::Result<()> {
+@@ -127,20 +137,28 @@ pub fn base_size(platform: Platform, mode: VideoMode) -> [f32; 2] {
+ 
+ /// A NES or SNES picture, which fills its own 256x224 canvas.
+ ///
+-/// **Actual** is the largest whole multiple that fits: 2x, 512x448, on both
+-/// the Flip's 752x560 and the Mini's 640x480. **Stretch** fills the height with
+-/// square pixels instead -- 2.5x, 640x560, on the Flip -- which is bigger and
+-/// uneven: rows come out two and three pixels tall in turn. Neither corrects
+-/// for the 8:7 pixels a television drew, which would make it wider still.
++/// **Stretch**, the default for both, is the whole panel: 752x560 on the Flip,
++/// 640x480 on the Mini. Both panels are 4:3 or within 1% of it, which is the
++/// shape a television drew these consoles at -- their 8:7 pixels put a 256x224
++/// picture at 1.31:1, and every TV overscanned the rest. So unlike a Game Boy,
++/// where filling the panel was tried and rejected as 21% too wide, here it is
++/// the console's own aspect: 2.94x across by 2.5x down on the Flip.
++///
++/// **Actual** is the largest whole multiple that fits, 2x, 512x448 on both
++/// panels: square pixels, pixel-exact, with a border. R1 picks it on the NES.
+ fn console_size(platform: Platform, mode: VideoMode) -> [f32; 2] {
+-    let (w, h) = platform.canvas();
+-    let (w, h) = (w as f32, h as f32);
+-    let fit = (out_w() as f32 / w).min(out_h() as f32 / h);
+-    let k = match mode {
+-        VideoMode::Actual => fit.floor().max(1.0),
+-        VideoMode::Stretch => fit,
+-    };
+-    [w * k, h * k]
++    match mode {
++        VideoMode::Stretch => [out_w() as f32, out_h() as f32],
++        VideoMode::Actual => {
++            let (w, h) = platform.canvas();
++            let (w, h) = (w as f32, h as f32);
++            let k = (out_w() as f32 / w)
++                .min(out_h() as f32 / h)
++                .floor()
++                .max(1.0);
++            [w * k, h * k]
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -216,15 +234,31 @@ mod fit_tests {
+             assert_eq!(k, k.floor(), "{p:?} is {w}x{h}");
+             assert_eq!(h, 224.0 * k);
+             assert!(w <= out_w() as f32 && h <= out_h() as f32);
+-            let [sw, sh] = base_size(p, VideoMode::Stretch);
+-            assert!(sw >= w && sh >= h, "{p:?} stretched smaller");
+-            assert!(
+-                (sh - out_h() as f32).abs() < 0.5 || (sw - out_w() as f32).abs() < 0.5,
+-                "{p:?} stretched to {sw}x{sh}, touching neither edge"
++        }
++    }
++
++    #[test]
++    fn a_stretched_console_fills_the_panel() {
++        for p in [Platform::Nes, Platform::Snes] {
++            assert_eq!(
++                base_size(p, VideoMode::Stretch),
++                [out_w() as f32, out_h() as f32],
++                "{p:?}"
+             );
+         }
+     }
+ 
++    #[test]
++    fn consoles_open_full_screen_and_game_boys_at_actual_size() {
++        for p in Platform::ALL {
++            let want = match p {
++                Platform::Nes | Platform::Snes => VideoMode::Stretch,
++                _ => VideoMode::Actual,
++            };
++            assert_eq!(VideoMode::default_for(p), want, "{p:?}");
++        }
++    }
++
+     #[test]
+     fn a_gba_picture_is_the_same_in_both_modes() {
+         assert_eq!(
+@@ -245,8 +279,11 @@ mod fit_tests {
+                 let src = source_rect(p, mode);
+                 let (cw, ch) = p.canvas();
+                 let (sx, sy) = (bw / (src[2] * cw as f32), bh / (src[3] * ch as f32));
++                // A stretched console fills the panel on purpose, at the 4:3
++                // a television drew it at; the bound below still holds it.
++                let square = !(p.console() && mode == VideoMode::Stretch);
+                 assert!(
+-                    (sx - sy).abs() < 0.001,
++                    !square || (sx - sy).abs() < 0.001,
+                     "{p:?}/{mode:?} scales {sx}x by {sy}y -- not square"
+                 );
+                 let (w, h) = p.picture();
+diff --git a/crates/slot/src/session.rs b/crates/slot/src/session.rs
+index 6f51d82..db6a3e2 100644
+--- a/crates/slot/src/session.rs
++++ b/crates/slot/src/session.rs
+@@ -519,8 +519,9 @@ impl Session {
+         launch(&format!("opening {stem} on {}", core.as_str()));
+         self.app.set_core(core);
+         self.app.set_platform(platform);
+-        self.app
+-            .set_video_mode(crate::video_mode::video_mode_for(&self.root, stem));
++        self.app.set_video_mode(crate::video_mode::video_mode_for(
++            &self.root, stem, platform,
++        ));
+         self.app.set_link_loaded(serial);
+         let root = self.root.clone();
+         let stem = stem.to_owned();
+diff --git a/crates/slot/tests/app.rs b/crates/slot/tests/app.rs
+index 140ce53..00472f7 100644
+--- a/crates/slot/tests/app.rs
++++ b/crates/slot/tests/app.rs
+@@ -1950,9 +1950,12 @@ fn the_picture_mode_is_remembered_per_cart() {
+     let mut s = session_playing(d.path());
+     s.feed([RawEvent::Down(Btn::L1)], 100);
+     s.feed([RawEvent::Up(Btn::L1)], 120);
+-    assert_eq!(video_mode_for(d.path(), "Tetris"), VideoMode::Stretch);
+     assert_eq!(
+-        video_mode_for(d.path(), "Zzz"),
++        video_mode_for(d.path(), "Tetris", Platform::Gb),
++        VideoMode::Stretch
++    );
++    assert_eq!(
++        video_mode_for(d.path(), "Zzz", Platform::Gb),
+         VideoMode::Actual,
+         "the press was recorded against another cart as well"
+     );
+@@ -1965,7 +1968,10 @@ fn the_picture_mode_is_remembered_per_cart() {
+         "the cart did not come back stretched"
+     );
+     s.feed([RawEvent::Down(Btn::R1)], 100);
+-    assert_eq!(video_mode_for(d.path(), "Tetris"), VideoMode::Actual);
++    assert_eq!(
++        video_mode_for(d.path(), "Tetris", Platform::Gb),
++        VideoMode::Actual
++    );
+     assert_eq!(s.app().source_rect(), WHOLE_TEXTURE);
+ }
+ 
+@@ -1976,7 +1982,10 @@ fn a_cart_with_no_line_reads_as_actual_size() {
+         !d.path().join(VIDEO_MODE_FILE).exists(),
+         "the fixture already wrote the file"
+     );
+-    assert_eq!(video_mode_for(d.path(), "Tetris"), VideoMode::Actual);
++    assert_eq!(
++        video_mode_for(d.path(), "Tetris", Platform::Gb),
++        VideoMode::Actual
++    );
+ 
+     let s = session_playing(d.path());
+     assert_eq!(
