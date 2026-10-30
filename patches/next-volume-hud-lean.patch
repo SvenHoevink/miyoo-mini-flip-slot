@@ -1,0 +1,337 @@
+let a hud over the shell go, and keep it off the rest of the frame
+
+On a GBA cart the volume HUD stayed on the panel, faint, after it had
+faded, and the frame stayed expensive with it. The display list there is
+the game, the Advance shell, then the HUD. 0032 took all of that past the
+game as the overlay, shell included, so every frame the bar showed was
+composed over the whole canvas -- the canvas path again. When the HUD
+went, the list was the game and the shell, which takes the shell into the
+surround and returned before the overlay was cleared: the HUD's last,
+nearly transparent frame and the full-canvas shell went on being composed
+on every frame after it, for as long as the cart ran.
+
+Now:
+- the shell goes into the surround whenever it is seated, and only what
+  follows it is the overlay, so a GBA HUD is the 752x41 plate alone (not
+  with blue light, whose overlay takes the canvas path and needs the shell
+  in the list);
+- the overlay is cleared on that path too;
+- the rect an overlay covered is redrawn from the surround and the game on
+  each page for PAGES frames after it changes or goes, since the direct
+  pass writes only the game's rect and a HUD over the surround would
+  otherwise stay there;
+- an overlay that has not changed and lies off the picture is not composed
+  again once every page has it. One over the picture still is, every frame,
+  as the game pass has just written over it.
+
+Tests: a HUD over the shell leaves the shell out of the overlay; frames
+after a HUD has gone match, pixel for pixel, frames that never had one,
+upright and mirrored; a still HUD off the picture is not composed again.
+All three fail without this patch; run as armv7 under qemu with `task
+test`.
+
+Applies on top of 0033, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -561,6 +561,17 @@ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i3
+     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+ }
+ 
++fn union(
++    a: Option<(i32, i32, i32, i32)>,
++    b: Option<(i32, i32, i32, i32)>,
++) -> Option<(i32, i32, i32, i32)> {
++    match (a, b) {
++        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
++        (a, None) => a,
++        (None, b) => b,
++    }
++}
++
+ /// The blue-light gain as a byte table per channel, or `None` at step 0.
+ ///
+ /// The canvas and the panel are both in panel order, so the table for byte 0
+@@ -872,6 +883,14 @@ pub struct Compositor {
+     /// whole frame through the canvas for them, the game still goes straight
+     /// to the panel and only the rect they cover is composed and copied out.
+     overlay: Vec<Draw>,
++    /// The overlay as last written out, so an unchanged one that the game does
++    /// not draw over is left on the panel instead of composed again.
++    overlay_shown: Vec<Draw>,
++    /// Canvas rect a page may still hold an older overlay in, and how many
++    /// more frames repaint it. A HUD that fades out over the surround would
++    /// otherwise stay there: the direct pass writes only the game's rect.
++    overlay_stale: Option<(i32, i32, i32, i32)>,
++    overlay_left: u32,
+     /// The last frame's draw_list, end_frame and overlay times, in us.
+     stage_us: [u64; 3],
+     textures: Vec<Option<Tex>>,
+@@ -916,6 +935,9 @@ impl Compositor {
+             was_direct: false,
+             direct_game: false,
+             overlay: Vec::new(),
++            overlay_shown: Vec::new(),
++            overlay_stale: None,
++            overlay_left: 0,
+             stage_us: [0; 3],
+             textures: Vec::new(),
+             white: TexId::from_raw(0),
+@@ -1041,7 +1063,7 @@ impl Compositor {
+             h,
+             tex,
+             alpha,
+-        }] = items
++        }, rest @ ..] = items
+         {
+             let canvas = (self.canvas.w as f32, self.canvas.h as f32);
+             let seated = *x == 0.0 && *y == 0.0 && *w == canvas.0 && *h == canvas.1;
+@@ -1051,8 +1073,17 @@ impl Compositor {
+             // then means nothing draws it at all. Reported as "the bezel only
+             // shows when the HUD is up", because a HUD puts a third item in
+             // the list and the strip comes back by the normal path.
+-            if seated && *alpha == 1.0 {
++            // A HUD over the shell, as on every GBA cart: the shell still goes
++            // into the surround and only the HUD is an overlay. Left in the
++            // list, the shell made the overlay the whole canvas -- the canvas
++            // path again, every frame the bar showed. Not with blue light,
++            // whose overlay takes the canvas path and would lose the shell.
++            let sprites =
++                rest.is_empty() || (self.gain == [1.0, 1.0, 1.0] && rest.iter().all(is_sprite));
++            if seated && *alpha == 1.0 && sprites {
+                 self.take_surround_shell(*tex);
++                self.overlay.clear();
++                self.overlay.extend_from_slice(rest);
+                 self.direct_game = true;
+                 self.was_direct = true;
+                 return;
+@@ -1595,18 +1626,60 @@ impl Compositor {
+     /// gets what the panel shows there first -- the surround, then the game's
+     /// own rows -- so the sprites blend over the same pixels they would have on
+     /// the canvas path, without reading the panel back.
+-    fn overlay_out(&mut self, target: fb::Target, at: (i32, i32), half: bool) {
++    ///
++    /// Each page that showed an overlay gets the rect redrawn once it changes
++    /// or goes, so nothing of it is left on the surround. An overlay that has
++    /// not changed and lies off the game is already on every page and costs
++    /// nothing; one over the game is composed every frame, as the game pass
++    /// has just written over it.
++    fn overlay_out(&mut self, target: fb::Target, at: (i32, i32), half: bool, repainted: bool) {
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
++        let now = overlay_bounds(&self.overlay, cw, ch);
++        if repainted || self.overlay != self.overlay_shown {
++            let was = overlay_bounds(&self.overlay_shown, cw, ch);
++            self.overlay_stale = union(self.overlay_stale, was);
++            self.overlay_shown.clone_from(&self.overlay);
++            self.overlay_left = PAGES;
++        }
++        let over_game = now.is_some_and(|b| {
++            let (gx, gy, gw, gh) = self.game.rect();
++            let g = (
++                gx.floor() as i32,
++                gy.floor() as i32,
++                (gx + gw).ceil() as i32,
++                (gy + gh).ceil() as i32,
++            );
++            b.0 < g.2 && g.0 < b.2 && b.1 < g.3 && g.1 < b.3
++        });
++        let area = if self.overlay_left > 0 {
++            self.overlay_left -= 1;
++            let area = union(self.overlay_stale, now);
++            if self.overlay_left == 0 {
++                self.overlay_stale = None;
++            }
++            area
++        } else if over_game {
++            now
++        } else {
++            None
++        };
++        let Some(area) = area else {
++            return;
++        };
+         let t = std::time::Instant::now();
+-        self.overlay_out_inner(target, at, half);
++        self.overlay_out_inner(target, at, half, area);
+         self.stage_us[2] = t.elapsed().as_micros() as u64;
+     }
+ 
+-    fn overlay_out_inner(&mut self, target: fb::Target, (x, y): (i32, i32), half: bool) {
+-        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
+-        let Some((bx0, by0, bx1, by1)) = overlay_bounds(&self.overlay, cw, ch) else {
+-            return;
+-        };
++    fn overlay_out_inner(
++        &mut self,
++        target: fb::Target,
++        (x, y): (i32, i32),
++        half: bool,
++        (bx0, by0, bx1, by1): (i32, i32, i32, i32),
++    ) {
+         let (pw, ph) = (target.w as i32, target.h as i32);
++        let cw = self.canvas.w as i32;
+         let span = (bx1 - bx0) as usize * 4;
+         self.surround((target.w, target.h));
+         let surround = self.surround.take();
+@@ -1714,6 +1787,7 @@ impl Compositor {
+             self.last_out = Some(rect);
+             self.clear_left = PAGES;
+         }
++        let repainted = self.clear_left > 0;
+         if self.clear_left > 0 {
+             self.clear_left -= 1;
+             // The bezel is the panel's background: a full-panel image of the
+@@ -1833,9 +1907,7 @@ impl Compositor {
+                 self.profile.path = path;
+                 self.profile.direct = true;
+             }
+-            if !self.overlay.is_empty() {
+-                self.overlay_out(target, (x, y), half);
+-            }
++            self.overlay_out(target, (x, y), half, repainted);
+             return;
+         }
+ 
+@@ -2294,6 +2366,141 @@ mod overlay_tests {
+             assert_eq!(differ, 0, "{differ} pixels differ from the canvas path");
+         }
+     }
++
++    /// Frames of `lists` on one compositor, each list built from the game,
++    /// a full-canvas shell texture and an icon texture; returns the panel and
++    /// the compositor for a look at what it kept.
++    type List = fn(TexId, TexId) -> Vec<Draw>;
++
++    fn run(mount: Mount, lists: &[List]) -> (Vec<u8>, Compositor) {
++        let (pw, ph) = (out_w(), out_h());
++        let mut panel = vec![0u8; pw as usize * ph as usize * 4];
++        let target = fb::Target {
++            ptr: panel.as_mut_ptr(),
++            w: pw,
++            h: ph,
++            stride: pw as usize * 4,
++            bgr: true,
++        };
++        // SAFETY: `panel` outlives every frame drawn into it.
++        unsafe { fb::set_current_for_test(Some(target)) };
++        let mut c = Compositor::new(&NoSurface).expect("compositor");
++        c.mount = mount;
++        let mut frame = vec![0u8; (SRC_W * SRC_H * 4) as usize];
++        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
++            let (x, y) = (i as u32 % SRC_W, i as u32 / SRC_W);
++            px.copy_from_slice(&[(x * 7) as u8, (y * 5) as u8, (x ^ y) as u8, 255]);
++        }
++        c.upload_game(&frame, (SRC_W, SRC_H));
++        let mut shell = vec![0u8; pw as usize * ph as usize * 4];
++        for (i, px) in shell.chunks_exact_mut(4).enumerate() {
++            px.copy_from_slice(&[(i % 251) as u8, 90, (i % 13) as u8 * 19, 255]);
++        }
++        let shell = c.create_texture(pw, ph, &shell);
++        let icon = c.create_texture(20, 30, &[200u8; 20 * 30 * 4]);
++        for list in lists {
++            c.begin_frame();
++            c.draw_list(&list(shell, icon));
++            c.end_frame((pw, ph));
++        }
++        // SAFETY: clearing the pointer before `panel` is dropped.
++        unsafe { fb::set_current_for_test(None) };
++        (panel, c)
++    }
++
++    fn shell_only(shell: TexId, _: TexId) -> Vec<Draw> {
++        let (w, h) = (out_w() as f32, out_h() as f32);
++        vec![
++            Draw::Game,
++            Draw::Tex {
++                x: 0.0,
++                y: 0.0,
++                w,
++                h,
++                tex: shell,
++                alpha: 1.0,
++            },
++        ]
++    }
++
++    fn shell_and_hud(shell: TexId, icon: TexId) -> Vec<Draw> {
++        let mut items = shell_only(shell, icon);
++        items.push(Draw::Rect {
++            x: 0.0,
++            y: 0.0,
++            w: out_w() as f32,
++            h: 40.0,
++            colour: [0.0, 0.0, 0.0, 0.05],
++        });
++        items.push(Draw::Tex {
++            x: 310.0,
++            y: 5.0,
++            w: 20.0,
++            h: 30.0,
++            tex: icon,
++            alpha: 0.1,
++        });
++        items
++    }
++
++    /// A GBA cart draws its HUD over the Advance shell. The shell belongs in
++    /// the surround, so the overlay is the HUD alone rather than the canvas.
++    #[test]
++    fn a_hud_over_the_shell_leaves_the_shell_in_the_surround() {
++        let (_, c) = run(Mount::Normal, &[shell_and_hud]);
++        assert!(c.direct_game);
++        assert_eq!(c.overlay.len(), 2, "the shell went into the overlay");
++    }
++
++    /// Once the HUD has gone, nothing of it may stay on the panel: the frames
++    /// after it must match frames that never had one.
++    #[test]
++    fn a_hud_that_has_gone_leaves_nothing_behind() {
++        let mut after = vec![shell_and_hud as List; 3];
++        after.extend([shell_only as List; PAGES as usize + 1]);
++        for mount in [Mount::Normal, Mount::Half] {
++            let (a, c) = run(mount, &after);
++            let (b, _) = run(mount, &[shell_only as List; PAGES as usize + 1]);
++            assert!(c.overlay.is_empty(), "the HUD is still an overlay");
++            let differ = a
++                .chunks_exact(4)
++                .zip(b.chunks_exact(4))
++                .filter(|(p, q)| p[..3] != q[..3])
++                .count();
++            assert_eq!(
++                differ, 0,
++                "{differ} pixels of the HUD are left on the panel"
++            );
++        }
++    }
++
++    /// A HUD that has not changed and lies off the picture is already on every
++    /// page, so it is not composed again.
++    /// A new compositor repaints the surround for its first PAGES frames, and the
++    /// HUD with it, so it settles PAGES frames after that.
++    #[test]
++    fn a_still_hud_off_the_picture_costs_nothing() {
++        fn hud(_: TexId, icon: TexId) -> Vec<Draw> {
++            vec![
++                Draw::Game,
++                Draw::Tex {
++                    x: 310.0,
++                    y: 2.0,
++                    w: 20.0,
++                    h: 30.0,
++                    tex: icon,
++                    alpha: 1.0,
++                },
++            ]
++        }
++        let (_, c) = run(Mount::Normal, &[hud as List; 2 * PAGES as usize + 1]);
++        let (_, gy, _, _) = c.game.rect();
++        assert!(
++            gy > 33.0,
++            "the picture starts at {gy}, under the HUD; the test needs it clear"
++        );
++        assert_eq!(c.frame_stages()[2], 0, "the still HUD was composed again");
++    }
+ }
+ 
+ mod blue_light_tests {
