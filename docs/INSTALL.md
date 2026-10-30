@@ -4,7 +4,7 @@ This is the short version. The [README](../README.md) is the development log and
 explains *why*; this page is just what to do.
 
 You need: the handheld, its SD card, a computer with a card reader, and a
-`slot-miyoo-*.zip` from [Releases](https://github.com/deanmarano/slot-miyoo/releases)
+`slot-miyoo-*.zip` from [Releases](https://github.com/SvenHoevink/miyoo-mini-flip-slot/releases)
 (or `task release`, if you are building it yourself).
 
 **One zip covers the Mini Flip, the Mini Plus and the Mini.** slot reads the
@@ -26,7 +26,8 @@ saves and states have had a poke rather than a session -- see
 
 ## 0. if the card is blank
 
-Skip this if your card already boots the handheld.
+Skip this if your card already boots the handheld. For the whole clean-card
+install in one place, see [INSTALL-CLEAN-SD.md](INSTALL-CLEAN-SD.md).
 
 A blank card will not boot: the Flip loads its OS from the card. Format it
 **FAT32** -- not exFAT, which the launcher cannot read -- then install Miyoo's

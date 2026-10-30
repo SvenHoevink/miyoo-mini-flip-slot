@@ -18,13 +18,15 @@ framebuffer at startup rather than having compiled in.
 
 ## install it
 
-Download the latest `slot-miyoo-*-flip.zip` from
-[Releases](https://github.com/deanmarano/slot-miyoo/releases), unzip it into
+Download the latest `slot-miyoo-*.zip` from
+[Releases](https://github.com/SvenHoevink/miyoo-mini-flip-slot/releases), unzip it into
 the root of your SD card, and find **slot** in your launcher's app list.
 
 That's the whole install — it needs no custom firmware and replaces nothing.
 It works on Miyoo's own firmware as well as on Allium, and your games go in
 `Games/GB`, `Games/GBC`, `Games/GBA`, `Games/NES` and `Games/SNES` on the card.
+Starting from an empty card? [**docs/INSTALL-CLEAN-SD.md**](docs/INSTALL-CLEAN-SD.md)
+walks through it step by step, from formatting to the first game.
 [**docs/INSTALL.md**](docs/INSTALL.md) is the full page: BIOS files, bezels,
 booting straight into slot, and what to do when something is wrong.
 

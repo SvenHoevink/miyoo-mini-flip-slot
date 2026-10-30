@@ -13,7 +13,7 @@
 #     CLAUDE.md says both of this port's build traps were found by rebuilding
 #     from clean, and a release is the worst place to hit one.
 #
-# Budget 20-30 minutes: the toolchain image, both libretro cores and the
+# Budget 20-30 minutes: the toolchain image, the four libretro cores and the
 # frontend are all built from nothing. The image build pulls apt from
 # archive.debian.org and rustup from sh.rustup.rs, and the cores fetch from
 # GitHub, so a failure here is usually a re-run rather than a bug.
@@ -59,7 +59,7 @@ jobs:
           stage=release/stage
 
           # armv7, not aarch64: upstream's workflow greps the other way here.
-          for f in slot gpsp_libretro.so mgba_libretro.so; do
+          for f in slot gpsp_libretro.so mgba_libretro.so fceumm_libretro.so snes9x2005_libretro.so; do
             file "$stage/System/$f" | grep -q "ELF 32-bit LSB .*ARM"
           done
           test -x "$stage/System/slot"
@@ -82,6 +82,8 @@ jobs:
           test -f "$stage/System/licenses/gpsp-src.tar.gz"
           test -f "$stage/System/licenses/gpsp_libretro.so.meta"
           test -f "$stage/System/licenses/mgba_libretro.so.meta"
+          test -f "$stage/System/licenses/fceumm-src.tar.gz"
+          test -f "$stage/System/licenses/snes9x2005-LICENSE.txt"
           test -f "$stage/System/licenses/build-info.txt"
           cat "$stage/System/licenses/build-info.txt"
 
