@@ -37,7 +37,7 @@ booting straight into slot, and what to do when something is wrong.
 | double-tap MENU in a game | straight to States |
 | hold POWER ~1 s | power menu |
 | L1 / R1 in a GB or GBC game | stretch / actual size |
-| **START on the shelf, GBA cart** | **core picker — pick gpSP for GBA** |
+| **START on the shelf, GBA cart** | core picker — gpSP is the default for GBA, mGBA the other choice |
 
 slot comes back up in whatever cart was last in the slot. That's deliberate;
 eject to get the shelf back.

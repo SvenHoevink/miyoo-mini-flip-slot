@@ -1,0 +1,335 @@
+draw the game straight out under a hud
+
+The volume HUD sent every frame through the canvas while it showed: the game
+into the canvas, the HUD over it, and the whole 752x560 canvas copied to the
+panel. Measured on the Flip in Super Mario World, render went from ~10 ms to
+21.6 ms, past the 16.7 ms period, so with the core driven by the panel the
+game slowed for as long as the bar was up (0031 made up the speed; the
+dropped frames stayed).
+
+A display list that is the game followed only by sprites now keeps the
+direct path: the game is scaled straight onto the panel as before, and the
+sprites are composed on the canvas over just the rect they cover -- the
+surround and the game's own rows under it, drawn into the canvas with the
+game pass limited to those rows -- and that rect alone is copied out. The
+panel is never read back. With blue light on, whose gain the canvas copy
+applies, it keeps the canvas path.
+
+A test draws the same game and HUD both ways, upright and mirrored, and
+requires the panel to match the canvas path pixel for pixel; it finds 5,400
+pixels wrong with the overlay step left out.
+
+Applies on top of 0031, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -259,6 +259,9 @@
+     col: Vec<Col>,
+     col_key: Option<ColKey>,
+     line: Vec<u16>,
++    /// Rows the next pass is limited to, for redrawing only what an overlay
++    /// covers. `None` is every row.
++    band: Option<(i32, i32)>,
+ }
+ 
+ impl Game {
+@@ -278,6 +281,7 @@
+             col: Vec::new(),
+             col_key: None,
+             line: Vec::new(),
++            band: None,
+         }
+     }
+ 
+@@ -389,9 +393,12 @@
+         let (sw, sh) = (img.w as f32, img.h as f32);
+ 
+         let x0 = (rx.round() as i32).max(0);
+-        let y0 = (ry.round() as i32).max(0);
++        let mut y0 = (ry.round() as i32).max(0);
+         let x1 = ((rx + rw).round() as i32).min(dest.width() as i32);
+-        let y1 = ((ry + rh).round() as i32).min(dest.height() as i32);
++        let mut y1 = ((ry + rh).round() as i32).min(dest.height() as i32);
++        if let Some((b0, b1)) = self.band {
++            (y0, y1) = (y0.max(b0), y1.min(b1));
++        }
+         if x0 >= x1 || y0 >= y1 {
+             return 0;
+         }
+@@ -518,6 +525,42 @@
+     }
+ }
+ 
++fn is_sprite(d: &Draw) -> bool {
++    matches!(
++        d,
++        Draw::Rect { .. } | Draw::Tex { .. } | Draw::Part { .. } | Draw::Turned { .. }
++    )
++}
++
++/// The canvas rect a list of sprites can touch, as `[x0, y0, x1)` bounds, a
++/// pixel wider all round for rounding. A turned sprite is bounded by its
++/// diagonal, whichever way it faces.
++fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
++    let mut b: Option<(f32, f32, f32, f32)> = None;
++    for item in items {
++        let (x0, y0, x1, y1) = match *item {
++            Draw::Rect { x, y, w, h, .. } | Draw::Tex { x, y, w, h, .. } | Draw::Part { x, y, w, h, .. } => {
++                (x, y, x + w, y + h)
++            }
++            Draw::Turned { x, y, w, h, .. } => {
++                let (cx, cy, r) = (x + w / 2.0, y + h / 2.0, w.hypot(h) / 2.0);
++                (cx - r, cy - r, cx + r, cy + r)
++            }
++            Draw::Game | Draw::Shot { .. } => continue,
++        };
++        b = Some(match b {
++            None => (x0, y0, x1, y1),
++            Some((a, c, d, e)) => (a.min(x0), c.min(y0), d.max(x1), e.max(y1)),
++        });
++    }
++    let (x0, y0, x1, y1) = b?;
++    let x0 = (x0.floor() as i32 - 1).max(0);
++    let y0 = (y0.floor() as i32 - 1).max(0);
++    let x1 = (x1.ceil() as i32 + 1).min(cw);
++    let y1 = (y1.ceil() as i32 + 1).min(ch);
++    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
++}
++
+ /// The blue-light gain as a byte table per channel, or `None` at step 0.
+ ///
+ /// The canvas and the panel are both in panel order, so the table for byte 0
+@@ -825,6 +868,10 @@
+     /// the canvas entirely: a 1.4 MB write here and a 1.4 MB read-and-write
+     /// there, every frame, purely to stage a picture nothing else draws on.
+     direct_game: bool,
++    /// Sprites drawn over a direct game: a HUD, a toast. Rather than send the
++    /// whole frame through the canvas for them, the game still goes straight
++    /// to the panel and only the rect they cover is composed and copied out.
++    overlay: Vec<Draw>,
+     textures: Vec<Option<Tex>>,
+     white: TexId,
+     game: Game,
+@@ -866,6 +913,7 @@
+             pending_clear: false,
+             was_direct: false,
+             direct_game: false,
++            overlay: Vec::new(),
+             textures: Vec::new(),
+             white: TexId::from_raw(0),
+             game: Game::new(),
+@@ -994,7 +1042,18 @@
+                 return;
+             }
+         }
++        self.overlay.clear();
+         self.direct_game = matches!(items, [Draw::Game]);
++        // The game with sprites over it and nothing under it -- the volume HUD,
++        // which sent every frame through the canvas while it showed: 21.6 ms of
++        // render against 10, measured on the Flip, so a game driven by the
++        // panel slowed for as long as the bar was up.
++        if let [Draw::Game, rest @ ..] = items {
++            if !rest.is_empty() && rest.iter().all(is_sprite) {
++                self.overlay.extend_from_slice(rest);
++                self.direct_game = true;
++            }
++        }
+         if self.direct_game {
+             self.was_direct = true;
+             return;
+@@ -1515,6 +1574,72 @@
+         self.surround.as_ref()
+     }
+ 
++    /// Compose the overlay over the rows it covers and copy just that rect to
++    /// the panel, which already holds the game from the direct pass. The canvas
++    /// gets what the panel shows there first -- the surround, then the game's
++    /// own rows -- so the sprites blend over the same pixels they would have on
++    /// the canvas path, without reading the panel back.
++    fn overlay_out(&mut self, target: fb::Target, (x, y): (i32, i32), half: bool) {
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
++        let Some((bx0, by0, bx1, by1)) = overlay_bounds(&self.overlay, cw, ch) else {
++            return;
++        };
++        let (pw, ph) = (target.w as i32, target.h as i32);
++        let span = (bx1 - bx0) as usize * 4;
++        self.surround((target.w, target.h));
++        let surround = self.surround.take();
++        for cy in by0..by1 {
++            let at = (cy as usize * cw as usize + bx0 as usize) * 4;
++            let dst = &mut self.canvas.px[at..at + span];
++            let (sx, sy) = (x + bx0, y + cy);
++            match &surround {
++                Some(b) if sx >= 0 && sy >= 0 && sx + bx1 - bx0 <= b.w as i32 && sy < b.h as i32 => {
++                    let from = (sy as usize * b.w as usize + sx as usize) * 4;
++                    dst.copy_from_slice(&b.px[from..from + span]);
++                }
++                _ => dst.fill(0),
++            }
++        }
++        self.surround = surround;
++        self.game.band = Some((by0, by1));
++        self.game.draw(&mut self.canvas, None);
++        self.game.band = None;
++        let overlay = std::mem::take(&mut self.overlay);
++        self.draw_sprites(&overlay);
++        self.overlay = overlay;
++
++        let x_start = (x + bx0).max(0);
++        let x_end = (x + bx1).min(pw);
++        if x_start >= x_end {
++            return;
++        }
++        let n = (x_end - x_start) as usize * 4;
++        for cy in by0..by1 {
++            let py = y + cy;
++            if py < 0 || py >= ph {
++                continue;
++            }
++            let si = ((cy as usize * cw as usize) + (x_start - x) as usize) * 4;
++            let src = &self.canvas.px[si..si + n];
++            let dy = if half { ph - 1 - py } else { py };
++            let o = if half { (pw - x_end) as usize * 4 } else { x_start as usize * 4 };
++            // SAFETY: one row inside the mapping.
++            let row = unsafe {
++                std::slice::from_raw_parts_mut(target.ptr.add(dy as usize * target.stride), target.stride)
++            };
++            let Some(dst) = row.get_mut(o..o + n) else {
++                continue;
++            };
++            if half {
++                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
++                    d.copy_from_slice(s);
++                }
++            } else {
++                dst.copy_from_slice(src);
++            }
++        }
++    }
++
+     /// Scale the canvas onto the panel and hand it to the framebuffer.
+     ///
+     /// Only the area the canvas lands on is written. The surround is black and
+@@ -1637,7 +1762,14 @@
+         // The gain is not among these: the game pass carries it in its column
+         // mask and the surround was graded when it was taken, so everything
+         // this path writes is already warm. Blue light costs nothing here.
+-        let direct = self.direct_game && w == cw && h == ch && target.bgr;
++        // An overlay is composed on the canvas and copied out as it is, so the
++        // gain it would get on the canvas path has to be absent for the two to
++        // agree; with blue light on it takes the canvas path instead.
++        let direct = self.direct_game
++            && w == cw
++            && h == ch
++            && target.bgr
++            && (self.overlay.is_empty() || identity);
+         if self.direct_game && !direct {
+             let t = std::time::Instant::now();
+             let path = self.game.draw(&mut self.canvas, None);
+@@ -1646,6 +1778,9 @@
+                 self.profile.path = path;
+                 self.profile.direct = false;
+             }
++            let overlay = std::mem::take(&mut self.overlay);
++            self.draw_sprites(&overlay);
++            self.overlay = overlay;
+         }
+ 
+         // The case that actually runs on this device: the canvas is exactly the
+@@ -1674,6 +1809,9 @@
+                 self.profile.game_us += t.elapsed().as_micros() as u64;
+                 self.profile.path = path;
+                 self.profile.direct = true;
++            }
++            if !self.overlay.is_empty() {
++                self.overlay_out(target, (x, y), half);
+             }
+             return;
+         }
+@@ -2056,6 +2194,85 @@
+     }
+ }
+ 
++#[cfg(test)]
++mod overlay_tests {
++    use super::*;
++
++    struct NoSurface;
++    impl Surface for NoSurface {
++        fn make_current(&mut self) -> Result<(), crate::surface::GfxError> {
++            Ok(())
++        }
++        fn window_size(&self) -> (u32, u32) {
++            (out_w(), out_h())
++        }
++        fn swap(&mut self) -> Result<(), crate::surface::GfxError> {
++            Ok(())
++        }
++        fn proc_address(&self, _name: &str) -> *const std::ffi::c_void {
++            std::ptr::null()
++        }
++    }
++
++    /// One frame of `items` over a patterned game, as the panel shows it.
++    fn panel_after(via_canvas: bool, mount: Mount) -> (Vec<u8>, bool) {
++        let (pw, ph) = (out_w(), out_h());
++        let mut panel = vec![0u8; pw as usize * ph as usize * 4];
++        let target = fb::Target {
++            ptr: panel.as_mut_ptr(),
++            w: pw,
++            h: ph,
++            stride: pw as usize * 4,
++            bgr: true,
++        };
++        // SAFETY: `panel` outlives the frame drawn into it.
++        unsafe { fb::set_current_for_test(Some(target)) };
++        let mut c = Compositor::new(&NoSurface).expect("compositor");
++        c.mount = mount;
++        let mut frame = vec![0u8; (SRC_W * SRC_H * 4) as usize];
++        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
++            let (x, y) = (i as u32 % SRC_W, i as u32 / SRC_W);
++            px.copy_from_slice(&[(x * 7) as u8, (y * 5) as u8, (x ^ y) as u8, 255]);
++        }
++        c.upload_game(&frame, (SRC_W, SRC_H));
++        let mut art = vec![0u8; 20 * 30 * 4];
++        for (i, px) in art.chunks_exact_mut(4).enumerate() {
++            px.copy_from_slice(&[255, (i * 3) as u8, 40, (i * 11) as u8]);
++        }
++        let tex = c.create_texture(20, 30, &art);
++        let mut items = vec![
++            Draw::Game,
++            Draw::Rect { x: 300.0, y: 40.5, w: 150.0, h: 36.0, colour: [0.1, 0.1, 0.1, 0.6] },
++            Draw::Tex { x: 310.0, y: 44.0, w: 40.0, h: 30.0, tex, alpha: 0.8 },
++        ];
++        if via_canvas {
++            let invisible = Draw::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, colour: [0.0; 4] };
++            items.insert(0, invisible);
++        }
++        c.begin_frame();
++        c.draw_list(&items);
++        let direct = c.direct_game;
++        c.end_frame((pw, ph));
++        // SAFETY: clearing the pointer before `panel` is dropped.
++        unsafe { fb::set_current_for_test(None) };
++        (panel, direct)
++    }
++
++    /// The overlay path has to put on the panel exactly what composing the
++    /// whole frame on the canvas did, mirrored or not. An invisible rect under
++    /// the game is what forces the canvas path for the reference.
++    #[test]
++    fn a_hud_over_the_game_lands_as_the_canvas_path_draws_it() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let (a, took_fast) = panel_after(false, mount);
++            let (b, took_slow) = panel_after(true, mount);
++            assert!(took_fast && !took_slow, "the paths were not the ones under test");
++            let differ = a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(p, q)| p[..3] != q[..3]).count();
++            assert_eq!(differ, 0, "{differ} pixels differ from the canvas path");
++        }
++    }
++}
++
+ mod blue_light_tests {
+     use super::*;
+ 

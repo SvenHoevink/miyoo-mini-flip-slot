@@ -1,0 +1,162 @@
+keep the game at speed when a present runs long
+
+With SLOT_DRIVE_EMU=overlap (0029) the core runs one frame per tick and the
+display ticks once per present. A present that spans two blanks therefore
+cost the game a frame, and on the Flip the volume overlay does exactly that:
+Super Mario World traced 247 of 600 presents missing a latch with the bar up
+against 0-6 without it, and visibly slowed while it was shown.
+
+The display now ticks once for every blank that passed since the last tick,
+up to three, and a driven core runs the frames it is owed with all but the
+last skipped, so the game keeps the panel's speed while the picture drops
+frames -- what the unchained mode always did. A test ticks twice per present:
+20 frames for 40 ticks before, 40 after.
+
+With SLOT_TRACE_LATENCY, a present over 25 ms also logs where it went:
+advance, step, render, swap. The overlay's cost was visible in the totals but
+not in the parts; this is to find it.
+
+Applies on top of 0030, upstream 91499a9.
+
+diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -35,6 +35,10 @@
+ /// which is what keeps the average frame rate honest on a coarse timer.
+ const RESYNC_FRAMES: u32 = 4;
+ 
++/// Presents a driven core will make up at once after the display misses some.
++/// Past this it is a stall rather than a slow frame, and is let go.
++const CATCH_UP: u64 = 3;
++
+ const RATE_WINDOW: u32 = 300;
+ 
+ const TRACE_EVERY: u64 = 300;
+@@ -589,6 +593,7 @@
+         let mut fast_span: Option<(Instant, Duration)> = None;
+         let mut deadline = Instant::now();
+         let mut served = 0u64;
++        let mut owed = 1u32;
+         let mut ticked = false;
+         let mut paced = 0u64;
+         let mut scale = 0.0f64;
+@@ -669,6 +674,9 @@
+                 self.shared.locked.store(lock, Ordering::Release);
+                 deadline = Instant::now();
+                 rate.restart(deadline, self.current_tick());
++                // Count presents from here, or the first tick would read every
++                // one since the session began as owed.
++                served = self.current_tick();
+                 self.shared.clocked.notify_all();
+             }
+             let input = ButtonMask(self.shared.input.load(Ordering::Relaxed));
+@@ -697,6 +705,11 @@
+                 let one = FAST_TARGET.saturating_sub(post_cost);
+                 if speed == Speed::Fast {
+                     span = cost.span(one, ceiling);
++                } else if lock {
++                    // A present that took two blanks ticked once. Run the frame
++                    // it missed, undrawn, so the game keeps the panel's speed
++                    // rather than halving with it; the audio is both frames'.
++                    span = std::mem::replace(&mut owed, 1);
+                 }
+                 let ceiling = ceiling * span;
+                 let budget = one + PRESENT * (span - 1);
+@@ -880,6 +893,7 @@
+                 loop {
+                     match self.next_tick(served, until) {
+                         Wait::Tick(tick) => {
++                            owed = tick.saturating_sub(served).clamp(1, CATCH_UP) as u32;
+                             served = tick;
+                             stalled = false;
+                             if let Some(measured) = rate.served(Instant::now(), tick) {
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -226,6 +226,7 @@
+     };
+     let mut pacer = Pacer::new();
+     let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
++    let mut last_step: Option<Instant> = None;
+     loop {
+         pacer.wait();
+         let began = Instant::now();
+@@ -245,8 +246,23 @@
+             eprintln!("slot: told to stop, saving first");
+             frontend.stop();
+             return;
++        }
++        // Overlapped, a present that spanned two blanks owes the core two
++        // ticks, or the game slows with the display -- an overlay that tips
++        // the draw over a period halved it.
++        let advanced = began.elapsed();
++        let ticks = match (step_timeout.is_zero(), last_step) {
++            (true, Some(at)) => (at.elapsed().as_secs_f64() / pacer.period.as_secs_f64())
++                .round()
++                .clamp(1.0, 3.0) as u32,
++            _ => 1,
++        };
++        last_step = Some(Instant::now());
++        for _ in 1..ticks {
++            frontend.step_emulator(pacer.period, Duration::ZERO);
+         }
+         frontend.step_emulator(pacer.period, step_timeout);
++        let stepped = began.elapsed();
+         frontend.render(&mut compositor, window);
+         let swap = Instant::now();
+         let work = swap - began;
+@@ -256,6 +272,18 @@
+             return;
+         }
+         let swap_took = swap.elapsed();
++        // Which stage a long present went to: an overlay costing two blanks
++        // was seen in the totals, never in the parts.
++        if slot::latency::tracing() && work + swap_took > Duration::from_millis(25) {
++            let ms = |d: Duration| d.as_secs_f64() * 1e3;
++            eprintln!(
++                "slot: long present: advance {:.1} step {:.1} render {:.1} swap {:.1} ms, {ticks} tick(s)",
++                ms(advanced),
++                ms(stepped - advanced),
++                ms(work - stepped),
++                ms(swap_took),
++            );
++        }
+         slot::latency::swapped(swap_took.as_secs_f64() * 1000.0);
+         // `work` deliberately stops at the swap. It was briefly measured through
+         // it, on the theory that this panel's pan was a page copy -- it is not,
+diff --git a/crates/slot/tests/emu.rs b/crates/slot/tests/emu.rs
+--- a/crates/slot/tests/emu.rs
++++ b/crates/slot/tests/emu.rs
+@@ -1025,6 +1025,32 @@
+         std::thread::sleep(Duration::from_millis(8));
+     }
+     assert_eq!(emu.published_count(), before + 20, "not one frame per tick");
++}
++
++#[test]
++fn a_driven_worker_makes_up_a_present_the_display_missed() {
++    let (emu, log) = spawn_probe(Duration::ZERO);
++    emu.set_speed(Speed::Normal);
++    emu.set_driven(true);
++    assert!(
++        wait_for(|| emu.locked()),
++        "the worker never locked to the display"
++    );
++    emu.tick(PANEL);
++    emu.wait_frame(Duration::from_millis(100));
++    std::thread::sleep(Duration::from_millis(5));
++    log.lock().expect("the skip log").clear();
++    for _ in 0..20 {
++        emu.tick(PANEL);
++        emu.tick(PANEL);
++        emu.wait_frame(Duration::from_millis(100));
++        std::thread::sleep(Duration::from_millis(20));
++    }
++    let ran = log.lock().expect("the skip log").len();
++    assert!(
++        ran >= 39,
++        "{ran} frames for 40 ticks: a present that spanned two blanks slowed the game"
++    );
+ }
+ 
+ #[test]
