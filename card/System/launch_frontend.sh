@@ -103,6 +103,11 @@ done
 # 59.73 Hz and the display drops the frames it cannot fit, so the speed and the
 # audio pitch are right and the cost is judder rather than slow motion.
 export SLOT_DRIVE_EMU=0
+# Overlapped instead (patches/0029): the core is ticked by the panel and runs
+# beside the draw rather than before it, which takes out the judder of its own
+# 60 Hz timer. Not yet the default; switched from the card while it is measured:
+#   touch Config/drive-overlap.txt
+[ -f "$SD/Config/drive-overlap.txt" ] && export SLOT_DRIVE_EMU=overlap
 
 # Audio: upstream's ring depth, and the codec queue throttle on by default in
 # the binary (SLOTAO_QUEUE, five 512-frame periods, 53 ms).

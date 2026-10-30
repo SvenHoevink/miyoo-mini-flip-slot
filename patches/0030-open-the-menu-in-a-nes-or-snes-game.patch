@@ -1,0 +1,77 @@
+open the menu in a nes or snes game
+
+Tapping MENU in a NES or SNES game froze the handheld, power button and all.
+quick_value asks the running console's own row for Shader and Colour
+Correction, and playing_row only has one for the Game Boy family and the
+GBA; for a console it hands the row straight back, and quick_value asked
+again until the stack ran out. The rows are hidden on those consoles, but
+the menu still reads every row's value when it draws.
+
+A row that maps to itself now has no value. Found by a test that seats a
+real Super Mario World on Snes9x 2005 and taps MENU, which overflowed the
+stack on the first menu frame; the test below is the core-free version.
+
+Applies on top of 0029, upstream 91499a9.
+
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -964,7 +964,12 @@
+             QuickRow::Shader
+             | QuickRow::ColourCorrection
+             | QuickRow::PlayBrightness
+-            | QuickRow::PlayBlueLight => self.quick_value(self.playing_row(row)),
++            // A NES or SNES game has no shader or colour correction of its own,
++            // so the row maps to itself; asking again would never return.
++            | QuickRow::PlayBlueLight => match self.playing_row(row) {
++                same if same == row => None,
++                mapped => self.quick_value(mapped),
++            },
+             QuickRow::Brightness => Some(QuickValue::level(self.state.brightness)),
+             QuickRow::BlueLight => Some(match self.state.blue_light {
+                 0 => QuickValue::Off,
+diff --git a/crates/slot/tests/in_game_menu.rs b/crates/slot/tests/in_game_menu.rs
+--- a/crates/slot/tests/in_game_menu.rs
++++ b/crates/slot/tests/in_game_menu.rs
+@@ -113,6 +113,41 @@
+ }
+ 
+ #[test]
++fn a_console_game_draws_its_menu_without_asking_for_an_lcd_row_forever() {
++    for (platform, ext) in [(Platform::Nes, "nes"), (Platform::Snes, "sfc")] {
++        let d = tmp_root_with_carts(&[]);
++        let dir = d.path().join("Games").join(platform.dir_name());
++        std::fs::create_dir_all(&dir).unwrap();
++        std::fs::write(dir.join(format!("Console.{ext}")), [0u8; 0x8000]).unwrap();
++        slot_store::write_slot_state(
++            d.path(),
++            &slot_store::SlotState {
++                cart: Some("Console".into()),
++                cart_platform: Some(platform),
++                clock_set: true,
++                ..Default::default()
++            },
++        )
++        .unwrap();
++        let mut a = App::boot(d.path());
++        a.on_core_ready();
++        for _ in 0..120 {
++            a.update(1.0 / 60.0);
++        }
++        assert_eq!(a.playing_platform(), platform);
++        assert_eq!(a.quick_value(QuickRow::Shader), None);
++        assert_eq!(a.quick_value(QuickRow::ColourCorrection), None);
++        a.apply(Action::QuickMenu);
++        for _ in 0..30 {
++            a.update(1.0 / 60.0);
++        }
++        let mut out = Vec::new();
++        a.draw(&mut out);
++        assert_eq!(a.in_game_menu(), Some(QuickRow::Resume), "{platform:?}");
++    }
++}
++
++#[test]
+ fn colour_correction_toggles_the_running_platform_and_asks_the_core() {
+     let (_d, mut a) = playing();
+     let before = a.colour_correction();

@@ -96,3 +96,27 @@ LCD shaders, colour correction and bezels. A television had none of them.
 
 Expected to struggle whatever the numbers say: the Super FX games (Star Fox,
 Yoshi's Island) and SA-1 games. Report them; do not promise them.
+
+## measured on the handheld (2026-10-30)
+
+Mini Flip, stock firmware 202510011046, booted straight into slot. Super Mario
+World on Snes9x 2005, `SLOT_TRACE_LATENCY` armed, `pace:` lines per 600
+presents:
+
+| | missed a latch, per 600 |
+|---|---|
+| rewind on (529 KB state every 11 frames) | 20-30 |
+| rewind off | 7-27 |
+| rewind off, `SLOT_DRIVE_EMU=1` | 330-510, core and draw in series |
+| rewind off, `SLOT_DRIVE_EMU=overlap` (`0029`) | 0-5 |
+
+The core itself takes 8-10 ms a frame (`emu>pub`), so it was never the problem:
+the hitches were rewind's serialize and the core's own 60 Hz timer against a
+59.6 Hz panel. Overlap is switched on by `Config/drive-overlap.txt`; it has
+been played on the SNES only so far.
+
+Tapping MENU in a NES or SNES game overflowed the stack until `0030`, which
+looked like a frozen handheld: no log line, no power button. Found by
+seating the real cart on the real core in a test under Docker; the device
+log was no help, because a frozen handheld that loses power loses the last
+seconds of `slot.log` with it.

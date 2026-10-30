@@ -1,0 +1,56 @@
+start the core on the panel's blank
+
+SLOT_DRIVE_EMU=overlap: each present ticks the core and draws the frame the
+previous tick produced, instead of waiting up to 12 ms for this tick's.
+
+Unchained (SLOT_DRIVE_EMU=0, the card's default) the core keeps a 60 Hz
+timer on a 100 Hz kernel tick, against a panel at 59.6 Hz, so its frames
+reach the display unevenly: some are shown twice and some never. Super
+Mario World on the Flip, rewind off, traced 7 of 600 presents missing a
+latch while still visibly hitching. Chained the old way (SLOT_DRIVE_EMU=1)
+the core's 8 ms and the draw's 6 ms run in series and 330-510 of 600
+presents missed, measured 2026-10-30, stock 202510011046.
+
+Overlapped, the core runs on the second CPU while this one draws, and its
+clock is the panel's. The cost is one frame of latency. Opt-in from the
+card until it has been measured on the handheld.
+
+Applies on top of 0028, upstream 91499a9.
+
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -207,9 +207,23 @@
+     // the display shows whatever frame is latest, dropping the ones it cannot
+     // fit. That trades correct speed and pitch for judder, which is the right
+     // way round -- and unlike drawing at the scanout it does not tear.
+-    if std::env::var("SLOT_DRIVE_EMU").as_deref() != Ok("0") {
++    //
++    // Unchained has a judder of its own, though: the core keeps a 60 Hz timer
++    // on a 100 Hz kernel tick against a 59.6 Hz panel, so its frames land
++    // unevenly and some are shown twice while others are never shown.
++    // `SLOT_DRIVE_EMU=overlap` chains the core to the display again but does
++    // not wait for it: each present ticks the core and draws the frame the
++    // last tick produced, so the core runs on the second CPU while this one
++    // draws. A frame of latency buys the panel's own clock for the core,
++    // without putting the core's time and the draw's time in series.
++    let drive = std::env::var("SLOT_DRIVE_EMU").ok();
++    if drive.as_deref() != Some("0") {
+         frontend.drive_emulator();
+     }
++    let step_timeout = match drive.as_deref() {
++        Some("overlap") => Duration::ZERO,
++        _ => STEP_TIMEOUT,
++    };
+     let mut pacer = Pacer::new();
+     let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
+     loop {
+@@ -232,7 +246,7 @@
+             frontend.stop();
+             return;
+         }
+-        frontend.step_emulator(pacer.period, STEP_TIMEOUT);
++        frontend.step_emulator(pacer.period, step_timeout);
+         frontend.render(&mut compositor, window);
+         let swap = Instant::now();
+         let work = swap - began;
