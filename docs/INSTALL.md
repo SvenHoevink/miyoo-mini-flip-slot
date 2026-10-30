@@ -136,7 +136,7 @@ On the SNES, L1 and R1 are the game's L and R, and X and Y are its X and Y --
 there is no turbo there. A NES or SNES game is drawn at 2x by default (512x448);
 stretch fills the screen's height instead.
 
-**For GBA, pick gpSP.** mGBA interprets on this CPU and runs at roughly half
+**GBA starts on gpSP.** mGBA interprets on this CPU and runs at roughly half
 speed; gpSP has an ARM JIT and holds the frame budget. The choice is per game.
 
 slot boots straight back into whatever cart was last in the slot — that is
@@ -151,7 +151,7 @@ doing when it stopped. Then:
 |---|---|
 | no slot in the app list | launcher cache — reboot again |
 | GBA games won't start | no `BIOS/gba_bios.bin` |
-| a GBA game runs at half speed | mGBA is selected; switch to gpSP |
+| a GBA game runs at half speed | mGBA was picked for it; switch to gpSP |
 | MENU draws a hotkey bar over the game | that is your launcher's overlay, not slot. Known, see the README |
 | the screen looks off at boot | brightness is low, not broken — raise it in the menu |
 | nothing on screen at all | check `Logs/slot.log`, and that `System/slot` really is on the card |

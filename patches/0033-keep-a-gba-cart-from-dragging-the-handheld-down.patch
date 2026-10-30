@@ -1,0 +1,188 @@
+keep a gba cart from dragging the handheld down
+
+Picking Pokemon Emerald and going back to the shelf took the whole frontend
+down to one frame every one to nine seconds, and an earlier GBA launch was
+OOM-killed. Three causes, all on the Flip's 128 MB and two A7 cores:
+
+- GBA defaulted to mGBA, which interprets and cannot hold 60 fps on a GBA
+  cart here; gpSP has an ARM dynarec and does. The guide said to pick gpSP
+  by hand, and a card with no Config/selected_core.txt never had. GBA now
+  defaults to gpSP, and the core picker seats on the same default. mGBA is
+  still one press away. This changes upstream's default, forced by the CPU.
+- 0031 made up missed presents, clamped to three. A load that stalled the
+  display for seconds was read as three presents owed, every present, so
+  the stall fed itself. More than three blanks is now a stall and is let go,
+  on the display side and the core side alike.
+- the prefetch read the whole ROM on every pause in the list: 16 MB for
+  Emerald, 340 ms of card I/O, and page cache that pushed slot's own code
+  out of memory. It now stops at 4 MB; the cores page the rest in.
+
+Applies on top of 0032 (draw the game straight out under a hud), upstream 91499a9.
+
+diff --git a/crates/slot-store/src/core.rs b/crates/slot-store/src/core.rs
+index 655b2d0..9264d3a 100644
+--- a/crates/slot-store/src/core.rs
++++ b/crates/slot-store/src/core.rs
+@@ -60,7 +60,10 @@ impl Core {
+ 
+     pub fn default_for(platform: Platform) -> Core {
+         match platform {
+-            Platform::Gba | Platform::Gb | Platform::Gbc => Core::Mgba,
++            // gpSP for GBA on the port: mGBA interprets, and on the Flip's
++            // Cortex-A7 it cannot hold 60 fps on a GBA cart.
++            Platform::Gba => Core::Gpsp,
++            Platform::Gb | Platform::Gbc => Core::Mgba,
+             Platform::Nes => Core::Fceumm,
+             Platform::Snes => Core::Snes9x2005,
+         }
+diff --git a/crates/slot-store/tests/core.rs b/crates/slot-store/tests/core.rs
+index 4cf0a47..264a9fb 100644
+--- a/crates/slot-store/tests/core.rs
++++ b/crates/slot-store/tests/core.rs
+@@ -157,7 +157,7 @@ fn writing_the_default_still_records_it() {
+ }
+ 
+ #[test]
+-fn every_platform_defaults_to_mgba() {
++fn the_handhelds_default_to_mgba_and_gba_to_gpsp() {
+     let d = tempfile::tempdir().unwrap();
+     assert_eq!(
+         core_for_platform(d.path(), "Tetris", Platform::Gb),
+@@ -169,18 +169,18 @@ fn every_platform_defaults_to_mgba() {
+     );
+     assert_eq!(
+         core_for_platform(d.path(), "Emerald", Platform::Gba),
+-        Core::Mgba
++        Core::Gpsp
+     );
+ }
+ 
+ #[test]
+ fn a_cart_can_ask_for_a_non_default_core_by_hand() {
+     let d = tempfile::tempdir().unwrap();
+-    write_selected_core(d.path(), "Emerald", Core::Gpsp).unwrap();
+-    assert_ne!(Core::default_for(Platform::Gba), Core::Gpsp);
++    write_selected_core(d.path(), "Emerald", Core::Mgba).unwrap();
++    assert_ne!(Core::default_for(Platform::Gba), Core::Mgba);
+     assert_eq!(
+         core_for_platform(d.path(), "Emerald", Platform::Gba),
+-        Core::Gpsp
++        Core::Mgba
+     );
+ }
+ 
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 8c37ac6..a0350fd 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -4854,7 +4854,7 @@ impl App {
+         if cart.platform != Platform::Gba {
+             return;
+         }
+-        let seat = slot_store::core_for(&root, &cart.stem);
++        let seat = slot_store::core_for_platform(&root, &cart.stem, Platform::Gba);
+         let now = self.now();
+         let mut picker = CorePicker::open(seat, now);
+         if self.core_faces_ready() {
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+index 5587c8a..02c240b 100644
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -251,10 +251,18 @@ pub fn run() {
+         // ticks, or the game slows with the display -- an overlay that tips
+         // the draw over a period halved it.
+         let advanced = began.elapsed();
++        // Past three blanks it is a stall, not a slow present: making it up
++        // fed a GBA load on a busy card back into itself, each present owing
++        // three ticks and taking longer than the last.
+         let ticks = match (step_timeout.is_zero(), last_step) {
+-            (true, Some(at)) => (at.elapsed().as_secs_f64() / pacer.period.as_secs_f64())
+-                .round()
+-                .clamp(1.0, 3.0) as u32,
++            (true, Some(at)) => {
++                let blanks = (at.elapsed().as_secs_f64() / pacer.period.as_secs_f64()).round();
++                if blanks > 3.0 {
++                    1
++                } else {
++                    blanks.max(1.0) as u32
++                }
++            }
+             _ => 1,
+         };
+         last_step = Some(Instant::now());
+diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
+index 71dd72c..8bd07fc 100644
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -893,7 +893,15 @@ impl Worker {
+                 loop {
+                     match self.next_tick(served, until) {
+                         Wait::Tick(tick) => {
+-                            owed = tick.saturating_sub(served).clamp(1, CATCH_UP) as u32;
++                            // More than CATCH_UP missed is a stall -- a load, a
++                            // slow card -- and replaying it would only make the
++                            // next present late too.
++                            let missed = tick.saturating_sub(served);
++                            owed = if missed > CATCH_UP {
++                                1
++                            } else {
++                                missed.max(1) as u32
++                            };
+                             served = tick;
+                             stalled = false;
+                             if let Some(measured) = rate.served(Instant::now(), tick) {
+diff --git a/crates/slot/src/prefetch.rs b/crates/slot/src/prefetch.rs
+index b3091bd..3040c0f 100644
+--- a/crates/slot/src/prefetch.rs
++++ b/crates/slot/src/prefetch.rs
+@@ -11,6 +11,11 @@ pub const PREFETCH_REST_MS: Millis = 500;
+ 
+ const CHUNK: usize = 1 << 20;
+ 
++/// The most of a ROM read ahead. A GBA cart is 16-32 MB against about 80 MB
++/// free; reading it all into the page cache on every pause in the list pushed
++/// slot's own code out of memory, and the cores page the ROM in themselves.
++pub const PREFETCH_MAX: u64 = 4 << 20;
++
+ #[derive(Default)]
+ pub struct Prefetch {
+     resting: Option<(PathBuf, Millis)>,
+@@ -65,7 +70,7 @@ fn read_through(path: &Path, turn: &AtomicU64, mine: u64) -> u64 {
+     };
+     let mut buf = vec![0u8; CHUNK];
+     let mut total = 0u64;
+-    while turn.load(Ordering::Relaxed) == mine {
++    while turn.load(Ordering::Relaxed) == mine && total < PREFETCH_MAX {
+         match file.read(&mut buf) {
+             Ok(0) | Err(_) => break,
+             Ok(n) => total += n as u64,
+diff --git a/crates/slot/tests/prefetch.rs b/crates/slot/tests/prefetch.rs
+index 9a59e39..f5aeb53 100644
+--- a/crates/slot/tests/prefetch.rs
++++ b/crates/slot/tests/prefetch.rs
+@@ -3,7 +3,7 @@ mod common;
+ use std::path::{Path, PathBuf};
+ 
+ use common::{session_with_platform, tmp_root_with_real_carts};
+-use slot::prefetch::{Prefetch, PREFETCH_REST_MS};
++use slot::prefetch::{Prefetch, PREFETCH_MAX, PREFETCH_REST_MS};
+ use slot_input::{Btn, Millis, RawEvent};
+ 
+ fn rom(dir: &Path, name: &str, len: usize) -> PathBuf {
+@@ -25,6 +25,16 @@ fn a_cart_is_read_once_it_has_been_rested_on() {
+     assert_eq!(p.wait(), Some(3 << 20), "the whole rom was not read");
+ }
+ 
++#[test]
++fn a_big_cart_is_read_only_as_far_as_the_cap() {
++    let d = tempfile::tempdir().unwrap();
++    let a = rom(d.path(), "big.gba", 16 << 20);
++    let mut p = Prefetch::default();
++    p.browse(Some(&a), 1_000);
++    p.browse(Some(&a), 1_000 + PREFETCH_REST_MS);
++    assert_eq!(p.wait(), Some(PREFETCH_MAX), "a 16 MB cart was read whole");
++}
++
+ #[test]
+ fn scrolling_past_carts_reads_none_of_them() {
+     let d = tempfile::tempdir().unwrap();

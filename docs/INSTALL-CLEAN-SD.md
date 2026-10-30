@@ -125,7 +125,7 @@ list, and the first boot after adding files often misses new ones.
 | double-tap MENU in a game | straight to save states |
 | hold POWER ~1 s | power menu |
 | L1 / R1 in a GB, GBC or NES game | stretch to the screen's height / actual size |
-| START on the shelf, GBA cart | core picker -- **pick gpSP for GBA** |
+| START on the shelf, GBA cart | core picker -- gpSP is the default for GBA; mGBA is slower here |
 
 On the **SNES**, L1/R1 are the game's L and R, and X/Y are its X and Y.
 NES and SNES games are drawn at 2x (512x448) by default.
@@ -153,6 +153,6 @@ slot writes **`Logs/slot.log`** on the card; read it first.
 | no slot in the app list | reboot once more; check `App/Slot/` is in the root, not inside a folder |
 | a NES or SNES game does not show up | it is zipped, or in the wrong folder, or has another extension |
 | GBA games will not start | no `BIOS/gba_bios.bin` |
-| a GBA game runs at half speed | mGBA is selected; START on the shelf, pick gpSP |
+| a GBA game runs at half speed | mGBA was picked for it; START on the shelf, pick gpSP |
 | a SNES game runs slow | not measured yet on this CPU -- please report which game |
 | nothing on screen at all | check `Logs/slot.log`, and that `System/slot` is on the card |
