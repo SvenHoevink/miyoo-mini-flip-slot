@@ -149,3 +149,7 @@ presents over 25 ms with no overlay time in any of them. `0034` grades the
 overlay as it composes it and keeps the direct path; it also stops a GBA
 HUD from carrying the whole Advance shell with it, and from staying on the
 panel, faint, after it fades.
+
+Played on the Flip with `0034` (2026-10-31): volume changes on a GBA cart
+with blue light on hold speed, and the bar leaves nothing behind when it
+fades.
