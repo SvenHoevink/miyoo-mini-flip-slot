@@ -987,6 +987,33 @@ held. Moving between shelves still waits 36-100 ms once while the new shelf's
 faces are built; that is 0016's memory trade, kept. Re-trace with the three in
 to replace the numbers above with after-numbers.
 
+### Leaving a game, and the shrunk carts (2026-10-31)
+
+Same handheld and firmware, traced on v0.4.3. Ejecting Advance Wars froze
+one frame for **526 ms**:
+
+```
+slot: faces: compose waited 66.2 ms for a cart face
+slot: long present: advance 100.3 step 0.0 render 426.5 (list 13.1 end 5.8 overlay 0.0)
+```
+
+`advance` is the eject's save write, kept on the UI thread so the shelf never
+shows the cart out before its data is down. The render is `upload_ground`
+decoding and resizing both 720x480 backgrounds in line (0018 frees them for
+the game), plus the wait for the shelf's faces (0016 frees those too).
+
+| | |
+|---|---|
+| `0038` | faces are not waited for while an eject's power-off has the shelf hidden; on a framed panel nothing of it is drawn then |
+| `0039` | the ground and blur build on a thread, waited for only by a frame that draws them; `cover_rgba` works out its windows per row and column, same bytes |
+| `0040` | a shrunk untinted sprite -- every cart but the centred one, 26-33 ns a pixel -- gathers a row and memcpy's it; a one-colour rect blends through four byte tables, the menus' scrim at 12.6 ms |
+
+With 0038 and 0039 the first frame back was **~95 ms**, 35 of it the save.
+The eject animation still drew at 22-28 ms a frame while the ground and faces
+built beside it on two cores; not changed, since the thread priorities
+behind it once cost a 1.5 s lockup (0016). With 0040 as well, leaving a game
+and scrolling every shelf were reported smooth. Not re-traced for numbers.
+
 ### What is still unexplained
 
 The pacer reports `work 36-45 ms` while `take>swapped` is 11 and the core is 6.
