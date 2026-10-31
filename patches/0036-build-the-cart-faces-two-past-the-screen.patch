@@ -1,0 +1,196 @@
+build the cart faces two past the screen, so scrolling never waits on one
+
+The shelf stalled for a frame and a half now and then while scrolling.
+CartFaces::sync blocks the frame on every on-screen face it does not hold,
+and since 0016 the only faces asked for were the drawn span itself -- so
+every step along the shelf brought a cart on screen whose face had not been
+started yet, and the frame waited for a worker to decode its label and
+build it. 0011's instrument caught it on the handheld: nine waits past 2 ms
+over 19,200 frames of scrolling, the worst 26.0 and 24.3 ms, each one a
+dropped frame or two on a shelf that otherwise holds 60 Hz.
+
+Now the current shelf asks for, and keeps, two carts past each end of the
+drawn span as well. They are not marked on screen, so nothing waits for
+them; by the time a step brings one into view it has been built behind the
+scroll. Two rather than one because holding a direction repeats every 50 ms
+and there are two workers, so each has two steps' time to build a face.
+That is four more faces on the shelf, 0.84 MB at 312x337, against the 3.4 MB
+0016 took back; while a game plays the rule is unchanged, the seated cart
+only, so none of it is held behind a running core.
+
+Tested on the host (rust:1.96-bookworm): a new test steps the cursor right
+and left and asserts that every cart on screen after a step was already
+asked for before it. It fails with FACE_AHEAD at 0 and passes at 2. 0016's
+span tests are updated to the new numbers. The rest of slot and slot-ui's
+tests fail in the same 25 places with and without this patch.
+
+Traced on the Flip (2026-10-31): scrolling along a shelf no longer waits
+for a face. Moving to another shelf still does, 36-100 ms once, while its
+faces are built for the first time -- the cost 0016 chose to keep the
+memory, and left alone here.
+
+Applies on top of 0035, upstream 91499a9.
+
+diff --git a/crates/slot-ui/src/shelf.rs b/crates/slot-ui/src/shelf.rs
+index 3d9dea3..a987b1a 100644
+--- a/crates/slot-ui/src/shelf.rs
++++ b/crates/slot-ui/src/shelf.rs
+@@ -198,6 +198,11 @@ impl Shelf {
+         self.around(SLOTS)
+     }
+ 
++    /// The drawn span and `more` carts past each end of it, nearest first.
++    pub fn beyond_screen(&self, more: i32) -> Vec<usize> {
++        self.around(SLOTS + more)
++    }
++
+     pub fn around(&self, radius: i32) -> Vec<usize> {
+         let mut out = Vec::new();
+         for step in 0..=radius {
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index a0350fd..285bf85 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -459,6 +459,12 @@ pub struct App {
+     state_writer: crate::state_writer::StateWriter,
+ }
+ 
++/// Cart faces built past each end of the drawn span. Two, not one: holding a
++/// direction repeats every 50 ms, and with two workers each has two steps to
++/// build its face before the cart reaches the screen. 0.84 MB more on the
++/// shelf, and none while a game plays.
++const FACE_AHEAD: i32 = 2;
++
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub struct FaceWant {
+     pub shelf: usize,
+@@ -1535,8 +1541,17 @@ impl App {
+         // upstream's placeholder and looks it. What is wanted and what is kept
+         // have to stay the same set, or the workers spend every frame building
+         // faces that are shed before they are drawn.
++        //
++        // Plus FACE_AHEAD past each end, built but never waited for. With only
++        // the drawn span, every step along the shelf brought a cart on screen
++        // whose face did not exist yet, and `CartFaces::sync` blocks the frame
++        // on it: 24-26 ms stalls while scrolling, measured by 0011.
+         let screen = here.on_screen();
+-        let mut wants: Vec<(usize, usize)> = screen.iter().map(|i| (self.shelf_at, *i)).collect();
++        let mut wants: Vec<(usize, usize)> = here
++            .beyond_screen(FACE_AHEAD)
++            .into_iter()
++            .map(|i| (self.shelf_at, i))
++            .collect();
+         for at in self.neighbour_shelves() {
+             wants.extend(self.shelves[at].1.around(0).into_iter().map(|i| (at, i)));
+         }
+@@ -1576,7 +1591,7 @@ impl App {
+             let keep = if at == self.shelf_at && playing {
+                 shelf.around(0)
+             } else if at == self.shelf_at {
+-                shelf.on_screen()
++                shelf.beyond_screen(FACE_AHEAD)
+             } else if neighbours.contains(&at) {
+                 shelf.around(0)
+             } else {
+diff --git a/crates/slot/tests/cart_faces.rs b/crates/slot/tests/cart_faces.rs
+index 14bae87..6441f90 100644
+--- a/crates/slot/tests/cart_faces.rs
++++ b/crates/slot/tests/cart_faces.rs
+@@ -1,4 +1,5 @@
+ use slot::app::App;
++use slot_input::{Action, Btn};
+ use slot_store::{Cart, Platform};
+ use slot_ui::TexId;
+ 
+@@ -23,24 +24,52 @@ fn library(gba: usize, gb: usize) -> App {
+ }
+ 
+ /// Upstream asks for eight either side on top of the visible span; this port
+-/// asks for the visible span and no more, because that is what it keeps.
++/// asks for the visible span and two past each end of it, because that is
++/// what it keeps.
+ #[test]
+ fn a_big_library_asks_only_for_the_carts_near_the_cursor() {
+     let app = library(500, 0);
+     let wants = app.face_wants();
+-    assert_eq!(wants.len(), 7, "the drawn span, and nothing beyond it");
++    assert_eq!(wants.len(), 11, "the drawn span and two either side");
+     let screen: Vec<usize> = wants
+         .iter()
+         .filter(|w| w.on_screen)
+         .map(|w| w.index)
+         .collect();
+     assert_eq!(screen, vec![0, 1, 499, 2, 498, 3, 497]);
++    let ahead: Vec<usize> = wants
++        .iter()
++        .filter(|w| !w.on_screen)
++        .map(|w| w.index)
++        .collect();
++    assert_eq!(ahead, vec![4, 496, 5, 495], "built ahead, never waited for");
+     assert!(
+-        wants.iter().all(|w| w.on_screen),
+-        "nothing off-screen should be asked for"
++        wants[..7].iter().all(|w| w.on_screen),
++        "what is on screen is asked for first"
+     );
+ }
+ 
++/// The scroll hitch: `CartFaces::sync` blocks the frame on every on-screen
++/// face it does not have, so a cart that only becomes wanted when it comes on
++/// screen is a stalled frame. Each one has to have been asked for, off screen,
++/// a step earlier.
++#[test]
++fn a_cart_stepped_on_screen_was_already_being_built() {
++    let mut app = library(500, 0);
++    for b in [Btn::Right, Btn::Right, Btn::Left, Btn::Left, Btn::Left] {
++        let before: Vec<usize> = app.face_wants().iter().map(|w| w.index).collect();
++        app.apply(Action::GbaDown(b));
++        app.apply(Action::GbaUp(b));
++        for w in app.face_wants().iter().filter(|w| w.on_screen) {
++            assert!(
++                before.contains(&w.index),
++                "cart {} came on screen after {b:?} without being asked for first",
++                w.index
++            );
++        }
++    }
++}
++
+ /// A neighbouring shelf is asked for last and only for its selected cart,
+ /// where upstream asks for its whole visible span.
+ #[test]
+@@ -49,12 +78,13 @@ fn the_neighbouring_shelf_is_asked_for_after_what_is_on_screen() {
+     let wants = app.face_wants();
+     let gba = wants[0].shelf;
+     assert!(wants[..7].iter().all(|w| w.shelf == gba && w.on_screen));
++    assert!(wants[7..11].iter().all(|w| w.shelf == gba && !w.on_screen));
+     assert!(
+-        wants[7..].iter().all(|w| w.shelf != gba && !w.on_screen),
++        wants[11..].iter().all(|w| w.shelf != gba && !w.on_screen),
+         "the next shelf's carts are not queued after this shelf's"
+     );
+     assert_eq!(
+-        wants[7..].len(),
++        wants[11..].len(),
+         1,
+         "a neighbouring shelf should cost one face, not a span"
+     );
+@@ -74,13 +104,14 @@ fn faces_far_from_the_cursor_are_shed_and_near_ones_kept() {
+     let gba = app.face_wants()[0].shelf;
+     app.set_cart_face(gba, 0, TexId::from_raw(1));
+     app.set_cart_face(gba, 3, TexId::from_raw(2));
+-    app.set_cart_face(gba, 4, TexId::from_raw(3));
++    app.set_cart_face(gba, 5, TexId::from_raw(3));
++    app.set_cart_face(gba, 6, TexId::from_raw(5));
+     app.set_cart_face(gba, 250, TexId::from_raw(4));
+     let mut shed = app.shed_faces();
+     shed.sort_by_key(|t| format!("{t:?}"));
+-    // Kept: the drawn span, three either side. 4 is one past it, which
+-    // upstream would have kept and this port sheds.
+-    assert_eq!(shed, vec![TexId::from_raw(3), TexId::from_raw(4)]);
++    // Kept: the drawn span, three either side, and two past it. 6 is one past
++    // that, which upstream would have kept and this port sheds.
++    assert_eq!(shed, vec![TexId::from_raw(4), TexId::from_raw(5)]);
+     assert!(app.shed_faces().is_empty());
+ }
+ 

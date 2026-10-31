@@ -1,0 +1,40 @@
+build the core picker's art only for a gba cart
+
+Only a GBA cart opens the core picker (App::open_core_picker returns for
+anything else), but sync_core_picker asked FaceBuilder for its lid, board
+and interior on every change of highlight, whatever the cart. Traced on the
+handheld on the NES shelf, 2026-10-31: every step along it uploaded a 1x1,
+a 360x212 and a 308x347 texture inside the frame, and the builder thread
+behind them was a third busy thread on two cores beside the cart-face
+workers -- which on the same trace were still making compose wait 36-100 ms
+when moving between shelves.
+
+The request is now made only for a GBA cart. The art is drawn by the
+picker and nothing else, so nothing on screen changes; a GBA cart builds
+exactly as it did.
+
+Tested on the host: slot's tests fail in the same places with and without
+it. Played on the Flip with 0036 and 0037 (2026-10-31).
+
+Applies on top of 0034, upstream 91499a9.
+
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 42fa477..9ec6874 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -1254,9 +1254,15 @@ fn sync_core_picker(
+ ) {
+     let highlighted = app.selected_stem().map(str::to_string);
+     if highlighted.is_some() && *asked != highlighted {
++        // Only a GBA cart opens the picker (`App::open_core_picker`). Built for
++        // every cart, each step along an NES or Game Boy shelf cost a lid, a
++        // board and an interior on a thread contending with the cart-face
++        // workers for two cores, and three uploads inside the frame, for art
++        // that is never drawn.
+         if let Some(cart) = app
+             .carts()
+             .find(|c| highlighted.as_deref() == Some(c.stem.as_str()))
++            .filter(|c| c.platform == Console::Gba)
+         {
+             builder.request(cart.clone());
+         }

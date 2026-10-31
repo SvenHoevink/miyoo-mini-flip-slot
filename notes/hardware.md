@@ -964,6 +964,29 @@ An instrument that rounds away the exact quantity under test is worse than
 none. It is logged in thousandths now, and the rule generalises: **print the
 value the code branches on, not a rendering of it.**
 
+### The NES shelf, and the three things left on it (2026-10-31)
+
+Mini Flip, stock firmware 202510011046, `Config/trace-latency.txt` armed.
+Scrolling still hitched, worst on the NES shelf, and the trace said why:
+
+```
+pace: 600 frames, 104 missed a latch, work 25.6 ms, period 16.71 ms
+render 16.4-20.6 ms a frame; sprites 11.4 ms over 14 draws
+tex 0: 752x560 from 752x560 (1.00x up) 5.40 ms 13 ns/px   -- the wallpaper
+faces: compose waited 24.3-26.0 ms for a cart face        -- before 0036
+```
+
+| | |
+|---|---|
+| `0035` | the GBA core picker's lid, board and interior were built and uploaded on every step along *any* shelf, three textures a step, for a picker only a GBA cart opens |
+| `0036` | faces were built only for the drawn span, so every step waited for the cart coming on screen; two past each end are built ahead now |
+| `0037` | an unscaled, untinted draw -- the wallpaper and the bars -- gathered each row through the column table before memcpy'ing it; the row is a slice of the texture already |
+
+Played on the Flip with all three: the shelves scroll smoothly, stepped or
+held. Moving between shelves still waits 36-100 ms once while the new shelf's
+faces are built; that is 0016's memory trade, kept. Re-trace with the three in
+to replace the numbers above with after-numbers.
+
 ### What is still unexplained
 
 The pacer reports `work 36-45 ms` while `take>swapped` is 11 and the core is 6.
