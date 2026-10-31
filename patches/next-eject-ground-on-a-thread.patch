@@ -1,0 +1,347 @@
+build the shelf's ground on a thread on the way back from a game
+
+Leaving a game froze the screen for about half a second. Traced on the
+handheld, 2026-10-31, v0.4.3 with Config/trace-latency.txt, ejecting
+Advance Wars:
+
+    slot: faces: compose waited 66.2 ms for a cart face
+    slot: long present: advance 100.3 step 0.0 render 426.5 (list 13.1 end 5.8 overlay 0.0)
+
+One frame of 526 ms. The 100 ms in advance is the eject's own save write,
+kept on the UI thread on purpose so the shelf never shows the cart out
+before its data is down. Of the 426 ms render, 13 is drawing and 66 the
+face wait (next-eject-faces-unwaited); the rest is upload_ground. The
+shelf's ground and its blur are freed while a game plays (0018's memory, for a GBA cart to run), and the
+first frame back decoded both 720x480 PNGs and resized them to the panel, in
+line.
+
+Now that work runs on a thread from the first frame after the game. The
+two textures are created at once, transparent, so the app holds the same
+ids it always did, and a frame waits for the art only when its own draw
+list uses one of them. On this panel an eject first powers the screen off
+over the game for POWER_OFF_S, drawing a black rect and nothing of the
+shelf, so the build has that time free; if it is not done when the shelf
+is drawn the frame waits as it did before. No frame shows less than it did.
+
+The resize itself, cover_rgba, worked out each output pixel's source window
+from floats per pixel; the windows depend only on the column and the row,
+so they are worked out once each. Same float expressions, so the same
+windows and the same bytes: a test keeps the old per-pixel version as the
+reference and compares both real backgrounds at both panel sizes plus
+synthetic up and down scales, byte for byte. 7.2 ms to 6.0 on the host for
+the ground, decode included; labels go through it too.
+
+The frontend's render tests are macOS-only and were not run here. slot's
+and slot-ui's tests fail in the same 25 places with and without this patch.
+Not yet run on the handheld.
+
+Applies on top of 0037, upstream 91499a9.
+
+diff --git a/crates/slot-ui/src/art.rs b/crates/slot-ui/src/art.rs
+index afb840b..86165af 100644
+--- a/crates/slot-ui/src/art.rs
++++ b/crates/slot-ui/src/art.rs
+@@ -19,37 +19,43 @@ pub(crate) fn cover_rgba(src: &[u8], sw: u32, sh: u32, w: u32, h: u32) -> Option
+     let ox = (sw as f32 - w as f32 / scale) / 2.0;
+     let oy = (sh as f32 - h as f32 / scale) / 2.0;
+ 
++    // Each output column's source window depends only on x, and each row's
++    // only on y, so they are worked out once rather than per pixel: the same
++    // float expressions as before, so the same windows and the same bytes.
++    // Leaving a game rebuilds the shelf's two backgrounds through here, and
++    // on the handheld that was most of a 0.4 s frame.
++    let cols: Vec<(u32, u32)> = (0..w)
++        .map(|x| window(ox + x as f32 / scale, ox + (x + 1) as f32 / scale, sw))
++        .collect();
+     let mut out = vec![0u8; (w * h * 4) as usize];
+-    for y in 0..h {
+-        let y0 = oy + y as f32 / scale;
+-        let y1 = oy + (y + 1) as f32 / scale;
+-        for x in 0..w {
+-            let x0 = ox + x as f32 / scale;
+-            let x1 = ox + (x + 1) as f32 / scale;
+-            let px = box_average(src, sw, sh, x0, y0, x1, y1);
+-            out[((y * w + x) * 4) as usize..][..4].copy_from_slice(&px);
++    for (y, row) in out.chunks_exact_mut((w * 4) as usize).enumerate() {
++        let y = y as u32;
++        let (ya, yb) = window(oy + y as f32 / scale, oy + (y + 1) as f32 / scale, sh);
++        for (px, &(xa, xb)) in row.chunks_exact_mut(4).zip(&cols) {
++            px.copy_from_slice(&box_sum(src, sw, xa, xb, ya, yb));
+         }
+     }
+     Some(out)
+ }
+ 
+-fn box_average(src: &[u8], sw: u32, sh: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> [u8; 4] {
+-    let xa = (x0.floor().max(0.0) as u32).min(sw - 1);
+-    let ya = (y0.floor().max(0.0) as u32).min(sh - 1);
+-    let xb = ((x1.ceil() as u32).max(xa + 1)).min(sw);
+-    let yb = ((y1.ceil() as u32).max(ya + 1)).min(sh);
++/// The source pixels `[a, b)` a destination span `[v0, v1)` averages over.
++fn window(v0: f32, v1: f32, size: u32) -> (u32, u32) {
++    let a = (v0.floor().max(0.0) as u32).min(size - 1);
++    let b = ((v1.ceil() as u32).max(a + 1)).min(size);
++    (a, b)
++}
+ 
++fn box_sum(src: &[u8], sw: u32, xa: u32, xb: u32, ya: u32, yb: u32) -> [u8; 4] {
+     let mut acc = [0u32; 4];
+-    let mut n = 0u32;
+     for y in ya..yb {
+-        for x in xa..xb {
+-            let i = ((y * sw + x) * 4) as usize;
++        let row = &src[((y * sw + xa) * 4) as usize..((y * sw + xb) * 4) as usize];
++        for p in row.chunks_exact(4) {
+             for c in 0..4 {
+-                acc[c] += src[i + c] as u32;
++                acc[c] += p[c] as u32;
+             }
+-            n += 1;
+         }
+     }
++    let n = (xb - xa) * (yb - ya);
+     let mut out = [0u8; 4];
+     for c in 0..4 {
+         out[c] = ((acc[c] + n / 2) / n) as u8;
+@@ -189,3 +195,95 @@ fn unpremultiply(rgba: &mut [u8]) {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod cover_tests {
++    use super::cover_rgba;
++
++    /// `cover_rgba` as it was: the window and the average worked out from
++    /// floats for every output pixel. The new one has to produce the same
++    /// bytes, not nearly the same, since the shelf's ground is drawn from it.
++    fn reference(src: &[u8], sw: u32, sh: u32, w: u32, h: u32) -> Vec<u8> {
++        let scale = (w as f32 / sw as f32).max(h as f32 / sh as f32);
++        let ox = (sw as f32 - w as f32 / scale) / 2.0;
++        let oy = (sh as f32 - h as f32 / scale) / 2.0;
++        let mut out = vec![0u8; (w * h * 4) as usize];
++        for y in 0..h {
++            let y0 = oy + y as f32 / scale;
++            let y1 = oy + (y + 1) as f32 / scale;
++            for x in 0..w {
++                let x0 = ox + x as f32 / scale;
++                let x1 = ox + (x + 1) as f32 / scale;
++                let px = box_average(src, sw, sh, x0, y0, x1, y1);
++                out[((y * w + x) * 4) as usize..][..4].copy_from_slice(&px);
++            }
++        }
++        out
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn box_average(src: &[u8], sw: u32, sh: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> [u8; 4] {
++        let xa = (x0.floor().max(0.0) as u32).min(sw - 1);
++        let ya = (y0.floor().max(0.0) as u32).min(sh - 1);
++        let xb = ((x1.ceil() as u32).max(xa + 1)).min(sw);
++        let yb = ((y1.ceil() as u32).max(ya + 1)).min(sh);
++
++        let mut acc = [0u32; 4];
++        let mut n = 0u32;
++        for y in ya..yb {
++            for x in xa..xb {
++                let i = ((y * sw + x) * 4) as usize;
++                for c in 0..4 {
++                    acc[c] += src[i + c] as u32;
++                }
++                n += 1;
++            }
++        }
++        let mut out = [0u8; 4];
++        for c in 0..4 {
++            out[c] = ((acc[c] + n / 2) / n) as u8;
++        }
++        out
++    }
++
++    fn image(w: u32, h: u32) -> Vec<u8> {
++        (0..w * h * 4)
++            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
++            .collect()
++    }
++
++    #[test]
++    fn it_matches_the_per_pixel_version() {
++        // Up, down, the backgrounds' own 720x480 to both panels, and odd
++        // shapes either way round.
++        let cases = [
++            (720, 480, 752, 560),
++            (720, 480, 640, 480),
++            (720, 480, 360, 212),
++            (300, 200, 752, 560),
++            (1000, 750, 312, 337),
++            (17, 9, 40, 40),
++            (40, 40, 17, 9),
++            (1, 1, 5, 3),
++        ];
++        for (sw, sh, w, h) in cases {
++            let src = image(sw, sh);
++            let got = cover_rgba(&src, sw, sh, w, h).expect("a non-empty source");
++            assert!(got == reference(&src, sw, sh, w, h), "{sw}x{sh} -> {w}x{h}");
++        }
++    }
++
++    #[test]
++    fn the_real_backgrounds_come_out_the_same() {
++        for png in [
++            &include_bytes!("../../../assets/background_default.png")[..],
++            &include_bytes!("../../../assets/background_default_blur.png")[..],
++        ] {
++            let (src, sw, sh) = super::decode_png_bytes(png).expect("the asset decodes");
++            for (w, h) in [(752, 560), (640, 480)] {
++                let got = cover_rgba(&src, sw, sh, w, h).expect("a non-empty source");
++                assert!(got == reference(&src, sw, sh, w, h), "{w}x{h}");
++            }
++        }
++    }
++}
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 9ec6874..4d69292 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -78,6 +78,7 @@ pub struct Frontend {
+     quick_clock: QuickClock,
+     quick_palette: QuickPalette,
+     wallpaper: WallpaperSync,
++    ground_build: Option<GroundBuild>,
+     game_bezel: BezelSync,
+     look: Option<ShelfLook>,
+     link_shot: Option<TexId>,
+@@ -115,6 +116,20 @@ struct BezelSync {
+     faces: [(Option<TexId>, Option<TexId>); 3],
+ }
+ 
++/// The ground and its blur, as `upload_ground` would upload them.
++type GroundArt = (Option<Vec<u8>>, Option<Vec<u8>>);
++
++/// The shelf's ground and blur, being decoded on a thread after a game.
++///
++/// Both textures exist from the start, transparent, so the app holds their
++/// ids as it always has; the frame waits for the real art only when its draw
++/// list uses one of them.
++struct GroundBuild {
++    built: std::sync::mpsc::Receiver<GroundArt>,
++    ground: TexId,
++    blur: TexId,
++}
++
+ #[derive(Default)]
+ struct WallpaperSync {
+     tex: Option<TexId>,
+@@ -201,6 +216,7 @@ impl Frontend {
+             quick_clock: QuickClock::default(),
+             quick_palette: QuickPalette::default(),
+             wallpaper: WallpaperSync::default(),
++            ground_build: None,
+             game_bezel: BezelSync::default(),
+             look: None,
+             link_shot: None,
+@@ -592,10 +608,12 @@ impl Frontend {
+                     compositor.free_texture(tex);
+                 }
+                 self.wallpaper = WallpaperSync::default();
++                self.ground_build = None;
+             }
+         } else if !self.session.app().has_ground() {
+-            self.upload_ground(compositor);
++            self.start_ground(compositor);
+         }
++        self.land_ground(compositor, false);
+         sync_wallpaper(self.session.app_mut(), compositor, &mut self.wallpaper);
+         sync_game_bezel(self.session.app_mut(), compositor, &mut self.game_bezel);
+         compositor.set_game_bezel(self.session.app().shown_game_bezel());
+@@ -657,9 +675,75 @@ impl Frontend {
+         );
+         self.draws.clear();
+         self.session.app().draw(&mut self.draws);
++        if let Some(b) = &self.ground_build {
++            let (ground, blur) = (b.ground, b.blur);
++            if self
++                .draws
++                .iter()
++                .any(|d| draws_tex(d, ground) || draws_tex(d, blur))
++            {
++                self.land_ground(compositor, true);
++            }
++        }
+         compositor.draw_list(&self.draws);
+     }
+ 
++    /// `upload_ground` on a thread, for the way back from a game.
++    ///
++    /// Done in line, the first frame after a game decoded and resized both
++    /// 720x480 PNGs: on the handheld that frame took 426 ms to render, a
++    /// visible freeze on every eject. On this panel an eject first powers
++    /// the screen off over the game with nothing of the shelf drawn, so
++    /// building them meanwhile costs no frame at all. Anything that draws
++    /// them before they land still waits, so no frame shows less than it did.
++    fn start_ground(&mut self, compositor: &mut Compositor) {
++        let (tx, built) = std::sync::mpsc::channel();
++        let spawned = std::thread::Builder::new()
++            .name("slot-ground".into())
++            .spawn(move || {
++                let _ = tx.send((slot_ui::default_background(), slot_ui::blur_background()));
++            });
++        if spawned.is_err() {
++            return self.upload_ground(compositor);
++        }
++        let clear = vec![0u8; (out_w() * out_h() * 4) as usize];
++        let ground = compositor.create_texture(out_w(), out_h(), &clear);
++        let blur = compositor.create_texture(out_w(), out_h(), &clear);
++        self.session.app_mut().set_ground(ground);
++        self.session.app_mut().set_blur(blur);
++        self.ground_build = Some(GroundBuild {
++            built,
++            ground,
++            blur,
++        });
++    }
++
++    fn land_ground(&mut self, compositor: &mut Compositor, wait: bool) {
++        let Some(b) = &self.ground_build else {
++            return;
++        };
++        let built = match wait {
++            true => b.built.recv().ok(),
++            false => match b.built.try_recv() {
++                Ok(built) => Some(built),
++                Err(std::sync::mpsc::TryRecvError::Empty) => return,
++                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
++            },
++        };
++        let (ground, blur) = (b.ground, b.blur);
++        self.ground_build = None;
++        let Some((ground_rgba, blur_rgba)) = built else {
++            return;
++        };
++        // Missing art leaves its texture transparent, which draws as nothing
++        // -- what `upload_ground` did by not setting it.
++        for (tex, rgba) in [(ground, ground_rgba), (blur, blur_rgba)] {
++            if let Some(rgba) = rgba {
++                compositor.update_texture(tex, out_w(), out_h(), &rgba);
++            }
++        }
++    }
++
+     pub fn drive_emulator(&mut self) {
+         self.session.set_driven(true);
+     }
+@@ -811,6 +895,14 @@ impl Frontend {
+     }
+ }
+ 
++fn draws_tex(d: &Draw, id: TexId) -> bool {
++    matches!(
++        d,
++        Draw::Tex { tex, .. } | Draw::Part { tex, .. } | Draw::Turned { tex, .. } | Draw::Shot { tex, .. }
++            if *tex == id
++    )
++}
++
+ fn link_legend_faces(ink: [u8; 3]) -> Vec<UndoFace> {
+     link_button_legends(ink)
+ }
