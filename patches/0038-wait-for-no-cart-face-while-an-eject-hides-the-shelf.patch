@@ -1,7 +1,7 @@
 wait for no cart face while an eject has the shelf hidden
 
 The first frame after a game also waited 66.2 ms for the shelf's cart faces
-(traced on the handheld, 2026-10-31, see next-eject-ground-on-a-thread).
+(traced on the handheld, 2026-10-31, see 0039).
 0016 frees all but the seated cart's face while a game plays, so ejecting
 asks for the drawn span again, marked on screen, and CartFaces::sync blocks
 the frame until it is built.
@@ -16,7 +16,10 @@ without the art it had before.
 A new test ejects from a game on a 752x560 panel and checks, frame by
 frame, that no face is waited for while the draw list is draw_powering's,
 and that the faces are waited for again once the shelf is drawn. It fails
-without the change. Not yet run on the handheld.
+without the change.
+
+Played on the Flip with 0038-0040 together (2026-10-31): leaving a game
+and scrolling the shelves, the NES shelf included, reported smooth.
 
 Applies on top of 0037, upstream 91499a9.
 

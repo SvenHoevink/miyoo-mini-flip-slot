@@ -26,9 +26,11 @@ that are opaque, clear and mixed; a new test draws a cart-shaped face --
 opaque middle, clear corners, soft edge -- at the shelf's 0.78 and 0.99 at
 fractional positions and compares it with the reference byte for byte.
 fill_rect's reference test covers the tables across alphas and colours.
-Not yet run on the handheld.
+Played on the Flip with 0038-0040 together (2026-10-31): leaving a game
+and scrolling the shelves, the NES shelf included, reported smooth. Not yet re-traced for
+numbers.
 
-Applies on top of next-eject-ground-on-a-thread, upstream 91499a9.
+Applies on top of 0039, upstream 91499a9.
 
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 index a3e8a64..b837ad0 100644

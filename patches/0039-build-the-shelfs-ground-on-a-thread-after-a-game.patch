@@ -10,7 +10,7 @@ Advance Wars:
 One frame of 526 ms. The 100 ms in advance is the eject's own save write,
 kept on the UI thread on purpose so the shelf never shows the cart out
 before its data is down. Of the 426 ms render, 13 is drawing and 66 the
-face wait (next-eject-faces-unwaited); the rest is upload_ground. The
+face wait (0038); the rest is upload_ground. The
 shelf's ground and its blur are freed while a game plays (0018's memory, for a GBA cart to run), and the
 first frame back decoded both 720x480 PNGs and resized them to the panel, in
 line.
@@ -33,9 +33,12 @@ the ground, decode included; labels go through it too.
 
 The frontend's render tests are macOS-only and were not run here. slot's
 and slot-ui's tests fail in the same 25 places with and without this patch.
-Not yet run on the handheld.
+Traced on the Flip with it: the first frame after a game went from 526 ms
+to about 95, of which 35 is the save write. Played on the Flip with
+0038-0040 together (2026-10-31): leaving a game and scrolling the shelves,
+the NES shelf included, reported smooth.
 
-Applies on top of 0037, upstream 91499a9.
+Applies on top of 0038, upstream 91499a9.
 
 diff --git a/crates/slot-ui/src/art.rs b/crates/slot-ui/src/art.rs
 index afb840b..86165af 100644
