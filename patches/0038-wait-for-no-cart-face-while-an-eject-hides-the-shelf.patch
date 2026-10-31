@@ -1,0 +1,116 @@
+wait for no cart face while an eject has the shelf hidden
+
+The first frame after a game also waited 66.2 ms for the shelf's cart faces
+(traced on the handheld, 2026-10-31, see 0039).
+0016 frees all but the seated cart's face while a game plays, so ejecting
+asks for the drawn span again, marked on screen, and CartFaces::sync blocks
+the frame until it is built.
+
+But on a framed panel an eject draws none of the shelf until the screen
+has powered off over the game: that arm of App::draw is draw_powering, a
+black rect and the game. face_wants now marks nothing on screen while that
+is so (App::shelf_hidden, mirroring the arm), so the faces are built in that
+time and waited for only once the shelf is drawn -- no frame shows a cart
+without the art it had before.
+
+A new test ejects from a game on a 752x560 panel and checks, frame by
+frame, that no face is waited for while the draw list is draw_powering's,
+and that the faces are waited for again once the shelf is drawn. It fails
+without the change.
+
+Played on the Flip with 0038-0040 together (2026-10-31): leaving a game
+and scrolling the shelves, the NES shelf included, reported smooth.
+
+Applies on top of 0037, upstream 91499a9.
+
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 285bf85..9c2f323 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -1561,11 +1561,25 @@ impl App {
+             .map(|(shelf, index)| FaceWant {
+                 shelf,
+                 index,
+-                on_screen: shelf == self.shelf_at && screen.contains(&index),
++                on_screen: shelf == self.shelf_at
++                    && screen.contains(&index)
++                    && !self.shelf_hidden(),
+             })
+             .collect()
+     }
+ 
++    /// Whether this frame draws none of the shelf, though the phase is one
++    /// that will: an eject on a framed panel powers the screen off over the
++    /// game first, `draw_powering` and nothing else. Mirrors that arm of
++    /// `draw`. The faces the shelf wants are built meanwhile but not waited
++    /// for, since nothing would show them -- on the handheld that wait was
++    /// 66 ms of the eject's first frame.
++    fn shelf_hidden(&self) -> bool {
++        matches!(self.phase, Phase::Ejecting { .. })
++            && self.framed_panel()
++            && (self.shows_game() || self.screen > 0.0)
++    }
++
+     pub fn face_cart(&self, shelf: usize, index: usize) -> Option<&Cart> {
+         self.shelves.get(shelf)?.1.carts.get(index)
+     }
+diff --git a/crates/slot/tests/cart_faces.rs b/crates/slot/tests/cart_faces.rs
+index 6441f90..7ce7fbc 100644
+--- a/crates/slot/tests/cart_faces.rs
++++ b/crates/slot/tests/cart_faces.rs
+@@ -151,3 +151,55 @@ fn a_playing_game_asks_for_almost_nothing_and_blocks_on_none_of_it() {
+         "faces for carts that cannot be seen should not survive a launch"
+     );
+ }
++
++/// An eject on a framed panel powers the screen off over the game before any
++/// of the shelf is drawn, and the frame loop must not stall on faces nothing
++/// shows -- on the handheld that wait was 66 ms of the eject's first frame.
++/// Once the screen is off and the shelf is drawn, its faces are waited for
++/// again, so no frame shows a cart without its art that did before.
++#[test]
++fn an_eject_waits_for_no_face_until_the_shelf_is_drawn() {
++    let d = common::tmp_root_with_carts(&["Emerald", "Ruby", "Sapphire", "FireRed"]);
++    let mut app = common::app_playing_in(d.path(), "Emerald");
++    app.set_panel((752, 560));
++    for _ in 0..30 {
++        app.update(1.0 / 60.0);
++    }
++    app.apply(Action::Eject);
++    assert!(
++        matches!(app.phase(), slot::app::Phase::Ejecting { .. }),
++        "the test did not reach Ejecting"
++    );
++
++    let mut hidden = 0;
++    let mut drawn = false;
++    for _ in 0..60 {
++        let mut out = Vec::new();
++        app.draw(&mut out);
++        // `draw_powering`: one full black rect, and the game while lit.
++        let black = |d: &slot_gfx::Draw| matches!(d, slot_gfx::Draw::Rect { colour, .. } if *colour == [0.0, 0.0, 0.0, 1.0]);
++        let shelf_drawn = !match out.as_slice() {
++            [r] => black(r),
++            [r, slot_gfx::Draw::Game] => black(r),
++            _ => false,
++        };
++        let waits = app.face_wants().iter().any(|w| w.on_screen);
++        if !shelf_drawn {
++            assert!(
++                !waits,
++                "a face was waited for on a frame that draws no shelf"
++            );
++            hidden += 1;
++        } else {
++            assert!(waits, "the shelf is drawn and its faces are not waited for");
++            drawn = true;
++            break;
++        }
++        app.update(1.0 / 60.0);
++    }
++    assert!(
++        hidden > 0,
++        "the eject never hid the shelf, so this tested nothing"
++    );
++    assert!(drawn, "the shelf never came back");
++}

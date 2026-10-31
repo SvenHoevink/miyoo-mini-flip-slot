@@ -1,0 +1,189 @@
+draw a shrunk sprite and a one-colour blend a row at a time
+
+The NES shelf still missed the latch on 80 of 600 frames after 0037, and
+a menu under the dim scrim on 432 of 600. Traced on the handheld,
+2026-10-31, with Config/trace-latency.txt:
+
+    tex 2: 301x340 from 304x343 (0.99x DOWN) 3.42 ms 33 ns/px
+    tex 1: 237x268 from 304x343 (0.78x DOWN) 1.67 ms 26 ns/px
+    sprite stage by kind: rect 12.6 ms over 1, tex 5.6 ms over 11
+
+Every cart but the centred one is drawn shrunk, and a shrunk draw took
+blit's direct path: gather, test and copy one texel at a time, 26-33 ns a
+pixel against 7-9 for a row that is gathered and memcpy'd. An untinted
+shrunk draw now gathers each row into the line in one tight pass, noting
+its lowest alpha, and copies the line whole when that is opaque enough --
+the solid middle of a cart, which is most of its rows. Other rows take the
+same per-texel rule as before.
+
+The menus' dim scrim is one rect over the whole canvas, blended per pixel:
+12.6 ms. A rect is one colour, so each channel of the blend depends on the
+destination byte alone; the rect builds four 256-entry tables from blend
+itself and looks each byte up.
+
+Both are exact. blit's reference tests already cover shrinking, with rows
+that are opaque, clear and mixed; a new test draws a cart-shaped face --
+opaque middle, clear corners, soft edge -- at the shelf's 0.78 and 0.99 at
+fractional positions and compares it with the reference byte for byte.
+fill_rect's reference test covers the tables across alphas and colours.
+Played on the Flip with 0038-0040 together (2026-10-31): leaving a game
+and scrolling the shelves, the NES shelf included, reported smooth. Not yet re-traced for
+numbers.
+
+Applies on top of 0039, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+index a3e8a64..b837ad0 100644
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -248,13 +248,27 @@ pub fn fill_rect(
+ 
+     scratch.blend_rects += 1;
+     scratch.blend_px += width as u64 * (y1 - y0) as u64;
++    // One colour over everything it covers, so what `blend` makes of each
++    // channel depends on the destination byte alone: four 256-entry tables
++    // built from `blend` itself, and a lookup per byte. The menus' dimming
++    // scrim is this rect at the full canvas, measured at 12.6 ms a frame.
++    let mut table = [[0u8; 256]; 4];
++    for v in 0..=255u8 {
++        let mut d = [v; 4];
++        blend(&mut d, src);
++        for (c, t) in table.iter_mut().enumerate() {
++            t[v as usize] = d[c];
++        }
++    }
+     for py in y0..y1 {
+         let start = (py as usize * dw + x0 as usize) * 4;
+         let Some(drow) = dst.px.get_mut(start..start + width * 4) else {
+             continue;
+         };
+         for d in drow.chunks_exact_mut(4) {
+-            blend(d, src);
++            for (c, t) in table.iter().enumerate() {
++                d[c] = t[d[c] as usize];
++            }
+         }
+     }
+ }
+@@ -390,7 +404,7 @@ pub fn blit_part(
+ 
+     // Worth the line only when destination rows share source rows.
+     let reuse = h >= tex.h as f32 * uv[3];
+-    if reuse && scratch.line.len() != width * 4 {
++    if (reuse || plain) && scratch.line.len() != width * 4 {
+         scratch.line.resize(width * 4, 0);
+     }
+     if reuse {
+@@ -449,6 +463,43 @@ pub fn blit_part(
+             continue;
+         }
+ 
++        if !reuse && plain {
++            // Scaled down and untinted -- every cart on the shelf but the one
++            // in the middle, measured at 26-33 ns a pixel and 6-7 ms of an
++            // NES shelf's frame when this gathered, tested and copied one
++            // texel at a time. One tight gather into the line instead, noting
++            // the lowest alpha as it goes, and the row is a memcpy when that
++            // is opaque enough, as the solid middle of a cart is. The rule
++            // per texel is the one below, so the pixels are the same.
++            let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
++                continue;
++            };
++            let mut lowest = u8::MAX;
++            for (e, &c) in scratch.line.chunks_exact_mut(4).zip(col.iter()) {
++                // SAFETY: as below.
++                let s = unsafe { &*(trow.as_ptr().add(c as usize) as *const [u8; 4]) };
++                e.copy_from_slice(s);
++                lowest = lowest.min(s[3]);
++            }
++            if lowest >= OPAQUE_ENOUGH {
++                scratch.tex_copy += width as u32;
++                drow.copy_from_slice(&scratch.line);
++                continue;
++            }
++            for (d, s) in drow.chunks_exact_mut(4).zip(scratch.line.chunks_exact(4)) {
++                if s[3] == 0 {
++                    scratch.tex_skip += 1;
++                } else if s[3] >= OPAQUE_ENOUGH {
++                    scratch.tex_copy += 1;
++                    d.copy_from_slice(s);
++                } else {
++                    scratch.tex_blend += 1;
++                    blend(d, [s[0], s[1], s[2], s[3]]);
++                }
++            }
++            continue;
++        }
++
+         if !reuse {
+             let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
+                 continue;
+@@ -462,16 +513,6 @@ pub fn blit_part(
+                     scratch.tex_skip += 1;
+                     continue;
+                 }
+-                if plain {
+-                    if s[3] >= OPAQUE_ENOUGH {
+-                        scratch.tex_copy += 1;
+-                        d.copy_from_slice(s);
+-                    } else {
+-                        scratch.tex_blend += 1;
+-                        blend(d, *s);
+-                    }
+-                    continue;
+-                }
+                 scratch.tex_blend += 1;
+                 if let Some(t) = &faded {
+                     blend(d, [s[0], s[1], s[2], t[s[3] as usize]]);
+@@ -890,6 +931,51 @@ mod blit_tests {
+         }
+     }
+ 
++    /// A cart face as the shelf draws it: opaque in the middle, transparent
++    /// corners, a soft edge, shrunk to the side carts' 0.78 and the near
++    /// centre's 0.99 at fractional positions. Most of its rows take the
++    /// gathered memcpy, the corner rows the per-texel rule.
++    #[test]
++    fn a_shrunk_cart_face_matches_the_reference() {
++        let (w, h) = (61u32, 69u32);
++        let mut face = Image::new(w, h);
++        for y in 0..h {
++            for x in 0..w {
++                let i = ((y * w + x) * 4) as usize;
++                let (dx, dy) = (x.min(w - 1 - x), y.min(h - 1 - y));
++                let a = match dx.min(dy) {
++                    0 if dx + dy < 4 => 0,
++                    0 => 128,
++                    1 => 254,
++                    _ => 255,
++                };
++                face.px[i..i + 4].copy_from_slice(&[(x * 4) as u8, (y * 3) as u8, 77, a]);
++            }
++        }
++        let mut scratch = Scratch::default();
++        for (scale, x, y) in [
++            (0.78f32, 3.3f32, 1.6f32),
++            (0.99, 0.5, 0.25),
++            (0.78, -9.7, 4.1),
++        ] {
++            let (dw, dh) = (w as f32 * scale, h as f32 * scale);
++            let mut want = canvas(80, 80);
++            let mut got = canvas(80, 80);
++            reference(&mut want, &face, x, y, dw, dh, [1.0, 1.0, 1.0, 1.0]);
++            super::blit(
++                &mut got,
++                &face,
++                x,
++                y,
++                dw,
++                dh,
++                [1.0, 1.0, 1.0, 1.0],
++                &mut scratch,
++            );
++            assert_eq!(got.px, want.px, "scale {scale} at {x},{y}");
++        }
++    }
++
+     /// The scratch is shared across calls and across frames, so a stale line or
+     /// column table from the previous draw must not leak into the next one.
+     /// Same draws, interleaved, through one scratch.
