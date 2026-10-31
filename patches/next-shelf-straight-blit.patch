@@ -1,0 +1,210 @@
+copy an unscaled sprite's rows straight out of its texture
+
+The shelf misses the 16.7 ms latch on about one frame in six. Traced on the
+handheld on the NES shelf, 2026-10-31, with Config/trace-latency.txt: render
+16.4-20.6 ms a frame, of which the sprite stage is 11.4 ms over 14 draws --
+and 5.4 ms of that is one draw, the wallpaper, 752x560 at 1:1, 13 ns a
+pixel. The two bars across the top and bottom, 752x58 at 1:1, are another
+0.6 and 1.0 ms.
+
+All three take the row-reuse path, which gathers each source row through the
+column table into scratch.line and then memcpy's the line. At 1:1 no two
+destination rows share a source row, so every row is gathered, and the
+gather is the cost. Unscaled, untinted and at whole pixels, the column table
+is just consecutive texels: the line it would build is a slice of the
+texture already. That slice is now used directly -- one memcpy for an
+opaque row, the same per-pixel rule otherwise.
+
+It is exact, not approximately so: the slice is byte for byte the line the
+gather builds, and the opacity rule is the plain draw's. blit's reference
+tests gain 1:1 cases placed inside and clipped off each edge, and a new
+test pins that the wallpaper's shape -- an opaque texture at 1:1 -- takes
+the straight path and matches the reference, while a scaled, faded or
+half-pixel draw does not take it. The profile line counts straight draws,
+so the next trace shows whether the shelf's are.
+
+Not yet run on the handheld; the expected saving is most of the 5.4 ms.
+
+Applies on top of next-shelf-face-lookahead, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+index 2b2107e..a3e8a64 100644
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -274,6 +274,9 @@ pub struct Scratch {
+     /// scales its box art down. Worth knowing before optimising it again.
+     pub reused: u32,
+     pub direct: u32,
++    /// Of those, draws whose rows were copied straight out of the texture:
++    /// unscaled and untinted, so there was nothing to gather.
++    pub straight: u32,
+     /// Rects that went down the per-pixel blend path rather than the opaque
+     /// row memcpy, and the pixels each path wrote, since the last read.
+     ///
+@@ -367,6 +370,19 @@ pub fn blit_part(
+         scratch.col.push(sx * 4);
+     }
+     let col = &scratch.col;
++    // Unscaled and untinted, the column table is a run of consecutive
++    // texels, and the row the gather would build is a slice of the texture
++    // as it stands. The wallpaper is this draw: 752x560 at 1:1, measured at
++    // 5.4 ms of the shelf's 11.4 gathering a copy of each row before
++    // memcpy'ing it.
++    let straight = plain
++        && col
++            .iter()
++            .enumerate()
++            .all(|(i, &c)| c == col[0] + 4 * i as u32);
++    if straight {
++        scratch.straight += 1;
++    }
+ 
+     let dw = dst.w as usize;
+     let tw = tex.w as usize;
+@@ -406,6 +422,33 @@ pub fn blit_part(
+             continue;
+         };
+ 
++        if straight {
++            let from = col[0] as usize;
++            let Some(srow) = trow.get(from..from + width * 4) else {
++                continue;
++            };
++            let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
++                continue;
++            };
++            // The same rule as the line below, with `enough` at its plain
++            // value: an opaque row is one memcpy, anything else per pixel.
++            if srow.chunks_exact(4).all(|p| p[3] >= OPAQUE_ENOUGH) {
++                drow.copy_from_slice(srow);
++                continue;
++            }
++            for (d, s) in drow.chunks_exact_mut(4).zip(srow.chunks_exact(4)) {
++                if s[3] == 0 {
++                    continue;
++                }
++                if s[3] >= OPAQUE_ENOUGH {
++                    d.copy_from_slice(s);
++                    continue;
++                }
++                blend(d, [s[0], s[1], s[2], s[3]]);
++            }
++            continue;
++        }
++
+         if !reuse {
+             let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
+                 continue;
+@@ -771,6 +814,11 @@ mod blit_tests {
+             (-5.0, -3.0, 30.0, 20.0),
+             (40.0, 28.0, 30.0, 20.0),
+             (0.3, 0.7, 48.0, 36.0),
++            // 1:1 at whole pixels, where the rows are copied straight out of
++            // the texture: placed inside, and clipped off each edge.
++            (3.0, 2.0, 13.0, 7.0),
++            (-4.0, -2.0, 13.0, 7.0),
++            (40.0, 31.0, 13.0, 7.0),
+         ];
+         let colours = [
+             [1.0, 1.0, 1.0, 1.0],
+@@ -790,6 +838,58 @@ mod blit_tests {
+         }
+     }
+ 
++    /// The wallpaper's case: a fully opaque texture drawn at 1:1, which has to
++    /// take the straight path -- the whole saving -- and agree with the
++    /// reference while doing it, whole and clipped.
++    #[test]
++    fn an_unscaled_draw_is_copied_straight_and_matches() {
++        let mut tex = texture(20, 12);
++        for p in tex.px.chunks_exact_mut(4) {
++            p[3] = 255;
++        }
++        let mut scratch = Scratch::default();
++        for (x, y) in [(0.0f32, 0.0f32), (5.0, 3.0), (-7.0, -4.0), (35.0, 30.0)] {
++            for t in [&tex, &texture(20, 12)] {
++                let mut want = canvas(48, 36);
++                let mut got = canvas(48, 36);
++                reference(&mut want, t, x, y, 20.0, 12.0, [1.0, 1.0, 1.0, 1.0]);
++                scratch.straight = 0;
++                super::blit(
++                    &mut got,
++                    t,
++                    x,
++                    y,
++                    20.0,
++                    12.0,
++                    [1.0, 1.0, 1.0, 1.0],
++                    &mut scratch,
++                );
++                assert_eq!(scratch.straight, 1, "at {x},{y} the draw was not straight");
++                assert_eq!(got.px, want.px, "at {x},{y}");
++            }
++        }
++        // And nothing scaled, faded or offset by a fraction is taken for it.
++        for (w, h, a, x) in [
++            (21.0, 12.0, 1.0, 0.0),
++            (20.0, 12.0, 0.5, 0.0),
++            (20.0, 12.0, 1.0, 0.5),
++        ] {
++            scratch.straight = 0;
++            let mut got = canvas(48, 36);
++            super::blit(
++                &mut got,
++                &tex,
++                x,
++                0.0,
++                w,
++                h,
++                [1.0, 1.0, 1.0, a],
++                &mut scratch,
++            );
++            assert_eq!(scratch.straight, 0, "{w}x{h} alpha {a} at {x}");
++        }
++    }
++
+     /// The scratch is shared across calls and across frames, so a stale line or
+     /// column table from the previous draw must not leak into the next one.
+     /// Same draws, interleaved, through one scratch.
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+index 1b06090..cc6efe2 100644
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -640,6 +640,8 @@ struct Profile {
+     /// this says whether the shelf is even reaching it.
+     reused: u64,
+     gathered: u64,
++    /// Of both, draws copied straight out of the texture with no gather.
++    straight: u64,
+     /// Rects that blended per pixel, and the pixels written by each rect path.
+     blend_rects: u64,
+     opaque_px: u64,
+@@ -742,10 +744,11 @@ impl Profile {
+             }
+         );
+         eprintln!(
+-            "slot: soft: {} rects, textured rows reused on {} draws, gathered on {} (reuse only pays scaling up)",
++            "slot: soft: {} rects, textured rows reused on {} draws, gathered on {}, straight on {} (reuse only pays scaling up)",
+             self.rects / n.max(1),
+             self.reused / n.max(1),
+             self.gathered / n.max(1),
++            self.straight / n.max(1),
+         );
+         // A canvas is 752x560 = 421,120 pixels, so "screens" says how much of
+         // the per-frame cost is overdraw rather than area.
+@@ -1198,6 +1201,7 @@ impl Compositor {
+         let t = std::time::Instant::now();
+         self.scratch.reused = 0;
+         self.scratch.direct = 0;
++        self.scratch.straight = 0;
+         (
+             self.scratch.blend_rects,
+             self.scratch.opaque_px,
+@@ -1211,6 +1215,7 @@ impl Compositor {
+             self.profile.draws += items.len() as u64;
+             self.profile.reused += self.scratch.reused as u64;
+             self.profile.gathered += self.scratch.direct as u64;
++            self.profile.straight += self.scratch.straight as u64;
+             self.profile.blend_rects += self.scratch.blend_rects as u64;
+             self.profile.opaque_px += self.scratch.opaque_px;
+             self.profile.blend_px += self.scratch.blend_px;
