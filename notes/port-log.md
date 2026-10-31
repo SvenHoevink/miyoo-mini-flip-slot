@@ -9,6 +9,15 @@ building this; [docs/INSTALL.md](../docs/INSTALL.md) is the install page, and
 
 ## Status
 
+**Hitches in play, worked on 2026-10-31 without the handheld.** The launch
+script now pins the `performance` CPU governor for the run, and `patches/0041`
+takes three waits off the draw: background work -- above all a rewind
+worker that inherited the emulator's nice -8 -- outranking it, the minute
+autosave asking the core for its state, and the battery tool spawned every
+ten seconds. Builds for armv7 and its tests pass under qemu; not yet run on a
+handheld. [smoothness.md](smoothness.md) has the reasoning, the per-core
+measurements and what to trace first.
+
 **NES and SNES added on 2026-10-30, not yet run on the handheld.** `patches/0027`
 and two new cores, FCEUmm and Snes9x 2005. Both cores load a test cart under
 qemu from the armv7 build and draw a full 256x224 frame; that says nothing

@@ -1,0 +1,535 @@
+keep the draw ahead of the housekeeping
+
+Slowdowns were still reported in play on every core, as hitches rather
+than a steady loss of speed. Nothing here has been traced on the handheld
+yet; these are the four places, read out of the code, where the thread that
+draws and presents was made to wait on, or to share a CPU with, work that
+could land a frame later without anyone seeing it.
+
+- the rewind worker is spawned from the emulator thread, and Linux hands a
+  thread its creator's nice value. The emulator sets itself to -8, so the
+  worker's copy, XOR and LZ4 of every snapshot -- 529 KB on a SNES, every
+  eleven frames -- ran at -8 too, above the draw at 0. That is the shape of
+  nes-snes.md's "rewind on 20-30 missed a latch, off 7-27". It, the state
+  writer, the cart-face workers, the prefetch, the link art, the autosave
+  writer and the font warm-up now run at nice 10, and the draw at -4: above
+  the system's own daemons, below the emulator, audio and input.
+- the rewind worker copied every state it is handed a second time before
+  diffing it: 529 KB a SNES snapshot for nothing. It takes ownership now.
+  The hand-off stays a blocking send -- upstream's tests pin that every
+  push is kept, in order -- which also makes a starved worker hold the
+  emulator back rather than fall ever further behind.
+- the autosave asked the emulator for its state and its save RAM from the
+  draw, once a minute: up to a frame waiting for the core to finish the one
+  it was on, and then a serialize. A snapshot that can travel to another
+  thread (`Snapshot::detach`, which the emulator's does) is now asked from
+  the autosave's own writer thread. Stubs that cannot travel keep the old
+  path, so the existing tests are unchanged.
+- the Flip's battery is `/customer/app/axp_test`, a process, and it was run
+  and waited for on the draw every ten seconds. Only the first reading is
+  waited for now; each poll after answers with the last reading and starts
+  the next one behind it on a background thread.
+
+Tests, run as armv7 under qemu: niceness's two pin that a background thread
+lowers only itself and that a spawned thread inherits unless it says
+otherwise -- qemu-user passes setpriority through to the host kernel, so
+that is Linux's behaviour rather than a mock's. flush.rs gains a test that
+the autosave asks a travelling snapshot off the calling thread and still
+writes the resume; rewind gains a round trip through push and push_owned;
+device.rs gains one that a slow battery tool is waited for only once.
+
+Applies on top of 0040, upstream 91499a9.
+
+diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
+index fb49006..9217a37 100644
+--- a/crates/slot-power/src/device.rs
++++ b/crates/slot-power/src/device.rs
+@@ -620,6 +620,52 @@ mod sar {
+     }
+ }
+ 
++/// The last reading from the vendor tool, and whether one is in flight.
++struct Gauge {
++    last: std::sync::Mutex<Option<Battery>>,
++    busy: std::sync::atomic::AtomicBool,
++}
++
++static AXP: Gauge = Gauge {
++    last: std::sync::Mutex::new(None),
++    busy: std::sync::atomic::AtomicBool::new(false),
++};
++
++/// `axp_test` is a process: a spawn, a dynamic link and an i2c transaction,
++/// and the battery is polled from the thread that draws. Waited for there,
++/// every ten seconds, that is a frame the panel may not get. So only the
++/// first reading is waited for; after that each poll answers with the last
++/// one and starts the next behind it, which leaves the gauge one poll stale.
++fn axp_gauge(read: fn() -> Option<Battery>) -> Option<Battery> {
++    use std::sync::atomic::Ordering;
++    let lock = || AXP.last.lock().unwrap_or_else(|e| e.into_inner());
++    let last = *lock();
++    if last.is_none() {
++        let now = read();
++        *lock() = now;
++        return now;
++    }
++    if !AXP.busy.swap(true, Ordering::AcqRel) {
++        let spawned = std::thread::Builder::new()
++            .name("slot-battery".into())
++            .spawn(move || {
++                // SAFETY: setpriority on the calling thread, 0 meaning "me".
++                unsafe {
++                    libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
++                }
++                if let Some(b) = read() {
++                    *AXP.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(b);
++                }
++                AXP.busy.store(false, Ordering::Release);
++            });
++        if spawned.is_err() {
++            AXP.busy.store(false, Ordering::Release);
++            return read();
++        }
++    }
++    last
++}
++
+ fn axp_battery() -> Option<Battery> {
+     if !Path::new(AXP_TOOL).is_file() {
+         return None;
+@@ -756,7 +802,7 @@ impl Platform for DevicePlatform {
+     }
+ 
+     fn battery(&self) -> Option<Battery> {
+-        if let Some(b) = axp_battery() {
++        if let Some(b) = axp_gauge(axp_battery) {
+             return Some(b);
+         }
+         // The Mini's ADC, after the Mini Plus's tool and before upstream's
+@@ -1073,3 +1119,44 @@ mod miyoo_bitmap_tests {
+         assert!(!has_bit_in_words(GPIO_KEYS, 57, 64));
+     }
+ }
++
++#[cfg(test)]
++mod axp_gauge_tests {
++    use super::{axp_gauge, Battery, Charge};
++    use std::sync::atomic::{AtomicU8, Ordering};
++    use std::time::{Duration, Instant};
++
++    static READS: AtomicU8 = AtomicU8::new(0);
++
++    /// A tool that takes a quarter of a second, as a slow i2c read might.
++    fn slow_tool() -> Option<Battery> {
++        std::thread::sleep(Duration::from_millis(250));
++        Some(Battery {
++            percent: 50 + READS.fetch_add(1, Ordering::SeqCst),
++            charge: Charge::Discharging,
++        })
++    }
++
++    #[test]
++    fn only_the_first_reading_is_waited_for() {
++        let first = axp_gauge(slow_tool).unwrap();
++        assert_eq!(first.percent, 50, "nothing to answer with yet, so it waits");
++
++        let t = Instant::now();
++        let second = axp_gauge(slow_tool).unwrap();
++        assert!(
++            t.elapsed() < Duration::from_millis(100),
++            "the poll waited {:?} on the tool",
++            t.elapsed()
++        );
++        assert_eq!(second, first, "answered with the last reading");
++
++        let deadline = Instant::now() + Duration::from_secs(5);
++        let mut latest = second;
++        while latest.percent == 50 && Instant::now() < deadline {
++            std::thread::sleep(Duration::from_millis(20));
++            latest = axp_gauge(slow_tool).unwrap();
++        }
++        assert_eq!(latest.percent, 51, "the read behind it lands");
++    }
++}
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 285bf85..395b033 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -5260,15 +5260,36 @@ impl App {
+         else {
+             return;
+         };
+-        let Some(state) = snapshot.state() else {
+-            eprintln!("slot: autosave: the core gave up no state");
+-            return;
++        // Asking the core for its state waits for the emulator to finish the
++        // frame it is on, and then for a serialize: up to a frame and a half
++        // that the draw used to spend blocked once a minute. A snapshot that
++        // can travel is asked from the writer thread instead.
++        let detached = snapshot.detach();
++        let early = match detached {
++            Some(_) => None,
++            None => {
++                let Some(state) = snapshot.state() else {
++                    eprintln!("slot: autosave: the core gave up no state");
++                    return;
++                };
++                Some(trusted_write(snapshot.as_ref(), state, "autosave"))
++            }
+         };
+-        let (state, sav) = trusted_write(snapshot.as_ref(), state, "autosave");
+         let (root, platform, core, cart) =
+             (root.clone(), self.platform, self.core, cart.to_owned());
+         let failing = self.card_writes.clone();
+         let write = move || {
++            let (state, sav) = match (early, detached.as_deref()) {
++                (Some(written), _) => written,
++                (None, Some(snapshot)) => {
++                    let Some(state) = snapshot.state() else {
++                        eprintln!("slot: autosave: the core gave up no state");
++                        return;
++                    };
++                    trusted_write(snapshot, state, "autosave")
++                }
++                (None, None) => return,
++            };
+             let written = persist::flush(
+                 &root,
+                 platform,
+@@ -5284,8 +5305,10 @@ impl App {
+         };
+         match std::thread::Builder::new()
+             .name("slot-autosave".into())
+-            .spawn(write)
+-        {
++            .spawn(move || {
++                crate::niceness::background();
++                write()
++            }) {
+             Ok(h) => self.pending_save = Some(h),
+             Err(e) => eprintln!("slot: autosave: no writer thread: {e}"),
+         }
+diff --git a/crates/slot/src/cart_faces.rs b/crates/slot/src/cart_faces.rs
+index 70d823c..b8f3e37 100644
+--- a/crates/slot/src/cart_faces.rs
++++ b/crates/slot/src/cart_faces.rs
+@@ -42,7 +42,10 @@ impl CartFaces {
+             let (queue, outbox, root) = (queue.clone(), outbox.clone(), root.clone());
+             let spawned = thread::Builder::new()
+                 .name(format!("slot-carts-{n}"))
+-                .spawn(move || work(&queue, &outbox, &root));
++                .spawn(move || {
++                    crate::niceness::background();
++                    work(&queue, &outbox, &root)
++                });
+             if let Err(e) = spawned {
+                 eprintln!("slot: cart faces: worker thread failed to start: {e}");
+             }
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+index d6e23e5..4ec7d45 100644
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -107,10 +107,16 @@ pub fn run() {
+     slot::boot_time::mark("start");
+     let _ = std::thread::Builder::new()
+         .name("slot-fonts".into())
+-        .spawn(slot_ui::warm_fonts);
++        .spawn(|| {
++            slot::niceness::background();
++            slot_ui::warm_fonts()
++        });
+     let audio = std::thread::Builder::new()
+         .name("slot-audio-open".into())
+         .spawn(slot::audio::opened_sink);
++    // After those two, so neither inherits it. Everything this thread spawns
++    // from here on either sets its own priority or is fine at the draw's.
++    slot::niceness::set(slot::niceness::RENDER);
+     let root = std::env::var_os("SLOT_ROOT")
+         .map(PathBuf::from)
+         .unwrap_or_else(|| PathBuf::from(CARD));
+diff --git a/crates/slot/src/emu.rs b/crates/slot/src/emu.rs
+index 8bd07fc..59c2daa 100644
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -469,6 +469,10 @@ impl Snapshot for EmuSnapshot {
+     fn save_ram_trusted(&self) -> bool {
+         !self.shared.sav_refused.load(Ordering::Acquire)
+     }
++
++    fn detach(&self) -> Option<Box<dyn Snapshot + Send>> {
++        Some(Box::new(self.clone()))
++    }
+ }
+ 
+ fn request(cmds: &Sender<Cmd>, shared: &Shared, cmd: Cmd) -> bool {
+diff --git a/crates/slot/src/lib.rs b/crates/slot/src/lib.rs
+index 82029ca..7ca413a 100644
+--- a/crates/slot/src/lib.rs
++++ b/crates/slot/src/lib.rs
+@@ -38,6 +38,7 @@ pub mod link_radio;
+ pub mod link_screen;
+ pub mod link_start;
+ pub mod link_state;
++pub mod niceness;
+ pub mod panel_turn;
+ pub mod persist;
+ pub mod prefetch;
+diff --git a/crates/slot/src/link_art_builder.rs b/crates/slot/src/link_art_builder.rs
+index 2b7a4f4..af36b33 100644
+--- a/crates/slot/src/link_art_builder.rs
++++ b/crates/slot/src/link_art_builder.rs
+@@ -12,6 +12,7 @@ impl LinkArtBuilder {
+         let spawned = std::thread::Builder::new()
+             .name("slot-link-art".into())
+             .spawn(move || {
++                crate::niceness::background();
+                 let _ = tx.send(link_art());
+             });
+         if let Err(e) = spawned {
+diff --git a/crates/slot/src/niceness.rs b/crates/slot/src/niceness.rs
+new file mode 100644
+index 0000000..1e8ecf0
+--- /dev/null
++++ b/crates/slot/src/niceness.rs
+@@ -0,0 +1,64 @@
++//! Thread priorities on a two-core handheld.
++//!
++//! Linux takes a nice value per thread, and a thread inherits its creator's.
++//! The emulator raises itself to -8, so anything it spawns -- the rewind
++//! worker, which copies, XORs and LZ4s a 529 KB SNES state every eleven
++//! frames -- outranked the thread drawing the frame. Work nobody waits on
++//! for the next present says so here instead of inheriting.
++
++/// The thread that draws and presents. Above the system's own daemons and
++/// below the emulator, the audio sink and the input readers.
++pub const RENDER: i32 = -4;
++/// Rewind, card writes, cart faces, prefetch: work that can land a frame
++/// late without anyone seeing it.
++pub const BACKGROUND: i32 = 10;
++
++/// Set the calling thread's nice value. Best effort: a failure leaves the
++/// thread where it was, which is what upstream always did.
++pub fn set(nice: i32) {
++    // SAFETY: setpriority on the calling thread, 0 meaning "me".
++    #[cfg(target_os = "linux")]
++    unsafe {
++        libc::setpriority(libc::PRIO_PROCESS as _, 0, nice);
++    }
++    #[cfg(not(target_os = "linux"))]
++    let _ = nice;
++}
++
++pub fn background() {
++    set(BACKGROUND);
++}
++
++#[cfg(all(test, target_os = "linux"))]
++mod tests {
++    use super::*;
++
++    fn mine() -> i32 {
++        // SAFETY: getpriority on the calling thread.
++        unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) }
++    }
++
++    #[test]
++    fn background_lowers_only_the_calling_thread() {
++        let before = mine();
++        let inside = std::thread::spawn(|| {
++            background();
++            mine()
++        })
++        .join()
++        .unwrap();
++        assert_eq!(inside, BACKGROUND.max(before));
++        assert_eq!(mine(), before, "the caller kept its own priority");
++    }
++
++    #[test]
++    fn a_spawned_thread_inherits_unless_it_says_otherwise() {
++        let child = std::thread::spawn(|| {
++            set(BACKGROUND);
++            std::thread::spawn(mine).join().unwrap()
++        })
++        .join()
++        .unwrap();
++        assert_eq!(child, BACKGROUND, "this is why the rewind worker must say");
++    }
++}
+diff --git a/crates/slot/src/persist.rs b/crates/slot/src/persist.rs
+index 7ec34cf..20d6125 100644
+--- a/crates/slot/src/persist.rs
++++ b/crates/slot/src/persist.rs
+@@ -15,6 +15,12 @@ pub trait Snapshot {
+     fn save_ram_trusted(&self) -> bool {
+         true
+     }
++
++    /// The same snapshot, as something another thread can ask, when it is
++    /// one. The autosave then asks from its writer rather than the draw.
++    fn detach(&self) -> Option<Box<dyn Snapshot + Send>> {
++        None
++    }
+ }
+ 
+ pub fn flush(
+diff --git a/crates/slot/src/prefetch.rs b/crates/slot/src/prefetch.rs
+index 3040c0f..06bd877 100644
+--- a/crates/slot/src/prefetch.rs
++++ b/crates/slot/src/prefetch.rs
+@@ -50,7 +50,10 @@ impl Prefetch {
+         let path = rom.to_path_buf();
+         self.worker = std::thread::Builder::new()
+             .name("slot-prefetch".into())
+-            .spawn(move || read_through(&path, &turn, mine))
++            .spawn(move || {
++                crate::niceness::background();
++                read_through(&path, &turn, mine)
++            })
+             .ok();
+     }
+ 
+diff --git a/crates/slot/src/rewind.rs b/crates/slot/src/rewind.rs
+index a30607a..cff97c2 100644
+--- a/crates/slot/src/rewind.rs
++++ b/crates/slot/src/rewind.rs
+@@ -74,9 +74,17 @@ impl Rewind {
+     }
+ 
+     pub fn push(&mut self, state: &[u8]) {
+-        let Some(prev) = self.cur.replace(state.to_vec()) else {
++        self.push_owned(state.to_vec());
++    }
++
++    /// `push` for a state the caller is done with: the worker owns what the
++    /// channel hands it, so copying it again was 529 KB a SNES snapshot spent
++    /// on nothing.
++    pub fn push_owned(&mut self, state: Vec<u8>) {
++        let Some(prev) = self.cur.replace(state) else {
+             return;
+         };
++        let state = self.cur.as_deref().unwrap_or_default();
+         if prev.len() != state.len() {
+             self.deltas.clear();
+             self.bytes = 0;
+@@ -168,11 +176,14 @@ impl RewindThread {
+         std::thread::Builder::new()
+             .name("slot-rewind".into())
+             .spawn(move || {
++                // Spawned from the emulator thread, so it would otherwise
++                // inherit that thread's priority and outrank the draw.
++                crate::niceness::background();
+                 let mut rewind = Rewind::new(budget_bytes);
+                 while let Ok(msg) = rx.recv() {
+                     match msg {
+                         Msg::Push(state) => {
+-                            rewind.push(&state);
++                            rewind.push_owned(state);
+                             published.store(rewind.fill(), std::sync::atomic::Ordering::Relaxed);
+                         }
+                         Msg::Pop(reply) => {
+@@ -275,4 +286,24 @@ mod plan_tests {
+         assert!(r.bytes <= before / 2, "the ring did not shrink");
+         assert!(r.pop().is_some(), "what is left is still usable");
+     }
++
++    /// Owned and borrowed pushes record the same thing, and every state comes
++    /// back newest first.
++    #[test]
++    fn states_come_back_in_reverse_whichever_way_they_went_in() {
++        let states: Vec<Vec<u8>> = (0..12u8)
++            .map(|i| (0..4096).map(|j| (j as u8).wrapping_mul(i)).collect())
++            .collect();
++        let (mut owned, mut borrowed) = (Rewind::new(BUDGET_MAX), Rewind::new(BUDGET_MAX));
++        for s in &states {
++            owned.push_owned(s.clone());
++            borrowed.push(s);
++        }
++        assert_eq!(owned.bytes, borrowed.bytes);
++        for s in states.iter().rev() {
++            assert_eq!(owned.pop().as_ref(), Some(s));
++            assert_eq!(borrowed.pop().as_ref(), Some(s));
++        }
++        assert!(owned.pop().is_none());
++    }
+ }
+diff --git a/crates/slot/src/state_writer.rs b/crates/slot/src/state_writer.rs
+index 40564e4..223635f 100644
+--- a/crates/slot/src/state_writer.rs
++++ b/crates/slot/src/state_writer.rs
+@@ -29,7 +29,10 @@ impl StateWriter {
+         let flag = failing.clone();
+         let threaded = thread::Builder::new()
+             .name("slot-state".into())
+-            .spawn(move || work(&worker, &flag))
++            .spawn(move || {
++                crate::niceness::background();
++                work(&worker, &flag)
++            })
+             .is_ok();
+         StateWriter {
+             shared,
+diff --git a/crates/slot/tests/flush.rs b/crates/slot/tests/flush.rs
+index bbd2a09..f6dd059 100644
+--- a/crates/slot/tests/flush.rs
++++ b/crates/slot/tests/flush.rs
+@@ -415,3 +415,59 @@ fn a_card_the_kernel_made_read_only_raises_the_alarm_without_a_save() {
+         "the alarm stayed once the card was writable"
+     );
+ }
++
++/// Records which thread asked it for a state, and can travel to another.
++#[derive(Clone)]
++struct Travelling {
++    asked_on: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>,
++}
++
++impl Snapshot for Travelling {
++    fn state(&self) -> Option<Vec<u8>> {
++        self.asked_on
++            .lock()
++            .unwrap()
++            .push(std::thread::current().id());
++        Some(vec![7; 64])
++    }
++
++    fn save_ram(&self) -> Option<Vec<u8>> {
++        None
++    }
++
++    fn thumb(&self) -> Option<Vec<u8>> {
++        None
++    }
++
++    fn load(&self, _state: Vec<u8>) {}
++
++    fn detach(&self) -> Option<Box<dyn Snapshot + Send>> {
++        Some(Box::new(self.clone()))
++    }
++}
++
++#[test]
++fn the_autosave_asks_a_travelling_core_off_the_draw_thread() {
++    let d = tmp_root_with_carts(&["Emerald"]);
++    let asked_on = Arc::new(std::sync::Mutex::new(Vec::new()));
++    let snap = Travelling {
++        asked_on: asked_on.clone(),
++    };
++    let mut a = app_playing_with(d.path(), "Emerald", Box::new(snap));
++    asked_on.lock().unwrap().clear();
++    a.tick_ms(60_000);
++    a.settle_saves();
++    let asked = asked_on.lock().unwrap().clone();
++    assert_eq!(asked.len(), 1, "one state per autosave");
++    assert_ne!(
++        asked[0],
++        std::thread::current().id(),
++        "the draw waited on the emulator for its state"
++    );
++    assert_eq!(
++        StateRing::new(d.path(), Platform::Gba, Core::Mgba, "Emerald")
++            .read_resume()
++            .unwrap(),
++        Some(vec![7; 64])
++    );
++}

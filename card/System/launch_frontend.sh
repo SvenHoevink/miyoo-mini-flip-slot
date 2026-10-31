@@ -207,6 +207,36 @@ if pgrep audioserver >/dev/null 2>&1; then
 	echo "launch: audioserver stood down after ${waited}s" >> "$LOGS/crash/exits.log"
 fi
 
+# The CPU clock. Nothing in this port set a governor, so slot ran under
+# whatever the launcher left behind, and Allium and Onion both leave
+# `ondemand` (Onion's runtime.sh puts it back after every game). ondemand
+# samples load on the 10 ms tick of this CONFIG_HZ=100 kernel and steps the
+# shared clock of both cores down whenever a window looks light -- and a
+# frame loop that waits on the panel's blank half the time looks light. The
+# next busy frame then runs slow until the governor notices, which is a
+# hitch rather than a steady slowdown. Allium's own pico-8 and ffplay
+# launchers, and Onion's heavier emulators, pin `performance` for exactly
+# this and put the old governor back on the way out. So does this.
+#
+# Not an overclock: performance holds the kernel's own scaling_max_freq.
+# Battery cost is the difference between the two at idle, mostly on the
+# shelf. To go back to the launcher's governor:
+#   touch Config/cpu-ondemand.txt
+cpufreq=
+for d in /sys/devices/system/cpu/cpufreq/policy0 /sys/devices/system/cpu/cpu0/cpufreq; do
+	if [ -w "$d/scaling_governor" ]; then
+		cpufreq="$d"
+		break
+	fi
+done
+governor_was=
+if [ -n "$cpufreq" ] && [ ! -f "$SD/Config/cpu-ondemand.txt" ]; then
+	governor_was="$(cat "$cpufreq/scaling_governor" 2>/dev/null)"
+	echo performance > "$cpufreq/scaling_governor" 2>/dev/null
+	echo "launch: governor ${governor_was:-unknown} -> $(cat "$cpufreq/scaling_governor" 2>/dev/null)," \
+		"$(cat "$cpufreq/scaling_cur_freq" 2>/dev/null) kHz" >> "$LOGS/crash/exits.log"
+fi
+
 # Not exec: the exit status is worth recording. An unexplained shutdown looks
 # the same as a clean exit from the outside, and this is what tells them apart.
 started="$(date '+%F %T' 2>/dev/null)"
@@ -217,6 +247,8 @@ status=$?
 kill "$sleeper" 2>/dev/null
 # Hand the audio device back: the launcher's own loop starts its server again.
 [ -n "$audio_stood_down" ] && rm -f /tmp/no_audioserver
+# And the clock back to whatever the launcher had.
+[ -n "$governor_was" ] && echo "$governor_was" > "$cpufreq/scaling_governor" 2>/dev/null
 echo "$started -> $(date '+%F %T' 2>/dev/null) exit=$status" >> "$LOGS/crash/exits.log"
 if [ "$status" -gt 128 ]; then
 	# 128 + signal: killed rather than returned. 139 is SIGSEGV, 134 SIGABRT.
