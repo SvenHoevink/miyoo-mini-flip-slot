@@ -23,9 +23,10 @@ the straight path and matches the reference, while a scaled, faded or
 half-pixel draw does not take it. The profile line counts straight draws,
 so the next trace shows whether the shelf's are.
 
-Not yet run on the handheld; the expected saving is most of the 5.4 ms.
+Played on the Flip with 0035 and 0036 (2026-10-31): the NES, SNES and Game
+Boy shelves scroll smoothly, held or stepped. Not yet re-traced for numbers.
 
-Applies on top of next-shelf-face-lookahead, upstream 91499a9.
+Applies on top of 0036, upstream 91499a9.
 
 diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
 index 2b2107e..a3e8a64 100644

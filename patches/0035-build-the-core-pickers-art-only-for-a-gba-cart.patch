@@ -14,7 +14,7 @@ picker and nothing else, so nothing on screen changes; a GBA cart builds
 exactly as it did.
 
 Tested on the host: slot's tests fail in the same places with and without
-it. Not yet run on the handheld.
+it. Played on the Flip with 0036 and 0037 (2026-10-31).
 
 Applies on top of 0034, upstream 91499a9.
 

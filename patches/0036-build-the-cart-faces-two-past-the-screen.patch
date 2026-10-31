@@ -22,10 +22,14 @@ Tested on the host (rust:1.96-bookworm): a new test steps the cursor right
 and left and asserts that every cart on screen after a step was already
 asked for before it. It fails with FACE_AHEAD at 0 and passes at 2. 0016's
 span tests are updated to the new numbers. The rest of slot and slot-ui's
-tests fail in the same 25 places with and without this patch. Not yet run
-on the handheld.
+tests fail in the same 25 places with and without this patch.
 
-Applies on top of 0034, upstream 91499a9.
+Traced on the Flip (2026-10-31): scrolling along a shelf no longer waits
+for a face. Moving to another shelf still does, 36-100 ms once, while its
+faces are built for the first time -- the cost 0016 chose to keep the
+memory, and left alone here.
+
+Applies on top of 0035, upstream 91499a9.
 
 diff --git a/crates/slot-ui/src/shelf.rs b/crates/slot-ui/src/shelf.rs
 index 3d9dea3..a987b1a 100644
