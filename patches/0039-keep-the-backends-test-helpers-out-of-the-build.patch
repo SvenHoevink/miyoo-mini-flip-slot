@@ -1,0 +1,127 @@
+keep the backend's test helpers out of the build
+
+`blue_light_tests` (0026) and `direct_path_tests` (0032) were declared
+without #[cfg(test)], so they compiled into the device binary and
+`cargo clippy -D warnings` failed on their unused imports and helpers --
+CLAUDE.md asks for clippy-clean, and a gate that is always red is one
+nobody reads. Both are test modules and now say so; the same file is
+rustfmt'd where earlier patches left it unformatted. No behaviour changes.
+
+Applies on top of 0038, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+index cc6efe2..387dec8 100644
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -544,9 +544,9 @@ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i3
+     let mut b: Option<(f32, f32, f32, f32)> = None;
+     for item in items {
+         let (x0, y0, x1, y1) = match *item {
+-            Draw::Rect { x, y, w, h, .. } | Draw::Tex { x, y, w, h, .. } | Draw::Part { x, y, w, h, .. } => {
+-                (x, y, x + w, y + h)
+-            }
++            Draw::Rect { x, y, w, h, .. }
++            | Draw::Tex { x, y, w, h, .. }
++            | Draw::Part { x, y, w, h, .. } => (x, y, x + w, y + h),
+             Draw::Turned { x, y, w, h, .. } => {
+                 let (cx, cy, r) = (x + w / 2.0, y + h / 2.0, w.hypot(h) / 2.0);
+                 (cx - r, cy - r, cx + r, cy + r)
+@@ -1703,7 +1703,9 @@ impl Compositor {
+             let dst = &mut self.canvas.px[at..at + span];
+             let (sx, sy) = (x + bx0, y + cy);
+             match &surround {
+-                Some(b) if sx >= 0 && sy >= 0 && sx + bx1 - bx0 <= b.w as i32 && sy < b.h as i32 => {
++                Some(b)
++                    if sx >= 0 && sy >= 0 && sx + bx1 - bx0 <= b.w as i32 && sy < b.h as i32 =>
++                {
+                     let from = (sy as usize * b.w as usize + sx as usize) * 4;
+                     dst.copy_from_slice(&b.px[from..from + span]);
+                 }
+@@ -1738,10 +1740,17 @@ impl Compositor {
+             let si = ((cy as usize * cw as usize) + (x_start - x) as usize) * 4;
+             let src = &self.canvas.px[si..si + n];
+             let dy = if half { ph - 1 - py } else { py };
+-            let o = if half { (pw - x_end) as usize * 4 } else { x_start as usize * 4 };
++            let o = if half {
++                (pw - x_end) as usize * 4
++            } else {
++                x_start as usize * 4
++            };
+             // SAFETY: one row inside the mapping.
+             let row = unsafe {
+-                std::slice::from_raw_parts_mut(target.ptr.add(dy as usize * target.stride), target.stride)
++                std::slice::from_raw_parts_mut(
++                    target.ptr.add(dy as usize * target.stride),
++                    target.stride,
++                )
+             };
+             let Some(dst) = row.get_mut(o..o + n) else {
+                 continue;
+@@ -2354,11 +2363,30 @@ mod overlay_tests {
+         let tex = c.create_texture(20, 30, &art);
+         let mut items = vec![
+             Draw::Game,
+-            Draw::Rect { x: 300.0, y: 40.5, w: 150.0, h: 36.0, colour: [0.1, 0.1, 0.1, 0.6] },
+-            Draw::Tex { x: 310.0, y: 44.0, w: 40.0, h: 30.0, tex, alpha: 0.8 },
++            Draw::Rect {
++                x: 300.0,
++                y: 40.5,
++                w: 150.0,
++                h: 36.0,
++                colour: [0.1, 0.1, 0.1, 0.6],
++            },
++            Draw::Tex {
++                x: 310.0,
++                y: 44.0,
++                w: 40.0,
++                h: 30.0,
++                tex,
++                alpha: 0.8,
++            },
+         ];
+         if via_canvas {
+-            let invisible = Draw::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, colour: [0.0; 4] };
++            let invisible = Draw::Rect {
++                x: 0.0,
++                y: 0.0,
++                w: 1.0,
++                h: 1.0,
++                colour: [0.0; 4],
++            };
+             items.insert(0, invisible);
+         }
+         c.begin_frame();
+@@ -2378,8 +2406,15 @@ mod overlay_tests {
+         for mount in [Mount::Normal, Mount::Half] {
+             let (a, took_fast) = panel_after(false, mount);
+             let (b, took_slow) = panel_after(true, mount);
+-            assert!(took_fast && !took_slow, "the paths were not the ones under test");
+-            let differ = a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(p, q)| p[..3] != q[..3]).count();
++            assert!(
++                took_fast && !took_slow,
++                "the paths were not the ones under test"
++            );
++            let differ = a
++                .chunks_exact(4)
++                .zip(b.chunks_exact(4))
++                .filter(|(p, q)| p[..3] != q[..3])
++                .count();
+             assert_eq!(differ, 0, "{differ} pixels differ from the canvas path");
+         }
+     }
+@@ -2584,6 +2619,7 @@ mod overlay_tests {
+     }
+ }
+ 
++#[cfg(test)]
+ mod blue_light_tests {
+     use super::*;
+ 
+@@ -2711,6 +2747,7 @@ mod blue_light_tests {
+     }
+ }
+ 
++#[cfg(test)]
+ mod direct_path_tests {
+     use super::{fb, Dest, FbDest, Game, Image};
+     use crate::pipeline::{SRC_H, SRC_W};
