@@ -10,7 +10,7 @@ building this; [docs/INSTALL.md](../docs/INSTALL.md) is the install page, and
 ## Status
 
 **Hitches in play, worked on 2026-10-31 without the handheld.** The launch
-script now pins the `performance` CPU governor for the run, and `patches/0038`
+script now pins the `performance` CPU governor for the run, and `patches/0041`
 takes three waits off the draw: background work -- above all a rewind
 worker that inherited the emulator's nice -8 -- outranking it, the minute
 autosave asking the core for its state, and the battery tool spawned every

@@ -7,7 +7,7 @@ CLAUDE.md asks for clippy-clean, and a gate that is always red is one
 nobody reads. Both are test modules and now say so; the same file is
 rustfmt'd where earlier patches left it unformatted. No behaviour changes.
 
-Applies on top of 0038, upstream 91499a9.
+Applies on top of 0041, upstream 91499a9.
 
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
 index cc6efe2..387dec8 100644

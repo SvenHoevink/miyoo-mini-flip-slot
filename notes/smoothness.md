@@ -11,8 +11,8 @@ for things every core shares rather than for one emulator's cost.
 | | |
 |---|---|
 | `card/System/launch_frontend.sh` | the `performance` governor while slot runs, the launcher's put back after |
-| `patches/0038` | background work below the draw; the autosave and the battery off it |
-| `patches/0039` | the backend's two test modules out of the device build, so clippy is green again |
+| `patches/0041` | background work below the draw; the autosave and the battery off it |
+| `patches/0042` | the backend's two test modules out of the device build, so clippy is green again |
 
 ### the governor
 
@@ -30,7 +30,7 @@ on the first boot. `touch Config/cpu-ondemand.txt` turns the change off.
 
 Not an overclock: `performance` holds the kernel's own `scaling_max_freq`.
 
-### 0038, what the draw waited on
+### 0041, what the draw waited on
 
 Read out of the code; the patch header has the detail.
 

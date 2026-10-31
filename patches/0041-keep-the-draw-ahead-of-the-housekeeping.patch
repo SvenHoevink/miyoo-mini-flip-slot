@@ -38,7 +38,7 @@ the autosave asks a travelling snapshot off the calling thread and still
 writes the resume; rewind gains a round trip through push and push_owned;
 device.rs gains one that a slow battery tool is waited for only once.
 
-Applies on top of 0037, upstream 91499a9.
+Applies on top of 0040, upstream 91499a9.
 
 diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
 index fb49006..9217a37 100644
