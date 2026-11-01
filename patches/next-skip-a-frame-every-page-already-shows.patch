@@ -1,0 +1,301 @@
+skip a frame every page already shows
+
+With 0051 on the Flip the shelf dropped 16-21 frames in ten seconds where
+it had dropped 369-415, but the shelf sitting still was still just over
+the period: wallpaper, three carts and the footer redrawn through the
+canvas every frame, 17.7 ms each (list 11.4, copy out 5.4), seventy frames
+in a row in the trace, for a picture that did not change.
+
+A canvas frame with no game in it now remembers what it drew from: the
+display list, a generation bumped by anything that may change a texture's
+pixels (create, update, free, the bezels), and the gain, shake, slide and
+screen. Once the same frame has been drawn for PAGES frames every page
+holds it, and a repeat draws nothing at all until one of them changes. A
+pending repaint draws regardless, and a list with the game in it is never
+taken as unchanged -- the game decides that, as before.
+
+The texture updates the frontend makes were checked to be conditional on
+new content, so a still shelf does settle. Not yet measured on the Flip.
+
+Tests: a still shelf frame is not drawn again; a texture's pixels
+changing, a sprite moving and the blue light step changing each draw it
+again, and what it draws then is the frame; a list with the game is never
+taken as unchanged. Ignoring the texture generation, or the gain, fails
+them.
+
+Applies on top of 0051, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -296,6 +296,13 @@
+ }
+ 
+ /// The rows under an overlay's rect, as composed for a still game.
++/// A canvas frame's inputs, for telling a repeat of it.
++struct Unchanged {
++    items: Vec<Draw>,
++    tex_gen: u64,
++    params: [u32; 6],
++}
++
+ /// The still game as the panel shows it with no overlay -- surround and
+ /// picture, the whole canvas -- and the same with the last scrim over it.
+ struct Under {
+@@ -1048,6 +1055,16 @@
+     /// The scrim last composed over a still game, in storage order, so the
+     /// next pause can build its dimmed picture before a menu appears.
+     last_scrim: Option<[f32; 4]>,
++    /// The last display list drawn through the canvas with no game in it,
++    /// and what else it looked at, and how many more frames draw it before
++    /// every page holds it. The shelf sitting still redrew the same wallpaper,
++    /// carts and footer every frame, 17.7 ms on the Flip: over the period.
++    unchanged: Option<Unchanged>,
++    unchanged_left: u32,
++    /// This frame's list is the one every page already shows: draw nothing.
++    skipping: bool,
++    /// Bumped whenever any texture's pixels may have changed.
++    tex_gen: u64,
+     /// Multiplies every sprite's colour, RGB. The gain, while an overlay is
+     /// composed over a graded surround with blue light on: a gain is a
+     /// per-channel scale, so blending warmed sprites over warmed pixels is the
+@@ -1104,6 +1121,10 @@
+             still_left: 0,
+             under: None,
+             last_scrim: None,
++            unchanged: None,
++            unchanged_left: 0,
++            skipping: false,
++            tex_gen: 0,
+             tint: [1.0; 3],
+             stage_us: [0; 3],
+             textures: Vec::new(),
+@@ -1187,10 +1208,51 @@
+     pub fn draw_list(&mut self, items: &[Draw]) {
+         let t = std::time::Instant::now();
+         self.stage_us[2] = 0;
+-        self.draw_list_inner(items);
++        self.skipping = self.repeats(items);
++        if !self.skipping {
++            self.draw_list_inner(items);
++        }
+         self.stage_us[0] = t.elapsed().as_micros() as u64;
+     }
+ 
++    /// Whether `items` is the frame every page already holds: the same list,
++    /// no game in it, no texture touched, the same gain, shake, slide and
++    /// screen, and drawn for PAGES frames since it last changed. A repaint
++    /// pending draws regardless.
++    fn repeats(&mut self, items: &[Draw]) -> bool {
++        if items.iter().any(|d| matches!(d, Draw::Game)) {
++            self.unchanged = None;
++            return false;
++        }
++        let bits = f32::to_bits;
++        let params = [
++            bits(self.gain[0]),
++            bits(self.gain[1]),
++            bits(self.gain[2]),
++            bits(self.shake),
++            bits(self.lift),
++            bits(self.screen),
++        ];
++        let same = self
++            .unchanged
++            .as_ref()
++            .is_some_and(|u| u.tex_gen == self.tex_gen && u.params == params && u.items == items);
++        if !same {
++            self.unchanged = Some(Unchanged {
++                items: items.to_vec(),
++                tex_gen: self.tex_gen,
++                params,
++            });
++            self.unchanged_left = PAGES;
++            return false;
++        }
++        if self.unchanged_left > 0 {
++            self.unchanged_left -= 1;
++            return false;
++        }
++        self.clear_left == 0
++    }
++
+     /// Where the last frame went, for a trace of the frames that ran long:
+     /// draw_list, end_frame, and the overlay's share of end_frame, in us.
+     pub fn frame_stages(&self) -> [u64; 3] {
+@@ -1341,10 +1403,12 @@
+     }
+ 
+     fn take_image(&mut self, id: TexId) -> Option<Image> {
++        self.tex_gen += 1;
+         self.textures.get_mut(id.raw())?.take().map(|t: Tex| t.img)
+     }
+ 
+     fn put_image(&mut self, id: TexId, img: Image) {
++        self.tex_gen += 1;
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+             *slot = Some(Tex { img });
+         }
+@@ -1526,6 +1590,7 @@
+     }
+ 
+     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
++        self.tex_gen += 1;
+         let tex = Tex {
+             img: Image::from_rgba(w, h, rgba),
+         };
+@@ -1560,6 +1625,7 @@
+     /// The id becomes invalid and the slot is reusable; drawing with it is a
+     /// miss, which `draw_sprites_inner` already tolerates.
+     pub fn free_texture(&mut self, id: TexId) {
++        self.tex_gen += 1;
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+             *slot = None;
+         }
+@@ -1572,6 +1638,7 @@
+     }
+ 
+     pub fn update_texture(&mut self, id: TexId, w: u32, h: u32, rgba: &[u8]) {
++        self.tex_gen += 1;
+         if self.profiling {
+             report_alpha(id.raw(), w, h, rgba);
+         }
+@@ -1688,6 +1755,7 @@
+         if self.game_bezel == tex {
+             return;
+         }
++        self.tex_gen += 1;
+         self.game_bezel = tex;
+         self.game.crop = tex.is_some();
+         self.surround = None;
+@@ -1732,6 +1800,7 @@
+     }
+ 
+     pub fn set_bezel(&mut self, w: u32, h: u32, rgba: &[u8]) {
++        self.tex_gen += 1;
+         // Stored top-down, unlike the GL path which pre-flips for its FBO.
+         self.bezel = Some(Image::from_rgba(w, h, rgba));
+         self.surround = None;
+@@ -2114,7 +2183,9 @@
+     /// would be ~75k pixels of wasted work per frame on this panel.
+     pub fn end_frame(&mut self, window: (u32, u32)) {
+         let t = std::time::Instant::now();
+-        self.output_frame(window);
++        if !std::mem::take(&mut self.skipping) {
++            self.output_frame(window);
++        }
+         self.stage_us[1] = t.elapsed().as_micros() as u64;
+         if self.profiling {
+             let us = t.elapsed().as_micros() as u64;
+@@ -3811,8 +3882,111 @@
+         r.present(&items);
+         let (_, y0, _, y1) = r.c.overlay_stale.expect("the move marked nothing");
+         assert!(y1 - y0 < 100, "a cursor move rewrote rows {y0}..{y1}");
++    }
++
++    /// The shelf as it sits still: a backdrop and a label, no game.
++    fn shelf(text: TexId, x: f32) -> Vec<Draw> {
++        let (pw, ph) = (out_w() as f32, out_h() as f32);
++        vec![
++            Draw::Rect {
++                x: 0.0,
++                y: 0.0,
++                w: pw,
++                h: ph,
++                colour: [0.2, 0.3, 0.4, 1.0],
++            },
++            Draw::Tex {
++                x,
++                y: 200.0,
++                w: 60.0,
++                h: 20.0,
++                tex: text,
++                alpha: 1.0,
++            },
++        ]
+     }
+ 
++    /// A canvas frame that repeats the one every page holds draws nothing;
++    /// anything it depends on changing draws it again, and the panel is then
++    /// what drawing it would make.
++    #[test]
++    fn an_unchanged_shelf_frame_is_not_drawn_again() {
++        let mut r = Rig::new(Mount::Half);
++        r.c.set_blue_light(5);
++        let still = |r: &mut Rig| {
++            for _ in 0..2 * PAGES + 1 {
++                let items = shelf(r.text, 100.0);
++                r.present(&items);
++            }
++            r.panel.fill(0xab);
++            let items = shelf(r.text, 100.0);
++            r.present(&items);
++            r.panel.iter().all(|&b| b == 0xab)
++        };
++        assert!(still(&mut r), "a repeat of the last frame was drawn again");
++
++        // A texture's pixels changing draws it again.
++        let art = vec![90u8; 60 * 20 * 4];
++        r.c.update_texture(r.text, 60, 20, &art);
++        let items = shelf(r.text, 100.0);
++        r.present(&items);
++        assert!(
++            r.panel.iter().any(|&b| b != 0xab),
++            "a changed texture was not drawn"
++        );
++        assert!(still(&mut r), "it was not skipped again once settled");
++
++        // So does the list moving, and the blue light changing.
++        r.present(&shelf(r.text, 101.0));
++        assert!(
++            r.panel.iter().any(|&b| b != 0xab),
++            "a moved sprite was not drawn"
++        );
++        for _ in 0..2 * PAGES + 1 {
++            r.present(&shelf(r.text, 101.0));
++        }
++        r.panel.fill(0xab);
++        r.present(&shelf(r.text, 101.0));
++        assert!(
++            r.panel.iter().all(|&b| b == 0xab),
++            "the moved frame did not settle"
++        );
++        r.c.set_blue_light(6);
++        r.present(&shelf(r.text, 101.0));
++        assert!(
++            r.panel.iter().any(|&b| b != 0xab),
++            "a new blue light step was not drawn"
++        );
++
++        // And what it draws then is the frame, not what was skipped.
++        let want = reference_of_list(Mount::Half, 6, shelf(r.text, 101.0));
++        let n = differ(&r.panel, &want);
++        assert_eq!(n, 0, "{n} pixels differ after the frame changed");
++    }
++
++    /// A list with the game in it is never skipped: the game decides that.
++    #[test]
++    fn a_frame_with_the_game_is_never_skipped_as_unchanged() {
++        let mut r = Rig::new(Mount::Half);
++        for _ in 0..3 * PAGES {
++            r.present(&[Draw::Game]);
++        }
++        assert!(
++            r.c.unchanged.is_none(),
++            "a game frame was taken as unchanged"
++        );
++    }
++
++    /// The canvas path's panel for a list with no game, at blue light `blue`.
++    fn reference_of_list(mount: Mount, blue: u8, items: Vec<Draw>) -> Vec<u8> {
++        let mut r = Rig::new(mount);
++        r.c.set_blue_light(blue);
++        let art = vec![90u8; 60 * 20 * 4];
++        r.c.update_texture(r.text, 60, 20, &art);
++        r.present(&items);
++        std::mem::take(&mut r.panel)
++    }
++
+     /// The menu's first frame on a fresh compositor, composed from scratch:
+     /// nothing kept, the scrim blended.
+     fn composed_once(mount: Mount, blue: u8, seed: u32, row: u32) -> Vec<u8> {
