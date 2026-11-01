@@ -1,0 +1,362 @@
+compose the menu from a kept picture
+
+The in-game menu ran at 30 fps. On 0046, every menu frame that changed --
+the cursor moving, the footer sliding in -- took 24-25 ms of overlay: the
+surround and the paused game's rows composed into the canvas, then the
+menu's black scrim blended over nearly all of it, then the labels, then
+the copy out. The game under it is paused, so all but the labels was a
+picture that had not changed.
+
+What an overlay over a still game is composed over is now kept for the
+whole canvas, and so is the same picture with the menu's scrim over it.
+`fill_rect` blends whole rows and columns, so for every row the scrim
+covers, the dimmed copy holds the bytes blending it there would make. A
+menu frame is row copies from one or the other, the labels, and the copy
+out. The scrim is recognised as the overlay's first sprite when it is a
+black rect across the whole canvas width; anything else composes as
+before.
+
+Both pictures are built on frames that draw nothing: the core pauses on
+the MENU tap and the menu shows 180 ms later, so the still picture is
+built on one such frame and, from the scrim of the last visit, its dimmed
+copy on the next. The game moving, a repaint or the canvas path drops
+them. Two canvases of RAM, 1.7 MB each, while the game stays still.
+
+Measured on the host, release, the menu with its cursor moving every
+frame: 0.60 ms a frame before, 0.12 after. On the Flip that would put the
+25 ms frame near 5 ms; not yet measured there.
+
+Tests compare against the canvas path pixel for pixel, mirrored and not:
+the cursor moving over a still game, and the menu's first frame after
+the pause with both pictures already built. With blue light on, the kept
+path must match composing the frame from scratch to the pixel, and stay
+within the overlay path's long-standing 2 a channel of the canvas path.
+Using the dimmed copy for every row instead of the scrim's fails three
+of them.
+
+Applies on top of 0047, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -296,10 +296,12 @@
+ }
+ 
+ /// The rows under an overlay's rect, as composed for a still game.
++/// The still game as the panel shows it with no overlay -- surround and
++/// picture, the whole canvas -- and the same with the last scrim over it.
+ struct Under {
+-    area: (i32, i32, i32, i32),
+     key: StillKey,
+-    px: Vec<u8>,
++    px: Image,
++    dimmed: Option<([f32; 4], Image)>,
+ }
+ 
+ impl Game {
+@@ -971,11 +973,14 @@
+     /// frame in A Link to the Past against a 16.7 ms period.
+     still: Option<StillKey>,
+     still_left: u32,
+-    /// What the overlay was last composed over -- the surround and the game's
+-    /// rows in its rect -- while the game was still. Moving the menu's cursor
+-    /// over a paused game recomposed that from scratch, ~7 ms of the ~20 the
+-    /// overlay took, for a picture that had not changed.
++    /// What an overlay over a still game is composed over, kept while the
++    /// game stays still. The in-game menu redrew the paused game's rows and
++    /// blended its scrim over nearly the whole canvas every frame it changed,
++    /// 20-25 ms on the Flip; from these it is row copies and the labels.
+     under: Option<Under>,
++    /// The scrim last composed over a still game, in storage order, so the
++    /// next pause can build its dimmed picture before a menu appears.
++    last_scrim: Option<[f32; 4]>,
+     /// Multiplies every sprite's colour, RGB. The gain, while an overlay is
+     /// composed over a graded surround with blue light on: a gain is a
+     /// per-channel scale, so blending warmed sprites over warmed pixels is the
+@@ -1031,6 +1036,7 @@
+             still: None,
+             still_left: 0,
+             under: None,
++            last_scrim: None,
+             tint: [1.0; 3],
+             stage_us: [0; 3],
+             textures: Vec::new(),
+@@ -1775,41 +1781,122 @@
+         let cw = self.canvas.w as i32;
+         let span = (bx1 - bx0) as usize * 4;
+         let area = (bx0, by0, bx1, by1);
+-        let rows = |cy: i32| {
+-            let at = (cy as usize * cw as usize + bx0 as usize) * 4;
+-            at..at + span
++        let scrim = self.scrim();
++        let Some(key) = still else {
++            self.under = None;
++            self.compose_under(target, (x, y), area);
++            return self.overlay_finish(target, (x, y), half, area, 0);
+         };
+-        let kept = self
+-            .under
+-            .as_ref()
+-            .is_some_and(|u| still == Some(u.key) && u.area == area);
+-        if kept {
+-            if let Some(u) = &self.under {
+-                for (cy, row) in (by0..by1).zip(u.px.chunks_exact(span)) {
+-                    self.canvas.px[rows(cy)].copy_from_slice(row);
+-                }
+-            }
+-        } else {
+-            self.compose_under(target, (x, y), area);
+-            // Kept only while the game is still: a moving one would pay a
+-            // copy a frame for nothing.
+-            self.under = still.map(|key| {
+-                let mut px = self.under.take().map(|u| u.px).unwrap_or_default();
+-                px.clear();
+-                for cy in by0..by1 {
+-                    px.extend_from_slice(&self.canvas.px[rows(cy)]);
+-                }
+-                Under { area, key, px }
+-            });
++        if !self.under.as_ref().is_some_and(|u| u.key == key) {
++            self.build_under(target, (x, y), key);
+         }
++        if let Some((_, _, colour)) = scrim {
++            self.last_scrim = Some(colour);
++            self.build_dimmed(colour);
++        }
++        let Some(u) = &self.under else {
++            return;
++        };
++        // Rows the scrim covers come from the dimmed picture: `fill_rect`
++        // blends whole rows and columns, so those bytes are what blending it
++        // over `px` here would make.
++        for cy in by0..by1 {
++            let src = match (&scrim, &u.dimmed) {
++                (Some((s0, s1, _)), Some((_, d))) if (*s0..*s1).contains(&cy) => d,
++                _ => &u.px,
++            };
++            let at = (cy as usize * cw as usize + bx0 as usize) * 4;
++            self.canvas.px[at..at + span].copy_from_slice(&src.px[at..at + span]);
++        }
++        self.overlay_finish(target, (x, y), half, area, usize::from(scrim.is_some()));
++    }
++
++    /// Draw the overlay's sprites from `skip` on over the composed canvas and
++    /// copy `area` out.
++    fn overlay_finish(
++        &mut self,
++        target: fb::Target,
++        at: (i32, i32),
++        half: bool,
++        area: (i32, i32, i32, i32),
++        skip: usize,
++    ) {
+         self.tint = self.gain;
+         let overlay = std::mem::take(&mut self.overlay);
+-        self.draw_sprites(&overlay);
++        self.draw_sprites(&overlay[skip.min(overlay.len())..]);
+         self.overlay = overlay;
+         self.tint = [1.0; 3];
+-        self.overlay_copy_out(target, (x, y), half, area);
++        self.overlay_copy_out(target, at, half, area);
++    }
++
++    /// The overlay's scrim, when it starts with one: a black rect across the
++    /// whole canvas width. Its rows, as `fill_rect` clips them, and its colour
++    /// as `draw_sprites` would hand it over.
++    fn scrim(&self) -> Option<(i32, i32, [f32; 4])> {
++        let Some(&Draw::Rect { x, y, w, h, colour }) = self.overlay.first() else {
++            return None;
++        };
++        let cw = self.canvas.w as i32;
++        let full = x.round() as i32 <= 0 && (x + w).round() as i32 >= cw && w > 0.0;
++        if !full || colour[..3] != [0.0; 3] {
++            return None;
++        }
++        let ch = self.canvas.h as i32;
++        let (y0, y1) = ((y.round() as i32).max(0), ((y + h).round() as i32).min(ch));
++        // `overlay_finish` draws the sprites tinted by the gain.
++        let [r, g, b] = self.gain;
++        let tinted = [colour[0] * r, colour[1] * g, colour[2] * b, colour[3]];
++        (y0 < y1).then_some((y0, y1, raster::to_storage(tinted)))
++    }
++
++    /// The whole canvas as the panel shows it under an overlay, for `key`.
++    fn build_under(&mut self, target: fb::Target, at: (i32, i32), key: StillKey) {
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
++        self.compose_under(target, at, (0, 0, cw, ch));
++        let mut px = match self.under.take() {
++            Some(u) if (u.px.w, u.px.h) == (self.canvas.w, self.canvas.h) => u.px,
++            _ => Image::new(self.canvas.w, self.canvas.h),
++        };
++        px.px.copy_from_slice(&self.canvas.px);
++        self.under = Some(Under {
++            key,
++            px,
++            dimmed: None,
++        });
++    }
++
++    /// `under` with a full-canvas scrim of `colour` over it, unless it is
++    /// there already.
++    fn build_dimmed(&mut self, colour: [f32; 4]) {
++        let Some(u) = &mut self.under else {
++            return;
++        };
++        if u.dimmed.as_ref().is_some_and(|(c, _)| *c == colour) {
++            return;
++        }
++        let mut d = match u.dimmed.take() {
++            Some((_, d)) if (d.w, d.h) == (u.px.w, u.px.h) => d,
++            _ => Image::new(u.px.w, u.px.h),
++        };
++        d.px.copy_from_slice(&u.px.px);
++        let (w, h) = (d.w as f32, d.h as f32);
++        raster::fill_rect(&mut d, 0.0, 0.0, w, h, colour, &mut self.scratch);
++        u.dimmed = Some((colour, d));
+     }
+ 
++    /// One step of getting ready for an overlay over the still game `key`:
++    /// the picture first, then on a later frame the last scrim's.
++    fn prepare_under(&mut self, target: fb::Target, at: (i32, i32), key: StillKey) {
++        match &self.under {
++            Some(u) if u.key == key => {
++                if let Some(colour) = self.last_scrim {
++                    self.build_dimmed(colour);
++                }
++            }
++            _ => self.build_under(target, at, key),
++        }
++    }
++
+     /// The canvas over `area` as the panel shows it without the overlay: the
+     /// surround, then the game's own rows.
+     fn compose_under(
+@@ -2101,6 +2188,12 @@
+                 let still = (!changed && !repainted).then_some(key);
+                 self.overlay_out_inner(target, (x, y), half, area, still);
+                 self.stage_us[2] = t.elapsed().as_micros() as u64;
++            } else if !game_drawn && !changed {
++                // A frame with nothing to draw over a still game: the core
++                // paused for the in-game menu, 180 ms before it shows. Build
++                // what the menu will be composed over now, one piece a frame,
++                // so its first frame is as cheap as the rest.
++                self.prepare_under(target, (x, y), key);
+             }
+             return;
+         }
+@@ -3280,16 +3373,18 @@
+         frame
+     }
+ 
+-    /// The in-game menu as it is drawn: a dim over nearly all of the screen,
++    /// The in-game menu as it is drawn: a dim over most of the screen,
+     /// a highlight on row `row`, and a label.
+     fn menu(text: TexId, row: u32) -> Vec<Draw> {
+         vec![
+             Draw::Game,
++            // From inside the picture, so the rows either side of the scrim's
++            // edges are the game's, not the black around it.
+             Draw::Rect {
+                 x: 0.0,
+-                y: 20.0,
++                y: 90.4,
+                 w: out_w() as f32,
+-                h: 500.0,
++                h: 380.0,
+                 colour: [0.0, 0.0, 0.0, 0.55],
+             },
+             Draw::Rect {
+@@ -3333,7 +3428,12 @@
+ 
+     /// Reference panel for `frame` under `items`, composed on the canvas.
+     fn reference(mount: Mount, seed: u32, row: u32) -> Vec<u8> {
++        reference_warm(mount, 0, seed, row)
++    }
++
++    fn reference_warm(mount: Mount, blue: u8, seed: u32, row: u32) -> Vec<u8> {
+         let mut r = Rig::new(mount);
++        r.c.set_blue_light(blue);
+         r.frame = pattern(seed);
+         let items = via_canvas(menu(r.text, row));
+         r.present(&items);
+@@ -3412,8 +3512,80 @@
+             let want = reference(mount, 40, 1);
+             let n = differ(&r.panel, &want);
+             assert_eq!(n, 0, "{n} pixels differ once the game moved");
++        }
++    }
++
++    /// The menu's first frame on a fresh compositor, composed from scratch:
++    /// nothing kept, the scrim blended.
++    fn composed_once(mount: Mount, blue: u8, seed: u32, row: u32) -> Vec<u8> {
++        let mut r = Rig::new(mount);
++        r.c.set_blue_light(blue);
++        r.frame = pattern(seed);
++        let items = menu(r.text, row);
++        r.present(&items);
++        assert!(r.c.under.is_none(), "the reference kept a still picture");
++        std::mem::take(&mut r.panel)
++    }
++
++    /// The scrim comes out of a dimmed copy of the still picture rather than
++    /// being blended each frame. With blue light warming everything that has
++    /// to be what composing it from scratch puts on the panel, to the pixel;
++    /// against the canvas path the overlay path has always been within 2 a
++    /// channel with blue light on, since its sprites are tinted rather than
++    /// graded afterwards.
++    #[test]
++    fn a_menu_over_a_still_game_matches_composing_it_afresh_with_blue_light() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let mut r = Rig::new(mount);
++            r.c.set_blue_light(6);
++            for _ in 0..2 * PAGES {
++                let items = vec![Draw::Game];
++                r.present(&items);
++            }
++            for (i, row) in [0, 2, 2, 4, 4, 4, 4, 4, 1].into_iter().enumerate() {
++                let items = menu(r.text, row);
++                r.present(&items);
++                let fresh = composed_once(mount, 6, 0, row);
++                let n = differ(&r.panel, &fresh);
++                assert_eq!(n, 0, "frame {i}: {n} pixels differ from composing afresh");
++                let canvas = reference_warm(mount, 6, 0, row);
++                let worst = r.panel.iter().zip(&canvas).map(|(a, b)| a.abs_diff(*b));
++                assert!(
++                    worst.max() <= Some(2),
++                    "frame {i}: past the canvas path's rounding"
++                );
++            }
+         }
+     }
++
++    /// The core pauses on the tap and the menu shows 180 ms later. By then
++    /// the still picture and, from the last visit, its dimmed copy are built
++    /// on frames that drew nothing, so the menu's first frame builds neither.
++    #[test]
++    fn the_menu_is_ready_before_it_shows_again() {
++        let mut r = Rig::new(Mount::Half);
++        for _ in 0..2 * PAGES {
++            let items = menu(r.text, 0);
++            r.present(&items);
++        }
++        r.frame = pattern(7);
++        for _ in 0..PAGES + 3 {
++            r.present(&[Draw::Game]);
++        }
++        let u =
++            r.c.under
++                .as_ref()
++                .expect("no still picture built before the menu");
++        assert!(
++            u.dimmed.is_some(),
++            "no dimmed picture built before the menu"
++        );
++        let items = menu(r.text, 2);
++        r.present(&items);
++        let want = reference(Mount::Half, 7, 2);
++        let n = differ(&r.panel, &want);
++        assert_eq!(n, 0, "{n} pixels differ on the menu's first frame");
++    }
+ }
+ 
+ #[cfg(test)]
