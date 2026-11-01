@@ -1,0 +1,507 @@
+draw a still game once under the menu
+
+With the in-game menu open, every present scaled the game straight onto the
+panel and then, because the menu's dim covers nearly the whole picture,
+drew the same rows again into the canvas under the menu and copied them out.
+The core is paused the whole time, so all of it was a picture that had not
+changed. Measured on the Flip in Donkey Kong Country (Logs/slot.log of
+1 November, traced, main 7843ad0): render 25.5-27.5 ms (overlay 17.8-19.6)
+against a 16.7 ms period whenever the menu was up, 436 missed latches over
+two visits to it -- 90% of the 485 drops in that log. Steady play on every
+core drops none.
+
+The direct pass now keys what it draws -- the frame, the grade, the effect
+and the rect -- and once that has not changed for PAGES frames every page
+holds it, so it is skipped, and so is recomposing an unchanged overlay over
+it. An upload of the same frame no longer counts as a change. While the game
+does move, rows the overlay is composed over across the game's whole width
+are left out of the direct pass, since the overlay pass draws them anyway.
+
+Tests draw the menu over a moving game, move its cursor over a still one,
+and compare the panel with the canvas path pixel for pixel, mirrored and
+not; another requires a still game under a still menu to leave the panel
+untouched, and fails with the skip taken out.
+
+Applies on top of 0042, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -265,6 +265,24 @@
+     /// Grade a pass into the canvas too, for an overlay that is copied out to
+     /// the panel without a grade of its own.
+     grade_canvas: bool,
++    /// Bumped when an upload changes the frame. The frontend uploads the
++    /// latest frame every present, the same one again while the core is
++    /// paused, so this is what tells a still picture from a moving one.
++    gen: u64,
++}
++
++/// Everything the direct pass's output depends on. While it stays the same
++/// for PAGES frames, every page already holds the picture.
++#[derive(Clone, Copy, PartialEq)]
++struct StillKey {
++    gen: u64,
++    effect: ScreenEffect,
++    gain8: [u16; 3],
++    pic: [u32; 4],
++    src: [u32; 4],
++    floats: [u32; 6],
++    flags: [bool; 3],
++    at: (i32, i32),
+ }
+ 
+ impl Game {
+@@ -286,9 +304,31 @@
+             line: Vec::new(),
+             band: None,
+             grade_canvas: false,
++            gen: 0,
+         }
+     }
+ 
++    fn still_key(&self, at: (i32, i32), half: bool) -> StillKey {
++        let bits = f32::to_bits;
++        StillKey {
++            gen: self.gen,
++            effect: self.effect,
++            gain8: self.gain8,
++            pic: self.pic.map(bits),
++            src: self.src.map(bits),
++            floats: [
++                bits(self.power),
++                bits(self.base[0]),
++                bits(self.base[1]),
++                bits(self.bottom),
++                bits(self.fbo_scale[0]),
++                bits(self.fbo_scale[1]),
++            ],
++            flags: [self.crop, self.shell, half],
++            at,
++        }
++    }
++
+     /// The core hands us XRGB8888, which is B,G,R,X in memory on little-endian.
+     ///
+     /// `size` is the platform's canvas: 240x160 for the Game Boy family, 256x224
+@@ -301,7 +341,10 @@
+         }
+         if (self.frame.w, self.frame.h) != (w, h) {
+             self.frame = Image::new(w, h);
++        } else if self.frame.px[..want] == xrgb8888[..want] {
++            return;
+         }
++        self.gen = self.gen.wrapping_add(1);
+         // XRGB8888 is B, G, R, X in memory on little-endian, which is exactly
+         // the order the canvas and the panel use. Nothing reads this image's
+         // alpha -- the game plane writes opaque pixels and the output sets 255
+@@ -899,6 +942,12 @@
+     /// otherwise stay there: the direct pass writes only the game's rect.
+     overlay_stale: Option<(i32, i32, i32, i32)>,
+     overlay_left: u32,
++    /// The direct pass as last drawn, and how many more frames draw it before
++    /// every page holds it. A paused game under the in-game menu was scaled
++    /// out again every present and composed again under the menu, 27 ms a
++    /// frame in A Link to the Past against a 16.7 ms period.
++    still: Option<StillKey>,
++    still_left: u32,
+     /// Multiplies every sprite's colour, RGB. The gain, while an overlay is
+     /// composed over a graded surround with blue light on: a gain is a
+     /// per-channel scale, so blending warmed sprites over warmed pixels is the
+@@ -951,6 +1000,8 @@
+             overlay_shown: Vec::new(),
+             overlay_stale: None,
+             overlay_left: 0,
++            still: None,
++            still_left: 0,
+             tint: [1.0; 3],
+             stage_us: [0; 3],
+             textures: Vec::new(),
+@@ -1636,18 +1687,19 @@
+         self.surround.as_ref()
+     }
+ 
+-    /// Compose the overlay over the rows it covers and copy just that rect to
+-    /// the panel, which already holds the game from the direct pass. The canvas
+-    /// gets what the panel shows there first -- the surround, then the game's
+-    /// own rows -- so the sprites blend over the same pixels they would have on
+-    /// the canvas path, without reading the panel back.
++    /// The rect of canvas the overlay is composed over this frame, if any.
++    /// It is composed there and copied out to the panel, which holds the game
++    /// from the direct pass everywhere else. The canvas gets what the panel
++    /// shows there first -- the surround, then the game's own rows -- so the
++    /// sprites blend over the same pixels they would have on the canvas path,
++    /// without reading the panel back.
+     ///
+     /// Each page that showed an overlay gets the rect redrawn once it changes
+     /// or goes, so nothing of it is left on the surround. An overlay that has
+     /// not changed and lies off the game is already on every page and costs
+-    /// nothing; one over the game is composed every frame, as the game pass
+-    /// has just written over it.
+-    fn overlay_out(&mut self, target: fb::Target, at: (i32, i32), half: bool, repainted: bool) {
++    /// nothing; one over the game is composed every frame the game pass
++    /// writes, and left alone on one it skips as still.
++    fn overlay_area(&mut self, repainted: bool, game_drawn: bool) -> Option<(i32, i32, i32, i32)> {
+         let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
+         let now = overlay_bounds(&self.overlay, cw, ch);
+         if repainted || self.overlay != self.overlay_shown {
+@@ -1656,34 +1708,31 @@
+             self.overlay_shown.clone_from(&self.overlay);
+             self.overlay_left = PAGES;
+         }
+-        let over_game = now.is_some_and(|b| {
+-            let (gx, gy, gw, gh) = self.game.rect();
+-            let g = (
+-                gx.floor() as i32,
+-                gy.floor() as i32,
+-                (gx + gw).ceil() as i32,
+-                (gy + gh).ceil() as i32,
+-            );
+-            b.0 < g.2 && g.0 < b.2 && b.1 < g.3 && g.1 < b.3
+-        });
+-        let area = if self.overlay_left > 0 {
++        let g = self.game_bounds();
++        let over_game = now.is_some_and(|b| b.0 < g.2 && g.0 < b.2 && b.1 < g.3 && g.1 < b.3);
++        if self.overlay_left > 0 {
+             self.overlay_left -= 1;
+             let area = union(self.overlay_stale, now);
+             if self.overlay_left == 0 {
+                 self.overlay_stale = None;
+             }
+             area
+-        } else if over_game {
++        } else if over_game && game_drawn {
+             now
+         } else {
+             None
+-        };
+-        let Some(area) = area else {
+-            return;
+-        };
+-        let t = std::time::Instant::now();
+-        self.overlay_out_inner(target, at, half, area);
+-        self.stage_us[2] = t.elapsed().as_micros() as u64;
++        }
++    }
++
++    /// The game's rect on the canvas, out to whole pixels.
++    fn game_bounds(&self) -> (i32, i32, i32, i32) {
++        let (gx, gy, gw, gh) = self.game.rect();
++        (
++            gx.floor() as i32,
++            gy.floor() as i32,
++            (gx + gw).ceil() as i32,
++            (gy + gh).ceil() as i32,
++        )
+     }
+ 
+     fn overlay_out_inner(
+@@ -1889,10 +1938,15 @@
+         // The gain is not among these: the game pass carries it in its column
+         // mask and the surround was graded when it was taken, so everything
+         // this path writes is already warm. Blue light costs nothing here.
+-        // An overlay is graded as it is composed (`overlay_out`), so blue
++        // An overlay is graded as it is composed (`overlay_out_inner`), so blue
+         // light keeps this path too: with the canvas path instead, a HUD on a
+         // GBA cart ran 20-24 ms a frame on the Flip against 7.8 without it.
+         let direct = self.direct_game && w == cw && h == ch && target.bgr;
++        if !direct {
++            // The canvas path writes the whole rect, sprites and all, so no
++            // page can be trusted to hold just the direct pass afterwards.
++            self.still = None;
++        }
+         if self.direct_game && !direct {
+             let t = std::time::Instant::now();
+             let path = self.game.draw(&mut self.canvas, None);
+@@ -1913,27 +1967,56 @@
+         // rather than via the canvas. Same conditions as the one-to-one copy
+         // below, since it is that copy being folded into the game pass.
+         if direct {
+-            let t = std::time::Instant::now();
+-            let path = self.game.draw_direct(
+-                FbDest {
+-                    target,
+-                    x,
+-                    y,
+-                    w,
+-                    h,
+-                    half,
+-                },
+-                None,
+-            );
+-            if self.profiling {
+-                // game_us only, not frame_us: this runs inside end_frame, whose
+-                // own timer already counts it. Adding it here too double-counted
+-                // the game and inflated the worst-frame figure with it.
+-                self.profile.game_us += t.elapsed().as_micros() as u64;
+-                self.profile.path = path;
+-                self.profile.direct = true;
++            // A picture that has not changed in PAGES frames is on every page
++            // already; the core is paused under a menu, a toast, a doze. A
++            // repaint wrote the surround over it, so that draws regardless.
++            let key = self.game.still_key((x, y), half);
++            if self.still != Some(key) {
++                self.still = Some(key);
++                self.still_left = PAGES;
+             }
+-            self.overlay_out(target, (x, y), half, repainted);
++            let game_drawn = repainted || self.still_left > 0;
++            self.still_left = self.still_left.saturating_sub(1);
++            let area = self.overlay_area(repainted, game_drawn);
++            if game_drawn {
++                // Rows the overlay is composed over across the game's whole
++                // width are drawn there, game and all, and copied out on top;
++                // scaling them onto the panel first as well put the game
++                // under the in-game menu through the pass twice a frame.
++                let g = self.game_bounds();
++                let bands = match area {
++                    Some(a) if a.0 <= g.0 && a.2 >= g.2 => [(g.1, a.1), (a.3, g.3)],
++                    _ => [(g.1, g.3), (0, 0)],
++                };
++                let t = std::time::Instant::now();
++                let mut path = 0;
++                for band in bands.into_iter().filter(|b| b.0 < b.1) {
++                    self.game.band = Some(band);
++                    let fb = FbDest {
++                        target,
++                        x,
++                        y,
++                        w,
++                        h,
++                        half,
++                    };
++                    path = path.max(self.game.draw_direct(fb, None));
++                }
++                self.game.band = None;
++                if self.profiling {
++                    // game_us only, not frame_us: this runs inside end_frame, whose
++                    // own timer already counts it. Adding it here too double-counted
++                    // the game and inflated the worst-frame figure with it.
++                    self.profile.game_us += t.elapsed().as_micros() as u64;
++                    self.profile.path = path;
++                    self.profile.direct = true;
++                }
++            }
++            if let Some(area) = area {
++                let t = std::time::Instant::now();
++                self.overlay_out_inner(target, (x, y), half, area);
++                self.stage_us[2] = t.elapsed().as_micros() as u64;
++            }
+             return;
+         }
+ 
+@@ -3026,5 +3109,214 @@
+             tex,
+             alpha: 1.0,
+         }]);
++    }
++}
++
++#[cfg(test)]
++mod still_game_tests {
++    use super::*;
++
++    struct NoSurface;
++    impl Surface for NoSurface {
++        fn make_current(&mut self) -> Result<(), crate::surface::GfxError> {
++            Ok(())
++        }
++        fn window_size(&self) -> (u32, u32) {
++            (out_w(), out_h())
++        }
++        fn swap(&mut self) -> Result<(), crate::surface::GfxError> {
++            Ok(())
++        }
++        fn proc_address(&self, _name: &str) -> *const std::ffi::c_void {
++            std::ptr::null()
++        }
+     }
++
++    /// One compositor drawing into one panel, frame after frame, the way the
++    /// frontend drives it: the latest game frame uploaded every present.
++    struct Rig {
++        panel: Vec<u8>,
++        c: Compositor,
++        frame: Vec<u8>,
++        text: TexId,
++    }
++
++    impl Rig {
++        fn new(mount: Mount) -> Rig {
++            let panel = vec![0u8; out_w() as usize * out_h() as usize * 4];
++            let mut c = Compositor::new(&NoSurface).expect("compositor");
++            c.mount = mount;
++            let mut art = vec![0u8; 60 * 20 * 4];
++            for (i, px) in art.chunks_exact_mut(4).enumerate() {
++                px.copy_from_slice(&[255, (i * 3) as u8, 40, (i * 11) as u8]);
++            }
++            let text = c.create_texture(60, 20, &art);
++            Rig {
++                panel,
++                c,
++                frame: pattern(0),
++                text,
++            }
++        }
++
++        fn present(&mut self, items: &[Draw]) {
++            let (pw, ph) = (out_w(), out_h());
++            let target = fb::Target {
++                ptr: self.panel.as_mut_ptr(),
++                w: pw,
++                h: ph,
++                stride: pw as usize * 4,
++                bgr: true,
++            };
++            // SAFETY: the panel outlives the frame; the rig clears the
++            // pointer when dropped. Pointed again each frame, as a second rig
++            // in the same test moves it.
++            unsafe { fb::set_current_for_test(Some(target)) };
++            self.c.upload_game(&self.frame, (SRC_W, SRC_H));
++            self.c.begin_frame();
++            self.c.draw_list(items);
++            self.c.end_frame((pw, ph));
++        }
++    }
++
++    impl Drop for Rig {
++        fn drop(&mut self) {
++            // SAFETY: clearing the pointer before `panel` is dropped.
++            unsafe { fb::set_current_for_test(None) };
++        }
++    }
++
++    fn pattern(seed: u32) -> Vec<u8> {
++        let mut frame = vec![0u8; (SRC_W * SRC_H * 4) as usize];
++        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
++            let (x, y) = (i as u32 % SRC_W, i as u32 / SRC_W);
++            px.copy_from_slice(&[(x * 7 + seed) as u8, (y * 5) as u8, (x ^ y) as u8, 255]);
++        }
++        frame
++    }
++
++    /// The in-game menu as it is drawn: a dim over nearly all of the screen,
++    /// a highlight on row `row`, and a label.
++    fn menu(text: TexId, row: u32) -> Vec<Draw> {
++        vec![
++            Draw::Game,
++            Draw::Rect {
++                x: 0.0,
++                y: 20.0,
++                w: out_w() as f32,
++                h: 500.0,
++                colour: [0.0, 0.0, 0.0, 0.55],
++            },
++            Draw::Rect {
++                x: 200.0,
++                y: 100.0 + 40.0 * row as f32,
++                w: 300.0,
++                h: 36.0,
++                colour: [0.9, 0.9, 0.9, 0.3],
++            },
++            Draw::Tex {
++                x: 220.0,
++                y: 108.0,
++                w: 60.0,
++                h: 20.0,
++                tex: text,
++                alpha: 1.0,
++            },
++        ]
++    }
++
++    /// The same list composed on the canvas: an invisible rect under the
++    /// game is what forces that path.
++    fn via_canvas(mut items: Vec<Draw>) -> Vec<Draw> {
++        let invisible = Draw::Rect {
++            x: 0.0,
++            y: 0.0,
++            w: 1.0,
++            h: 1.0,
++            colour: [0.0; 4],
++        };
++        items.insert(0, invisible);
++        items
++    }
++
++    fn differ(a: &[u8], b: &[u8]) -> usize {
++        a.chunks_exact(4)
++            .zip(b.chunks_exact(4))
++            .filter(|(p, q)| p[..3] != q[..3])
++            .count()
++    }
++
++    /// Reference panel for `frame` under `items`, composed on the canvas.
++    fn reference(mount: Mount, seed: u32, row: u32) -> Vec<u8> {
++        let mut r = Rig::new(mount);
++        r.frame = pattern(seed);
++        let items = via_canvas(menu(r.text, row));
++        r.present(&items);
++        assert!(!r.c.direct_game, "the reference took the direct path");
++        std::mem::take(&mut r.panel)
++    }
++
++    /// With the game drawn under the menu only once -- the rows the dim
++    /// covers composed on the canvas rather than also scaled straight out --
++    /// the panel still has to be what the canvas path draws, and stay so as
++    /// the game moves.
++    #[test]
++    fn a_menu_over_a_moving_game_lands_as_the_canvas_path_draws_it() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let mut r = Rig::new(mount);
++            for seed in 0..PAGES + 2 {
++                r.frame = pattern(seed * 17);
++                let items = menu(r.text, 0);
++                r.present(&items);
++                assert!(r.c.direct_game, "the menu did not take the direct path");
++                let want = reference(mount, seed * 17, 0);
++                let n = differ(&r.panel, &want);
++                assert_eq!(n, 0, "frame {seed}: {n} pixels differ from the canvas path");
++            }
++        }
++    }
++
++    /// A paused game under an unchanging menu is on every page once the
++    /// first repaint's PAGES frames and the overlay's PAGES after them are
++    /// done; drawing it again was the 27 ms frame in the trace.
++    #[test]
++    fn a_still_game_under_a_still_menu_is_not_drawn_again() {
++        let mut r = Rig::new(Mount::Half);
++        for _ in 0..2 * PAGES {
++            let items = menu(r.text, 0);
++            r.present(&items);
++        }
++        r.panel.fill(0xab);
++        let items = menu(r.text, 0);
++        r.present(&items);
++        assert!(
++            r.panel.iter().all(|&b| b == 0xab),
++            "a still frame was written to the panel again"
++        );
++        r.frame = pattern(99);
++        r.present(&items);
++        assert!(
++            r.panel.iter().any(|&b| b != 0xab),
++            "a new game frame was not drawn"
++        );
++    }
++
++    /// Moving the menu's cursor over a still game recomposes the menu alone,
++    /// and what it puts on the panel over the old frame is still exactly the
++    /// canvas path's picture.
++    #[test]
++    fn moving_the_cursor_over_a_still_game_redraws_it_correctly() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let mut r = Rig::new(mount);
++            for _ in 0..PAGES + 1 {
++                let items = menu(r.text, 0);
++                r.present(&items);
++            }
++            let items = menu(r.text, 3);
++            r.present(&items);
++            let want = reference(mount, 0, 3);
++            let n = differ(&r.panel, &want);
++            assert_eq!(n, 0, "{n} pixels differ after the cursor moved");
++        }
++    }
+ }
