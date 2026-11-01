@@ -49,7 +49,7 @@ durability round-trips the new keys and rejects lcd3x on a console. The
 failures in app, e2e, eject, layout, play and render_link_screen are the
 same set on the tree before this patch. Not yet run on the handheld.
 
-Applies on top of 0042, upstream 91499a9.
+Applies on top of 0043, upstream 91499a9.
 
 diff --git a/crates/slot-gfx/src/lcd3x.rs b/crates/slot-gfx/src/lcd3x.rs
 index 2b5d1ea..f9601d3 100644
@@ -150,7 +150,7 @@ index b545a69..f03f83e 100644
          c = pow(c, vec3(1.05));
          vec2 d = abs(f - 0.5);
 diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
-index 387dec8..fd54db5 100644
+index 0112694..c5c227f 100644
 --- a/crates/slot-gfx/src/soft/mod.rs
 +++ b/crates/slot-gfx/src/soft/mod.rs
 @@ -9,6 +9,8 @@
@@ -213,7 +213,7 @@ index 387dec8..fd54db5 100644
          // The gain, folded into the mask that was going to be applied anyway.
          // Grading the output cost a whole pass over the panel; grading here
          // costs nothing per pixel, because this multiply already existed.
-@@ -416,7 +426,8 @@ impl Game {
+@@ -466,7 +476,8 @@ impl Game {
          //
          // The mask is separable, so the split is exact rather than an
          // approximation: lcd3x_factors is yfactor(y) * xfactor(x) per channel.
@@ -223,7 +223,7 @@ index 387dec8..fd54db5 100644
          let bright = screen_brightness(self.power);
          let width = (x1 - x0) as usize;
  
-@@ -434,7 +445,7 @@ impl Game {
+@@ -484,7 +495,7 @@ impl Game {
              rw: rw.to_bits(),
              src: bits(src),
              pic: bits(self.pic),
@@ -232,7 +232,7 @@ index 387dec8..fd54db5 100644
              img_w: img.w,
          };
          if self.col_key != Some(key) {
-@@ -449,7 +460,7 @@ impl Game {
+@@ -499,7 +510,7 @@ impl Game {
                  sw,
                  src,
                  self.pic,
@@ -241,7 +241,7 @@ index 387dec8..fd54db5 100644
                  img.w,
                  mirror,
                  grade,
-@@ -482,6 +493,11 @@ impl Game {
+@@ -532,6 +543,11 @@ impl Game {
              let yk = if lcd && row_inside {
                  let fy = (v * sh).fract();
                  (BRIGHTEN_SCANLINES + (2.0 * PI * fy).sin()) / (BRIGHTEN_SCANLINES + 1.0) * bright
@@ -253,8 +253,8 @@ index 387dec8..fd54db5 100644
              } else {
                  bright
              };
-@@ -3028,3 +3044,110 @@ mod texture_table_tests {
-         }]);
+@@ -3399,3 +3415,110 @@ mod still_game_tests {
+         }
      }
  }
 +
