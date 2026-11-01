@@ -1,0 +1,160 @@
+trace where a long present waits
+
+The in-game menu still missed latches on 0045: 142 in two minutes of
+Donkey Kong Country, every one of them with the menu up. Most of its long
+presents spent 13.5 or 16.2 ms in `advance` with the core paused -- input,
+the feed and the app's update, normally 0.1 ms -- and advance, render and
+swap summed to two blanks every time. That reads as waiting, not work, but
+the trace could not say on what: two theories in a row were argued from
+these numbers and only one of them held.
+
+Measurement only, behind SLOT_TRACE_LATENCY like the rest of the trace. A
+long present now also says:
+
+- how `advance` split between the input poll, the feed and the update;
+- of the present's wall time, how long the draw was on a CPU, how long it
+  sat in a run queue waiting for one, and what is left -- blocked or
+  asleep, the swap's wait for the blank included -- from the thread's
+  `/proc/thread-self/schedstat`. Where the kernel has no schedstat it says
+  so instead.
+
+A run queue wait is another thread holding the draw's CPU; blocked is a
+lock, a channel or a sleep, which on a CONFIG_HZ 100 kernel can return a
+tick late.
+
+Test: schedstat counts 20 ms of spinning as at least 10 ms on a CPU.
+
+Applies on top of 0045, upstream 91499a9.
+
+diff --git a/crates/slot/src/niceness.rs b/crates/slot/src/niceness.rs
+--- a/crates/slot/src/niceness.rs
++++ b/crates/slot/src/niceness.rs
+@@ -83,6 +83,16 @@
+     let _ = cpus;
+ }
+ 
++/// The calling thread's time on a CPU and its time waiting in a run queue
++/// for one, in ns, from `/proc/thread-self/schedstat`. What is left of a
++/// span after both was spent blocked or asleep -- which tells a long present
++/// that waited on something from one that could not get a CPU.
++pub fn schedstat() -> Option<(u64, u64)> {
++    let s = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
++    let mut it = s.split_whitespace().map(|v| v.parse::<u64>().ok());
++    Some((it.next()??, it.next()??))
++}
++
+ /// How many times the calling thread has been preempted -- taken off a CPU
+ /// it still wanted. For the pace trace: a draw sharing its CPU with the
+ /// emulator shows here and nowhere else.
+@@ -153,6 +163,21 @@
+     }
+ 
+     #[test]
++    fn schedstat_counts_time_on_a_cpu() {
++        let (r0, _) = schedstat().expect("no /proc/thread-self/schedstat");
++        let until = std::time::Instant::now() + std::time::Duration::from_millis(20);
++        while std::time::Instant::now() < until {
++            std::hint::black_box(0u64);
++        }
++        let (r1, _) = schedstat().unwrap();
++        assert!(
++            r1 - r0 >= 10_000_000,
++            "20 ms of spinning read as {} ns",
++            r1 - r0
++        );
++    }
++
++    #[test]
+     fn preemption_is_counted() {
+         assert!(preempted().is_some(), "no nonvoluntary_ctxt_switches line");
+     }
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -240,6 +240,9 @@
+     loop {
+         pacer.wait();
+         let began = Instant::now();
++        let sched_at = slot::latency::tracing()
++            .then(slot::niceness::schedstat)
++            .flatten();
+         input.steer_with_stick(frontend.app().left_stick_dpad());
+         frontend.advance(&mut input);
+         if frontend.restarting() {
+@@ -295,9 +298,28 @@
+         if slot::latency::tracing() && work + swap_took > Duration::from_millis(25) {
+             let ms = |d: Duration| d.as_secs_f64() * 1e3;
+             let stages = compositor.frame_stages();
+-            eprintln!(
+-                "slot: long present: advance {:.1} step {:.1} render {:.1} (list {:.1} end {:.1} overlay {:.1}) swap {:.1} ms, {ticks} tick(s)",
++            let parts = frontend.advance_parts();
++            // Where the present's wall time went: on a CPU, waiting in a run
++            // queue for one, or neither -- blocked or asleep, swap included.
++            let spent = match (sched_at, slot::niceness::schedstat()) {
++                (Some((r0, w0)), Some((r1, w1))) => {
++                    let (run, wait) = (r1.saturating_sub(r0), w1.saturating_sub(w0));
++                    let wall = (work + swap_took).as_nanos() as u64;
++                    format!(
++                        "run {:.1} queued {:.1} blocked {:.1}",
++                        run as f64 / 1e6,
++                        wait as f64 / 1e6,
++                        wall.saturating_sub(run + wait) as f64 / 1e6,
++                    )
++                }
++                _ => "schedstat n/a".to_string(),
++            };
++            eprintln!(
++                "slot: long present: advance {:.1} (poll {:.1} feed {:.1} update {:.1}) step {:.1} render {:.1} (list {:.1} end {:.1} overlay {:.1}) swap {:.1} ms, {ticks} tick(s); {spent} ms",
+                 ms(advanced),
++                ms(parts[0]),
++                ms(parts[1]),
++                ms(parts[2]),
+                 ms(stepped - advanced),
+                 ms(work - stepped),
+                 stages[0] as f64 / 1e3,
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -57,6 +57,9 @@
+     session: Session,
+     start: Instant,
+     last: Instant,
++    /// The last `advance`'s input poll, feed and update, for a long present's
++    /// trace: in the in-game menu it ran 13-16 ms with the core paused.
++    advance_parts: [Duration; 3],
+     draws: Vec<Draw>,
+     polaroid_texes: Vec<TexId>,
+     title_tex: Option<TexId>,
+@@ -195,6 +198,7 @@
+             session,
+             start: now,
+             last: now,
++            advance_parts: [Duration::ZERO; 3],
+             draws: Vec::new(),
+             polaroid_texes: Vec::new(),
+             title_tex: None,
+@@ -831,15 +835,24 @@
+     }
+ 
+     pub fn advance(&mut self, input: &mut dyn InputSource) {
++        let began = Instant::now();
+         let now = self.now();
+         let events = input.poll(now);
++        let polled = Instant::now();
++        self.advance_parts = [polled - began, Duration::ZERO, Duration::ZERO];
+         if self.rebuild.is_some() {
+             return;
+         }
+         self.session.feed(events, now);
++        let fed = Instant::now();
+         let dt = self.last.elapsed().as_secs_f32().min(MAX_DT);
+         self.last = Instant::now();
+         self.session.update(dt);
++        self.advance_parts = [polled - began, fed - polled, fed.elapsed()];
++    }
++
++    pub fn advance_parts(&self) -> [Duration; 3] {
++        self.advance_parts
+     }
+ 
+     pub fn app(&self) -> &crate::app::App {
