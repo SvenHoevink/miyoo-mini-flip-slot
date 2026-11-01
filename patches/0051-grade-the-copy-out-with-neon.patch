@@ -1,0 +1,237 @@
+grade the copy out with neon
+
+With blue light on the shelf, its menu and the cart animations still ran
+at 30 fps on 0050, and with it off they did not. Every frame through the
+canvas pays the copy to the panel, and on 0050 that took 9.3 ms with blue
+light on, every frame of the trace, against 2.7 with it off on 7843ad0:
+the difference between a 10 ms shelf frame and a 17 ms one. 0049 had
+moved that copy's writes to a row of RAM on the theory that byte stores to
+the uncached panel were the cost; they were not, it stayed at 9.3. The
+cost is the grading itself, three table lookups a pixel.
+
+LLVM leaves even a plain fixed-point multiply over the row scalar -- one
+mul and two byte moves a byte, checked in the armv7 disassembly -- so the
+row is graded by a NEON loop in inline asm, as `scale_row` is: sixteen
+bytes loaded, widened, multiplied by the gains, narrowed by eight bits,
+stored. The gain table is now the same 8.8 the game pass carries in its
+column mask, `(v * g) >> 8`, so the canvas, the surround and the picture
+are graded alike, and the loop's bytes are the table's.
+
+Not yet measured on the Flip.
+
+Tests, as armv7 under qemu: the NEON grade matches the scalar reference
+and the gain table at every blue light step, for rows that end mid-chunk;
+it writes nothing past the end. Narrowing by 7 instead of 8 fails it.
+
+Applies on top of 0050, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -643,24 +643,91 @@
+         (a, None) => a,
+         (None, b) => b,
+     }
++}
++
++/// The blue-light gain in 8.8, panel order -- byte 0 is blue -- as the game
++/// pass carries it in its column mask.
++fn gain8(gain: [f32; 3]) -> [u16; 3] {
++    [gain[2], gain[1], gain[0]].map(|g| (g * 256.0).round().clamp(0.0, 256.0) as u16)
+ }
+ 
+ /// The blue-light gain as a byte table per channel, or `None` at step 0.
+ ///
+ /// The canvas and the panel are both in panel order, so the table for byte 0
+-/// is the blue gain rather than the red one.
++/// is the blue gain rather than the red one. In 8.8, the game pass's gain, so
++/// everything graded agrees with the picture and with `grade_row`.
+ fn gain_table(gain: [f32; 3]) -> Option<[[u8; 256]; 3]> {
+     if gain == [1.0, 1.0, 1.0] {
+         return None;
+     }
++    let g8 = gain8(gain);
+     let mut lut = [[0u8; 256]; 3];
+-    for (c, table) in lut.iter_mut().enumerate() {
+-        let g = [gain[2], gain[1], gain[0]][c];
++    for (table, g) in lut.iter_mut().zip(g8) {
+         for (v, out) in table.iter_mut().enumerate() {
+-            *out = (v as f32 * g).clamp(0.0, 255.0) as u8;
++            *out = ((v as u32 * g as u32) >> 8).min(255) as u8;
+         }
+     }
+     Some(lut)
++}
++
++/// `src` through the gain into `dst`, byte for byte as `gain_table` would:
++/// `(v * g) >> 8`, alpha's g 256. With blue light on, three table lookups a
++/// pixel took the shelf's copy to the panel from 2.7 ms a frame to 9.3, and
++/// LLVM leaves even the plain multiply loop scalar here, so the bulk is a
++/// NEON loop: sixteen bytes widened, multiplied, narrowed by eight bits.
++/// `neon_kernel_tests` drives it against `grade_row_scalar` under qemu.
++#[cfg(target_arch = "arm")]
++fn grade_row(dst: &mut [u8], src: &[u8], g8: [u16; 3]) {
++    let n = dst.len().min(src.len());
++    let chunks = n / 16;
++    if chunks > 0 {
++        let g = [g8[0], g8[1], g8[2], 256, g8[0], g8[1], g8[2], 256];
++        // SAFETY: `chunks` counts whole groups of sixteen inside both slices,
++        // and the loop runs exactly that many times. The gains are at most
++        // 256, so a product is at most 65,280 and fits the 16-bit lanes.
++        unsafe {
++            core::arch::asm!(
++                ".fpu neon",
++                "vld1.16 {{d20, d21}}, [{g}]",
++                "2:",
++                "vld1.8 {{d0, d1}}, [{s}]!",
++                "vmovl.u8 q8, d0",
++                "vmovl.u8 q9, d1",
++                "vmul.i16 q8, q8, q10",
++                "vmul.i16 q9, q9, q10",
++                "vshrn.i16 d0, q8, #8",
++                "vshrn.i16 d1, q9, #8",
++                "vst1.8 {{d0, d1}}, [{d}]!",
++                "subs {n}, {n}, #1",
++                "bne 2b",
++                g = in(reg) g.as_ptr(),
++                s = inout(reg) src.as_ptr() => _,
++                d = inout(reg) dst.as_mut_ptr() => _,
++                n = inout(reg) chunks => _,
++                out("q0") _,
++                out("q8") _,
++                out("q9") _,
++                out("q10") _,
++                options(nostack),
++            );
++        }
++    }
++    let done = chunks * 16;
++    grade_row_scalar(&mut dst[done..n], &src[done..n], g8);
++}
++
++#[cfg(not(target_arch = "arm"))]
++fn grade_row(dst: &mut [u8], src: &[u8], g8: [u16; 3]) {
++    grade_row_scalar(dst, src, g8)
++}
++
++/// The reference `grade_row` is tested against, its tail, and the fallback
++/// off the device. Starts on a pixel boundary: byte `i`'s channel is `i % 4`.
++fn grade_row_scalar(dst: &mut [u8], src: &[u8], g8: [u16; 3]) {
++    for (i, (d, s)) in dst.iter_mut().zip(src).enumerate() {
++        let g = g8.get(i % 4).copied().unwrap_or(256);
++        *d = ((*s as u32 * g as u32) >> 8) as u8;
++    }
+ }
+ 
+ /// How the panel is mounted relative to the framebuffer's scan order.
+@@ -1518,8 +1585,7 @@
+     pub fn set_blue_light(&mut self, step: u8) {
+         self.gain = blue_light_gain(step);
+         // Panel byte order: byte 0 is blue. 8.8, to ride in the column mask.
+-        self.game.gain8 = [self.gain[2], self.gain[1], self.gain[0]]
+-            .map(|g| (g * 256.0).round().clamp(0.0, 65535.0) as u16);
++        self.game.gain8 = gain8(self.gain);
+     }
+ 
+     pub fn set_screen_effect(&mut self, effect: ScreenEffect) {
+@@ -2277,6 +2343,11 @@
+                 (false, true) => Vec::new(),
+                 _ => vec![0u8; span * 4],
+             };
++            let mut flipped = match (half, identity) {
++                (true, false) => vec![0u8; span * 4],
++                _ => Vec::new(),
++            };
++            let g8 = gain8(self.gain);
+             for py in y_start..y_end {
+                 let si = ((py - y) as usize * cw as usize + (x_start - x) as usize) * 4;
+                 let Some(src) = self.canvas.px.get(si..si + span * 4) else {
+@@ -2310,31 +2381,21 @@
+                         dst.copy_from_slice(line);
+                     }
+                     (false, true) => dst.copy_from_slice(src),
+-                    // The same two walks, with the gain folded in, graded into
+-                    // a row of RAM and that row copied to the panel whole.
+-                    // Grading straight into the panel wrote it a byte at a
+-                    // time, and the panel is uncached: with blue light on the
+-                    // shelf's copy took 9.4 ms a frame against 2.7 without.
++                    // The same two walks with the gain folded in: graded into
++                    // a row of RAM by `grade_row`, reversed into a second for
++                    // the upside-down panel, and copied to the panel whole.
+                     (_, false) => {
+                         let line = &mut graded[..span * 4];
+-                        let grade = |d: &mut [u8], s: &[u8]| {
+-                            d.copy_from_slice(&[
+-                                lut[0][s[0] as usize],
+-                                lut[1][s[1] as usize],
+-                                lut[2][s[2] as usize],
+-                                s[3],
+-                            ]);
+-                        };
++                        grade_row(line, src, g8);
+                         if half {
+-                            for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
+-                                grade(d, s);
++                            let back = &mut flipped[..span * 4];
++                            for (d, s) in back.chunks_exact_mut(4).zip(line.chunks_exact(4).rev()) {
++                                d.copy_from_slice(s);
+                             }
++                            dst.copy_from_slice(back);
+                         } else {
+-                            for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+-                                grade(d, s);
+-                            }
++                            dst.copy_from_slice(line);
+                         }
+-                        dst.copy_from_slice(line);
+                     }
+                 }
+             }
+@@ -2572,8 +2633,46 @@
+ 
+ #[cfg(test)]
+ mod neon_kernel_tests {
+-    use super::{scale_row, scale_row_scalar};
++    use super::{gain8, gain_table, grade_row, grade_row_scalar, scale_row, scale_row_scalar};
++    use crate::grade::{blue_light_gain, BLUE_LIGHT_MAX};
++
++    /// The blue-light grade, NEON against the scalar reference and both
++    /// against the gain table the rest of the backend grades with, at every
++    /// step, for rows that end mid-chunk too.
++    #[test]
++    fn the_grade_matches_the_scalar_reference_and_the_table() {
++        let src: Vec<u8> = (0..752u32 * 4)
++            .map(|i| ((i * 131 + 7) % 256) as u8)
++            .collect();
++        for step in 1..=BLUE_LIGHT_MAX {
++            let gain = blue_light_gain(step);
++            let (g8, lut) = (gain8(gain), gain_table(gain).expect("a gain"));
++            for n in [src.len(), 16, 20, 4, 1028, 3000] {
++                let mut a = vec![0u8; n];
++                let mut b = vec![0u8; n];
++                grade_row(&mut a, &src[..n], g8);
++                grade_row_scalar(&mut b, &src[..n], g8);
++                assert_eq!(a, b, "neon and scalar differ at step {step}, {n} bytes");
++                for (i, (&v, &s)) in a.iter().zip(&src[..n]).enumerate() {
++                    let want = if i % 4 == 3 {
++                        s
++                    } else {
++                        lut[i % 4][s as usize]
++                    };
++                    assert_eq!(v, want, "byte {i} at step {step} is not the table's");
++                }
++            }
++        }
++    }
+ 
++    #[test]
++    fn the_grade_writes_nothing_past_the_end() {
++        let src = vec![200u8; 64];
++        let mut out = vec![7u8; 72];
++        grade_row(&mut out[..40], &src[..40], [128, 200, 256]);
++        assert!(out[40..].iter().all(|&v| v == 7), "wrote past 40 bytes");
++    }
++
+     /// Values that exercise the saturation, the rounding and every lane
+     /// position, including a length that is not a multiple of eight so the
+     /// scalar tail is covered.
