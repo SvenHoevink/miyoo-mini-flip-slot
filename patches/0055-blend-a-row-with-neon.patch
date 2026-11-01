@@ -1,0 +1,336 @@
+blend a row with neon
+
+The cart insert and eject animations still dropped frames on 0054, most of
+the ~95 missed latches a session. The 0053 trace named the draws: the cart
+faces, scaled down from 304x343 to 237x268 and fading, at 2-4 ms each and
+several a frame, against 0.9 ms when the same face sits still. Still, a
+face is mostly copied a row at a time; fading, every pixel goes through
+`blend`, one at a time, three rounded divisions by 255 each.
+
+The blit's per-pixel loops now hand a whole row to `blend_row`, which on the
+Flip is a NEON loop over eight pixels at a time: the channels pulled apart,
+widened, `c * a + under * (255 - a)` per colour, the same rounded division
+by 255 `div255` does, alpha added with saturation as `blend`'s min(255),
+and a pixel opaque enough copied whole. A pixel of alpha 0 needs nothing:
+the sums give the panel's own bytes back then, since div255(v * 255) is v.
+The faded, scaled-down path -- the fading cart -- gathers its row with the
+fade applied first, as the other paths already did, so it can be blended
+as a row too. The profile's skip, copy and blend counts are taken from the
+row instead.
+
+Not yet measured on the Flip.
+
+Tests, as armv7 under qemu: the row blend matches the per-pixel rule byte
+for byte for every source alpha against a spread of colours and panel
+alphas, at both thresholds, in rows that end mid-group; it writes nothing
+past its row; and every existing blit reference test now runs through it.
+Dropping the rounding on one channel fails seven tests, and copying only
+above the threshold rather than at it fails four.
+
+Applies on top of 0054, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -130,6 +130,110 @@
+         dst[i] = div255(src[i] as u32 * a + dst[i] as u32 * ia) as u8;
+     }
+     dst[3] = (a + div255(dst[3] as u32 * ia)).min(255) as u8;
++}
++
++/// `blend` across a row: each `src` pixel over the `dst` one under it, with
++/// a pixel of alpha `enough` or more copied whole and one of alpha 0 left
++/// alone, as the blit's loops did a pixel at a time. Cart faces fading in and
++/// out ran every pixel through `blend` -- 2-4 ms a face, several a frame,
++/// against 0.9 when the face sits still and is copied -- so the bulk is a
++/// NEON loop, eight pixels at a time. `blend_row_tests` drives it against
++/// `blend_row_scalar` under qemu, byte for byte.
++#[cfg(target_arch = "arm")]
++fn blend_row(dst: &mut [u8], src: &[u8], enough: u8) {
++    let n = dst.len().min(src.len()) / 4;
++    let chunks = n / 8;
++    if chunks > 0 {
++        // SAFETY: `chunks` counts whole groups of eight pixels inside both
++        // slices, and the loop runs exactly that many times. Every product
++        // and sum fits sixteen bits: 255 * 255 + 255 * 0 + 128 at most.
++        unsafe {
++            core::arch::asm!(
++                ".fpu neon",
++                "vmov.i16 q14, #128",
++                "vdup.8 d31, {e}",
++                "2:",
++                // Channels apart: d0-d3 the source's, d4-d7 the panel's.
++                "vld4.8 {{d0, d1, d2, d3}}, [{s}]!",
++                "vld4.8 {{d4, d5, d6, d7}}, [{d}]",
++                "vmvn d30, d3",
++                // c * a + under * (255 - a), each colour, and under's alpha
++                // times (255 - a) for the alpha.
++                "vmull.u8 q10, d0, d3",
++                "vmlal.u8 q10, d4, d30",
++                "vmull.u8 q11, d1, d3",
++                "vmlal.u8 q11, d5, d30",
++                "vmull.u8 q12, d2, d3",
++                "vmlal.u8 q12, d6, d30",
++                "vmull.u8 q13, d7, d30",
++                // div255, rounded: x += 128; (x + (x >> 8)) >> 8.
++                "vadd.i16 q10, q10, q14",
++                "vadd.i16 q11, q11, q14",
++                "vadd.i16 q12, q12, q14",
++                "vadd.i16 q13, q13, q14",
++                "vsra.u16 q10, q10, #8",
++                "vsra.u16 q11, q11, #8",
++                "vsra.u16 q12, q12, #8",
++                "vsra.u16 q13, q13, #8",
++                "vshrn.u16 d16, q10, #8",
++                "vshrn.u16 d17, q11, #8",
++                "vshrn.u16 d18, q12, #8",
++                "vshrn.u16 d19, q13, #8",
++                // Alpha: a + that, saturating at 255, as `blend`'s min.
++                "vqadd.u8 d19, d3, d19",
++                // Opaque enough: the source whole. Alpha 0 needs nothing: the
++                // sums above give back the panel's bytes exactly then, as
++                // div255(v * 255) is v.
++                "vcge.u8 d20, d3, d31",
++                "vbit d16, d0, d20",
++                "vbit d17, d1, d20",
++                "vbit d18, d2, d20",
++                "vbit d19, d3, d20",
++                "vst4.8 {{d16, d17, d18, d19}}, [{d}]!",
++                "subs {n}, {n}, #1",
++                "bne 2b",
++                e = in(reg) enough as u32,
++                s = inout(reg) src.as_ptr() => _,
++                d = inout(reg) dst.as_mut_ptr() => _,
++                n = inout(reg) chunks => _,
++                out("q0") _,
++                out("q1") _,
++                out("q2") _,
++                out("q3") _,
++                out("q8") _,
++                out("q9") _,
++                out("q10") _,
++                out("q11") _,
++                out("q12") _,
++                out("q13") _,
++                out("q14") _,
++                out("q15") _,
++                options(nostack),
++            );
++        }
++    }
++    let done = chunks * 8 * 4;
++    blend_row_scalar(&mut dst[done..n * 4], &src[done..n * 4], enough);
++}
++
++#[cfg(not(target_arch = "arm"))]
++fn blend_row(dst: &mut [u8], src: &[u8], enough: u8) {
++    blend_row_scalar(dst, src, enough)
++}
++
++/// The rule `blend_row` is tested against, its tail, and the fallback off
++/// the device: what the blit's per-pixel loops did.
++fn blend_row_scalar(dst: &mut [u8], src: &[u8], enough: u8) {
++    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
++        if s[3] == 0 {
++            continue;
++        }
++        if s[3] >= enough {
++            d.copy_from_slice(s);
++            continue;
++        }
++        blend(d, [s[0], s[1], s[2], s[3]]);
++    }
+ }
+ 
+ #[inline]
+@@ -415,7 +519,7 @@
+ 
+     // Worth the line only when destination rows share source rows.
+     let reuse = h >= tex.h as f32 * uv[3];
+-    if (reuse || plain) && scratch.line.len() != width * 4 {
++    if scratch.line.len() != width * 4 {
+         scratch.line.resize(width * 4, 0);
+     }
+     if reuse {
+@@ -476,16 +580,7 @@
+                 drow.copy_from_slice(srow);
+                 continue;
+             }
+-            for (d, s) in drow.chunks_exact_mut(4).zip(srow.chunks_exact(4)) {
+-                if s[3] == 0 {
+-                    continue;
+-                }
+-                if s[3] >= OPAQUE_ENOUGH {
+-                    d.copy_from_slice(s);
+-                    continue;
+-                }
+-                blend(d, [s[0], s[1], s[2], s[3]]);
+-            }
++            blend_row(drow, srow, OPAQUE_ENOUGH);
+             continue;
+         }
+ 
+@@ -512,17 +607,11 @@
+                 drow.copy_from_slice(&scratch.line);
+                 continue;
+             }
+-            for (d, s) in drow.chunks_exact_mut(4).zip(scratch.line.chunks_exact(4)) {
+-                if s[3] == 0 {
+-                    scratch.tex_skip += 1;
+-                } else if s[3] >= OPAQUE_ENOUGH {
+-                    scratch.tex_copy += 1;
+-                    d.copy_from_slice(s);
+-                } else {
+-                    scratch.tex_blend += 1;
+-                    blend(d, [s[0], s[1], s[2], s[3]]);
+-                }
+-            }
++            let [skip, copy, blended] = count_texels(&scratch.line, OPAQUE_ENOUGH);
++            scratch.tex_skip += skip;
++            scratch.tex_copy += copy;
++            scratch.tex_blend += blended;
++            blend_row(drow, &scratch.line, OPAQUE_ENOUGH);
+             continue;
+         }
+ 
+@@ -530,22 +619,26 @@
+             let Some(drow) = dst.px.get_mut(dstart..dstart + width * 4) else {
+                 continue;
+             };
+-            for (d, &c) in drow.chunks_exact_mut(4).zip(col.iter()) {
++            // Faded or tinted and scaled down: a cart face fading in or out.
++            // Gathered with its alpha faded into the line, then blended as a
++            // row. A texel of alpha 0 fades to 0 and is left alone, one that
++            // fades to 255 is copied, as `blend` does either.
++            for (e, &c) in scratch.line.chunks_exact_mut(4).zip(col.iter()) {
+                 // SAFETY: `c` is a texel index clamped to tex.w - 1 when the
+                 // column table was built, times four, and `trow` is one whole
+                 // source row.
+                 let s = unsafe { &*(trow.as_ptr().add(c as usize) as *const [u8; 4]) };
+-                if s[3] == 0 {
+-                    scratch.tex_skip += 1;
+-                    continue;
+-                }
+-                scratch.tex_blend += 1;
+-                if let Some(t) = &faded {
+-                    blend(d, [s[0], s[1], s[2], t[s[3] as usize]]);
+-                    continue;
+-                }
+-                blend(d, tint(s));
++                let s = match &faded {
++                    Some(t) => [s[0], s[1], s[2], t[s[3] as usize]],
++                    None => tint(s),
++                };
++                e.copy_from_slice(&s);
+             }
++            let [skip, copy, blended] = count_texels(&scratch.line, 255);
++            scratch.tex_skip += skip;
++            scratch.tex_copy += copy;
++            scratch.tex_blend += blended;
++            blend_row(drow, &scratch.line, 255);
+             continue;
+         }
+ 
+@@ -573,19 +666,24 @@
+             drow.copy_from_slice(&scratch.line);
+             continue;
+         }
+-        for (d, s) in drow.chunks_exact_mut(4).zip(scratch.line.chunks_exact(4)) {
+-            // Cart art is mostly rounded corners and padding; skipping the
+-            // blend here is most of the saving on the shelf.
+-            if s[3] == 0 {
+-                continue;
+-            }
+-            if s[3] >= enough {
+-                d.copy_from_slice(s);
+-                continue;
+-            }
+-            blend(d, [s[0], s[1], s[2], s[3]]);
+-        }
++        // Cart art is mostly rounded corners and padding, which the row
++        // blend leaves alone.
++        blend_row(drow, &scratch.line, enough);
++    }
++}
++
++/// The profile's skip, copy and blend counts for a row, which the row blend
++/// no longer counts as it goes.
++fn count_texels(line: &[u8], enough: u8) -> [u32; 3] {
++    let mut n = [0u32; 3];
++    for p in line.chunks_exact(4) {
++        n[match p[3] {
++            0 => 0,
++            a if a >= enough => 1,
++            _ => 2,
++        }] += 1;
+     }
++    n
+ }
+ 
+ /// A textured rect rotated about its own centre, as `Draw::Turned`.
+@@ -1106,3 +1204,65 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod blend_row_tests {
++    use super::{blend_row, blend_row_scalar, OPAQUE_ENOUGH};
++
++    /// Every source alpha against a spread of source and panel colours and
++    /// panel alphas, at both thresholds the blit uses, in rows whose length
++    /// is not a whole number of NEON groups: the row blend has to be the
++    /// per-pixel rule, byte for byte.
++    #[test]
++    fn the_row_blend_is_the_per_pixel_rule_byte_for_byte() {
++        let levels: Vec<u8> = (0..=255u32)
++            .step_by(17)
++            .map(|v| v as u8)
++            .chain([1, 254])
++            .collect();
++        let mut src = Vec::new();
++        let mut under = Vec::new();
++        for a in 0..=255u8 {
++            for (i, &c) in levels.iter().enumerate() {
++                let d = levels[(i * 7 + a as usize) % levels.len()];
++                src.extend_from_slice(&[c, 255 - c, c / 2, a]);
++                under.extend_from_slice(&[
++                    d,
++                    d / 3,
++                    255 - d,
++                    levels[(i + a as usize) % levels.len()],
++                ]);
++            }
++        }
++        for enough in [OPAQUE_ENOUGH, 255] {
++            for pixels in [src.len() / 4, 8, 13, 1, 31] {
++                let n = pixels * 4;
++                let mut a = under[..n].to_vec();
++                let mut b = under[..n].to_vec();
++                blend_row(&mut a, &src[..n], enough);
++                blend_row_scalar(&mut b, &src[..n], enough);
++                if let Some(i) = a.iter().zip(&b).position(|(x, y)| x != y) {
++                    let px = i / 4 * 4;
++                    panic!(
++                        "byte {i}, enough {enough}: src {:?} under {:?} -> neon {:?} scalar {:?}",
++                        &src[px..px + 4],
++                        &under[px..px + 4],
++                        &a[px..px + 4],
++                        &b[px..px + 4]
++                    );
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn the_row_blend_writes_nothing_past_its_row() {
++        let src = vec![100u8; 64 * 4];
++        let mut out = vec![7u8; 72 * 4];
++        blend_row(&mut out[..40 * 4], &src[..40 * 4], 255);
++        assert!(
++            out[40 * 4..].iter().all(|&v| v == 7),
++            "wrote past 40 pixels"
++        );
++    }
++}
