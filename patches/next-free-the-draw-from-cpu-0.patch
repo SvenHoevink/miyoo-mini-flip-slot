@@ -1,0 +1,318 @@
+free the draw from cpu 0
+
+0045 kept the draw to cpu 0 and the emulator to cpu 1. The lag after the
+in-game menu went, but the shelf and the menus got slower: on 0046 the
+shelf drew at 30 fps, 297 missed latches in ten seconds before a game and
+203 after one, against none on 7843ad0 this morning. Its sprites cost what
+they did (6.5 ms a frame then, 6.1-8.4 now; per-pixel blits unchanged),
+but its copy to the panel took 9.8 ms a frame against 2.7. Nothing in that
+path changed between the two builds; the only thing that changed for the
+thread running it is the CPU it was kept to.
+
+Why cpu 0 is slower for it is not measured. On this kind of SoC cpu 0
+commonly takes the interrupts, which would fit; that is a hypothesis.
+
+The draw is free again. The emulator stays on cpu 1, which is what keeps
+it from waking onto the draw's CPU after the menu, and the draw, free,
+moves off whichever CPU the emulator is busy on. The spawned threads that
+0045 unpinned only because the draw was pinned are back as they were;
+`background()` still unpins, for the emulator's rewind worker.
+
+With SLOT_TRACE_LATENCY the pace line also counts the frames the draw
+spent on each CPU, so the next trace shows where it ran when it was fast
+and when it was not.
+
+Tests, native and as armv7 under qemu: a thread pinned to the emulator's
+cpu reads that cpu back. slot (61), slot-power (5) and slot-gfx (47) lib
+tests pass; clippy is clean on slot's lib and binary.
+
+Applies on top of 0046, upstream 91499a9.
+
+diff --git a/crates/slot/src/niceness.rs b/crates/slot/src/niceness.rs
+--- a/crates/slot/src/niceness.rs
++++ b/crates/slot/src/niceness.rs
+@@ -13,14 +13,17 @@
+ /// late without anyone seeing it.
+ pub const BACKGROUND: i32 = 10;
+ 
+-/// The CPU the draw keeps to, and the one the emulator keeps to. Left to
+-/// the scheduler, an emulator paused under the in-game menu woke onto the
+-/// draw's CPU when play resumed -- Linux wakes a thread beside its waker --
+-/// and stayed there for minutes. At -8 it preempted the draw for a whole
+-/// core frame: renders of 16.9 ms against 6.8, catch-up ticks of 9.8 ms,
+-/// 24 missed latches in ten seconds of Donkey Kong Country right after the
+-/// menu and none in the eighty before it.
+-pub const DRAW_CPU: usize = 0;
++/// The CPU the emulator keeps to. Left to the scheduler, an emulator paused
++/// under the in-game menu woke onto the draw's CPU when play resumed --
++/// Linux wakes a thread beside its waker -- and stayed there for minutes.
++/// At -8 it preempted the draw for a whole core frame: renders of 16.9 ms
++/// against 6.8, 24 missed latches in ten seconds of Donkey Kong Country
++/// right after the menu and none in the eighty before it.
++///
++/// The draw is not pinned. Kept to cpu 0, the shelf's copy to the panel
++/// took 9.8 ms a frame against 2.7 free and the shelf fell to 30 fps,
++/// though nothing in that path had changed; free, it moves off whichever
++/// CPU the emulator is busy on.
+ pub const EMU_CPU: usize = 1;
+ 
+ /// Set the calling thread's nice value. Best effort: a failure leaves the
+@@ -41,9 +44,8 @@
+ }
+ 
+ /// Keep the calling thread to `cpu`, on a machine with more than one. A
+-/// thread inherits its creator's CPUs as it does its nice value, so anything
+-/// a pinned thread spawns that is not the draw or the emulator says
+-/// `unpin` -- `background` does.
++/// thread inherits its creator's CPUs as it does its nice value, so work a
++/// pinned thread spawns says `unpin` -- `background` does.
+ pub fn pin(cpu: usize) {
+     let n = cpus();
+     if n > 1 {
+@@ -83,6 +85,16 @@
+     let _ = cpus;
+ }
+ 
++/// The CPU the calling thread is on right now, for the pace trace.
++pub fn cpu() -> Option<usize> {
++    // SAFETY: sched_getcpu takes no arguments.
++    #[cfg(target_os = "linux")]
++    let cpu = unsafe { libc::sched_getcpu() };
++    #[cfg(not(target_os = "linux"))]
++    let cpu = -1;
++    usize::try_from(cpu).ok()
++}
++
+ /// The calling thread's time on a CPU and its time waiting in a run queue
+ /// for one, in ns, from `/proc/thread-self/schedstat`. What is left of a
+ /// span after both was spent blocked or asleep -- which tells a long present
+@@ -178,6 +190,20 @@
+     }
+ 
+     #[test]
++    fn a_pinned_thread_reads_back_its_cpu() {
++        if cpus() < 2 {
++            return;
++        }
++        let on = std::thread::spawn(|| {
++            pin(EMU_CPU);
++            cpu()
++        })
++        .join()
++        .unwrap();
++        assert_eq!(on, Some(EMU_CPU));
++    }
++
++    #[test]
+     fn preemption_is_counted() {
+         assert!(preempted().is_some(), "no nonvoluntary_ctxt_switches line");
+     }
+diff --git a/crates/slot/src/device_app.rs b/crates/slot/src/device_app.rs
+--- a/crates/slot/src/device_app.rs
++++ b/crates/slot/src/device_app.rs
+@@ -115,10 +115,9 @@
+         .name("slot-audio-open".into())
+         .spawn(slot::audio::opened_sink);
+     // After those two, so neither inherits it. Everything this thread spawns
+-    // from here on either sets its own priority or is fine at the draw's, and
+-    // unpins itself: only the draw keeps to its CPU.
++    // from here on either sets its own priority or is fine at the draw's.
++    // Not pinned: see `niceness::EMU_CPU`.
+     slot::niceness::set(slot::niceness::RENDER);
+-    slot::niceness::pin(slot::niceness::DRAW_CPU);
+     let root = std::env::var_os("SLOT_ROOT")
+         .map(PathBuf::from)
+         .unwrap_or_else(|| PathBuf::from(CARD));
+@@ -199,7 +198,6 @@
+     let _ = std::thread::Builder::new()
+         .name("slot-bootlogo".into())
+         .spawn(move || {
+-            slot::niceness::unpin();
+             slot::bootlogo::refresh(&card);
+             slot::root::sweep_temps(&card);
+         });
+@@ -236,6 +234,7 @@
+     let mut pacer = Pacer::new();
+     let (mut frames, mut missed, mut early) = (0u32, 0u32, 0u32);
+     let mut preempted_at = slot::niceness::preempted();
++    let mut on_cpu = [0u32; 2];
+     let mut last_step: Option<Instant> = None;
+     loop {
+         pacer.wait();
+@@ -340,6 +339,9 @@
+         // CPU. That showed up as a ring sitting permanently below its target.
+         let dropped = pacer.swapped(work, swap_took > Duration::from_millis(1));
+         if slot::latency::tracing() {
++            if let Some(cpu) = slot::niceness::cpu() {
++                on_cpu[cpu.min(1)] += 1;
++            }
+             frames += 1;
+             missed += u32::from(dropped);
+             early += u32::from(swap_took > pacer.period / 2);
+@@ -352,11 +354,13 @@
+                     .map_or(0, |(n, a)| n.saturating_sub(a));
+                 preempted_at = now;
+                 eprintln!(
+-                    "slot: pace: 600 frames, {missed} missed a latch, {early} drawn early, work {:.1} ms, period {:.2} ms, interval <14 {} <20 {} <27 {} <40 {} 40+ {}, draw preempted {preempted}",
++                    "slot: pace: 600 frames, {missed} missed a latch, {early} drawn early, work {:.1} ms, period {:.2} ms, interval <14 {} <20 {} <27 {} <40 {} 40+ {}, draw preempted {preempted}, draw on cpu0 {} cpu1 {}",
+                     pacer.work.as_secs_f64() * 1e3,
+                     pacer.period.as_secs_f64() * 1e3,
+                     pacer.seen[0], pacer.seen[1], pacer.seen[2], pacer.seen[3], pacer.seen[4],
++                    on_cpu[0], on_cpu[1],
+                 );
++                on_cpu = [0; 2];
+                 pacer.seen = [0; SEEN_BUCKETS];
+                 (frames, missed, early) = (0, 0, 0);
+             }
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -263,7 +263,6 @@
+         let spawned = std::thread::Builder::new()
+             .name("slot-ui-faces".into())
+             .spawn(move || {
+-                crate::niceness::unpin();
+                 let _ = tx.send(UiFaces::build());
+             });
+         match spawned {
+@@ -707,7 +706,6 @@
+         let spawned = std::thread::Builder::new()
+             .name("slot-ground".into())
+             .spawn(move || {
+-                crate::niceness::unpin();
+                 let _ = tx.send((slot_ui::default_background(), slot_ui::blur_background()));
+             });
+         if spawned.is_err() {
+@@ -772,7 +770,6 @@
+         std::thread::Builder::new()
+             .name("slot-label-check".into())
+             .spawn(move || {
+-                crate::niceness::unpin();
+                 let _ = tx.send(label_cache::stale(&root, carts.iter()));
+             })
+             .ok()
+diff --git a/crates/slot/src/session.rs b/crates/slot/src/session.rs
+--- a/crates/slot/src/session.rs
++++ b/crates/slot/src/session.rs
+@@ -532,7 +532,6 @@
+         let join = std::thread::Builder::new()
+             .name("slot-open".into())
+             .spawn(move || {
+-                crate::niceness::unpin();
+                 let resume = match clean {
+                     true => Ok(None),
+                     false => persist::read_resume(&root, platform, core, &stem),
+diff --git a/crates/slot/src/face_builder.rs b/crates/slot/src/face_builder.rs
+--- a/crates/slot/src/face_builder.rs
++++ b/crates/slot/src/face_builder.rs
+@@ -23,7 +23,6 @@
+         let spawned = thread::Builder::new()
+             .name("slot-faces".into())
+             .spawn(move || {
+-                crate::niceness::unpin();
+                 while let Ok(mut cart) = inbox.recv() {
+                     while let Ok(newer) = inbox.try_recv() {
+                         cart = newer;
+diff --git a/crates/slot/src/label_cache.rs b/crates/slot/src/label_cache.rs
+--- a/crates/slot/src/label_cache.rs
++++ b/crates/slot/src/label_cache.rs
+@@ -97,15 +97,12 @@
+             );
+             let spawned = thread::Builder::new()
+                 .name(format!("slot-labels-{n}"))
+-                .spawn(move || {
+-                    crate::niceness::unpin();
+-                    loop {
+-                        let Some(cart) = carts.get(next.fetch_add(1, Ordering::Relaxed)) else {
+-                            return;
+-                        };
+-                        let _ = label_art(&root, cart);
+-                        done.fetch_add(1, Ordering::Release);
+-                    }
++                .spawn(move || loop {
++                    let Some(cart) = carts.get(next.fetch_add(1, Ordering::Relaxed)) else {
++                        return;
++                    };
++                    let _ = label_art(&root, cart);
++                    done.fetch_add(1, Ordering::Release);
+                 });
+             if let Err(e) = spawned {
+                 eprintln!("slot: label cache: rebuild thread failed to start: {e}");
+diff --git a/crates/slot/src/input/device.rs b/crates/slot/src/input/device.rs
+--- a/crates/slot/src/input/device.rs
++++ b/crates/slot/src/input/device.rs
+@@ -72,10 +72,7 @@
+                     .contains("hall");
+             let spawned = std::thread::Builder::new()
+                 .name(format!("slot-input-{name}"))
+-                .spawn(move || {
+-                    crate::niceness::unpin();
+-                    read_node(&node, &queue, &steers, trace.as_deref(), hall_node)
+-                });
++                .spawn(move || read_node(&node, &queue, &steers, trace.as_deref(), hall_node));
+             if let Err(e) = spawned {
+                 eprintln!("slot: input {name}: {e}");
+             }
+diff --git a/crates/slot/src/link_start.rs b/crates/slot/src/link_start.rs
+--- a/crates/slot/src/link_start.rs
++++ b/crates/slot/src/link_start.rs
+@@ -138,7 +138,6 @@
+         let cancel = Cancel::new();
+         let flag = cancel.clone();
+         std::thread::spawn(move || {
+-            crate::niceness::unpin();
+             let _ = tx.send(LinkProgress::At(LinkStep::Radio));
+             if let Err(e) = radio_up(role, &flag) {
+                 let fail = match &e {
+diff --git a/crates/slot/src/link_radio.rs b/crates/slot/src/link_radio.rs
+--- a/crates/slot/src/link_radio.rs
++++ b/crates/slot/src/link_radio.rs
+@@ -70,7 +70,6 @@
+     Q.get_or_init(|| {
+         let (tx, rx) = channel::<RadioJob>();
+         std::thread::spawn(move || {
+-            crate::niceness::unpin();
+             for job in rx {
+                 match job {
+                     RadioJob::Warm => WARM.store(run("warm"), Ordering::SeqCst),
+diff --git a/crates/slot/src/link_net.rs b/crates/slot/src/link_net.rs
+--- a/crates/slot/src/link_net.rs
++++ b/crates/slot/src/link_net.rs
+@@ -127,7 +127,6 @@
+         let reader_ended = ended.clone();
+ 
+         std::thread::spawn(move || {
+-            crate::niceness::unpin();
+             let mut header = [0u8; 2];
+             let mut control = false;
+             loop {
+@@ -158,7 +157,6 @@
+         });
+ 
+         std::thread::spawn(move || {
+-            crate::niceness::unpin();
+             for out in wrx.iter() {
+                 match out {
+                     Out::Packet(buf) => {
+diff --git a/crates/slot-power/src/device.rs b/crates/slot-power/src/device.rs
+--- a/crates/slot-power/src/device.rs
++++ b/crates/slot-power/src/device.rs
+@@ -649,17 +649,9 @@
+         let spawned = std::thread::Builder::new()
+             .name("slot-battery".into())
+             .spawn(move || {
+-                // SAFETY: setpriority and sched_setaffinity on the calling
+-                // thread, 0 meaning "me". The draw that spawns this keeps to
+-                // one CPU, and the tool's process would inherit that too.
++                // SAFETY: setpriority on the calling thread, 0 meaning "me".
+                 unsafe {
+                     libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
+-                    let mut all: libc::cpu_set_t = std::mem::zeroed();
+-                    let cpus = libc::sysconf(libc::_SC_NPROCESSORS_CONF).max(1) as usize;
+-                    for cpu in 0..cpus {
+-                        libc::CPU_SET(cpu, &mut all);
+-                    }
+-                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all);
+                 }
+                 if let Some(b) = read() {
+                     *AXP.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(b);
