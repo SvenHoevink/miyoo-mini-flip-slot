@@ -1,0 +1,205 @@
+trace what a canvas frame spends
+
+Two questions the 0052 trace could not answer. The shelf sitting still was
+never taken as unchanged, so 0052's skip never ran, and nothing said what
+moved. And the cart animations ran 12-24 ms of draw_list a frame, which
+the one-in-sixty sprite profile never caught.
+
+Measurement only, behind the same profiling switch as the rest of the
+soft: lines:
+
+- at most once a second, when a canvas frame with no game is not a repeat
+  of the last: a texture change, which of gain, shake, slide or screen
+  moved and from what to what, the list's length changing, or the first
+  item that differs, before and after;
+- for a canvas frame whose draw_list ran over 12 ms, its three slowest
+  draws: kind, size drawn, texture size, ms.
+
+Test: the slowest draws come out slowest first, a full-canvas texture
+ahead of a label.
+
+Applies on top of 0052, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -296,6 +296,9 @@
+ }
+ 
+ /// The rows under an overlay's rect, as composed for a still game.
++/// One draw's micros, kind, size drawn and texture size, for the trace.
++type SlowDraw = (u64, &'static str, (u32, u32), (u32, u32));
++
+ /// A canvas frame's inputs, for telling a repeat of it.
+ struct Unchanged {
+     items: Vec<Draw>,
+@@ -1065,6 +1068,12 @@
+     skipping: bool,
+     /// Bumped whenever any texture's pixels may have changed.
+     tex_gen: u64,
++    /// For the trace: the frame's three slowest draws -- micros, kind, the
++    /// size drawn and the texture's -- and when a changed canvas frame was
++    /// last described, in frames.
++    slowest: [SlowDraw; 3],
++    frames: u64,
++    change_said_at: u64,
+     /// Multiplies every sprite's colour, RGB. The gain, while an overlay is
+     /// composed over a graded surround with blue light on: a gain is a
+     /// per-channel scale, so blending warmed sprites over warmed pixels is the
+@@ -1125,6 +1134,9 @@
+             unchanged_left: 0,
+             skipping: false,
+             tex_gen: 0,
++            slowest: [(0, "", (0, 0), (0, 0)); 3],
++            frames: 0,
++            change_said_at: 0,
+             tint: [1.0; 3],
+             stage_us: [0; 3],
+             textures: Vec::new(),
+@@ -1208,11 +1220,30 @@
+     pub fn draw_list(&mut self, items: &[Draw]) {
+         let t = std::time::Instant::now();
+         self.stage_us[2] = 0;
++        self.frames += 1;
+         self.skipping = self.repeats(items);
++        self.slowest = [(0, "", (0, 0), (0, 0)); 3];
+         if !self.skipping {
+             self.draw_list_inner(items);
+         }
+         self.stage_us[0] = t.elapsed().as_micros() as u64;
++        // What a heavy canvas frame went on: the cart animations ran 12-24 ms
++        // of draw_list, and the one-in-sixty profile never caught which draw.
++        if self.profiling && self.stage_us[0] > 12_000 {
++            let said: Vec<String> = self
++                .slowest
++                .iter()
++                .filter(|d| d.0 > 0)
++                .map(|(us, kind, (dw, dh), (sw, sh))| {
++                    format!("{kind} {dw}x{dh} from {sw}x{sh} {:.1}", *us as f64 / 1e3)
++                })
++                .collect();
++            eprintln!(
++                "slot: soft: heavy list {:.1} ms, slowest: {}",
++                self.stage_us[0] as f64 / 1e3,
++                said.join(", ")
++            );
++        }
+     }
+ 
+     /// Whether `items` is the frame every page already holds: the same list,
+@@ -1238,6 +1269,7 @@
+             .as_ref()
+             .is_some_and(|u| u.tex_gen == self.tex_gen && u.params == params && u.items == items);
+         if !same {
++            self.say_change(items, params);
+             self.unchanged = Some(Unchanged {
+                 items: items.to_vec(),
+                 tex_gen: self.tex_gen,
+@@ -1573,6 +1605,19 @@
+                 let us = at.elapsed().as_micros() as u64;
+                 self.profile.kind_us[kind] += us;
+                 self.profile.kind_n[kind] += 1;
++                let drawn = match *item {
++                    Draw::Rect { w, h, .. }
++                    | Draw::Tex { w, h, .. }
++                    | Draw::Part { w, h, .. }
++                    | Draw::Turned { w, h, .. } => (w.round() as u32, h.round() as u32),
++                    _ => (0, 0),
++                };
++                let from = shape.map_or((0, 0), |(_, _, sw, sh)| (sw, sh));
++                let name = ["rect", "tex", "turned"][kind];
++                if let Some(at) = self.slowest.iter().position(|d| us > d.0) {
++                    self.slowest.copy_within(at..2, at + 1);
++                    self.slowest[at] = (us, name, drawn, from);
++                }
+                 if let (Some((dw, dh, sw, sh)), Some((id, a))) = (shape, who) {
+                     let at = self.profile.tex_seen.min(7);
+                     self.profile.tex_shape[at] = (dw, dh, sw, sh, us);
+@@ -1589,6 +1634,43 @@
+         }
+     }
+ 
++    /// For the trace, at most once a second: why a canvas frame with no game
++    /// was not a repeat of the last one. The shelf sitting still was never
++    /// taken as unchanged on the Flip, and nothing said what moved.
++    fn say_change(&mut self, items: &[Draw], params: [u32; 6]) {
++        let Some(u) = &self.unchanged else {
++            return;
++        };
++        if !self.profiling || self.frames - self.change_said_at < 60 {
++            return;
++        }
++        self.change_said_at = self.frames;
++        const PARAM: [&str; 6] = ["gain b", "gain g", "gain r", "shake", "slide", "screen"];
++        let what = if u.tex_gen != self.tex_gen {
++            format!("{} texture change(s)", self.tex_gen - u.tex_gen)
++        } else if let Some(i) = (0..6).find(|&i| u.params[i] != params[i]) {
++            format!(
++                "{} {} -> {}",
++                PARAM[i],
++                f32::from_bits(u.params[i]),
++                f32::from_bits(params[i])
++            )
++        } else if u.items.len() != items.len() {
++            format!("{} items -> {}", u.items.len(), items.len())
++        } else {
++            match u.items.iter().zip(items).position(|(a, b)| a != b) {
++                Some(i) => format!(
++                    "item {i} of {}: {:?} -> {:?}",
++                    items.len(),
++                    u.items[i],
++                    items[i]
++                ),
++                None => "nothing".to_string(),
++            }
++        };
++        eprintln!("slot: soft: canvas frame changed: {what}");
++    }
++
+     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
+         self.tex_gen += 1;
+         let tex = Tex {
+@@ -3987,6 +4069,43 @@
+         std::mem::take(&mut r.panel)
+     }
+ 
++    /// The heavy-frame trace names the frame's slowest draws, slowest first:
++    /// a full-canvas texture before a small label.
++    #[test]
++    fn the_trace_keeps_the_slowest_draws_slowest_first() {
++        let mut r = Rig::new(Mount::Half);
++        r.c.profiling = true;
++        let (pw, ph) = (out_w(), out_h());
++        let wall =
++            r.c.create_texture(pw, ph, &vec![120u8; (pw * ph * 4) as usize]);
++        let items = vec![
++            Draw::Tex {
++                x: 0.0,
++                y: 0.0,
++                w: pw as f32,
++                h: ph as f32,
++                tex: wall,
++                alpha: 0.5,
++            },
++            Draw::Tex {
++                x: 10.0,
++                y: 10.0,
++                w: 60.0,
++                h: 20.0,
++                tex: r.text,
++                alpha: 1.0,
++            },
++        ];
++        r.present(&items);
++        let s = r.c.slowest;
++        assert_eq!(s[0].1, "tex");
++        assert_eq!(s[0].2, (pw, ph), "the wall was not the slowest draw");
++        assert!(
++            s[0].0 >= s[1].0 && s[1].0 >= s[2].0,
++            "not slowest first: {s:?}"
++        );
++    }
++
+     /// The menu's first frame on a fresh compositor, composed from scratch:
+     /// nothing kept, the scrim blended.
+     fn composed_once(mount: Mount, blue: u8, seed: u32, row: u32) -> Vec<u8> {
