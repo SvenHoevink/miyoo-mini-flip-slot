@@ -1,0 +1,445 @@
+keep blue light off the slow paths
+
+The shelf, the menus and the cart animations were still at 30 fps on 0048,
+and on either cpu: the draw ran on cpu 1 for 540 of the shelf's 600 frames
+and missed 369 of them. The card had blue light on at step 8, where it was
+off this morning, and blue light is what changed the costs:
+
+- the shelf goes out through the graded copy, which wrote the panel a byte
+  at a time: 9.4 ms a frame against 2.7 for the straight copy. The panel is
+  uncached memory, so each byte was its own write;
+- everything drawn over a game is tinted by the gain, and a tinted sprite
+  multiplied every texel by it in floats: the in-game menu's labels and its
+  footer at 92-119 ns a pixel against 20-28 untinted, 7.9 ms of sprites in a
+  menu frame.
+
+The graded copy now grades a row into RAM and copies the row to the panel
+whole, and so do the two mirrored straight copies, the shelf's and the
+overlay's, which reversed four bytes at a time into the panel. A texture
+drawn tinted keeps a copy of itself with the tint's colour already applied,
+built once per texture and tint -- once a blue light step, in practice --
+and the blit takes each texel's colour from it and its alpha from the
+per-draw table; `modulate` treats the channels apart, so the bytes are the
+same.
+
+The device costs above are from the 0048 trace. On the host neither change
+shows -- its panel in the tests is RAM and its floats are cheap -- so what
+they buy on the Flip is not yet measured.
+
+Tests: a pre-tinted blit matches tinting every texel at 1:1, scaled up and
+down, clipped, faded and not, under three tints; the graded copy out is
+the canvas through the gain table, mirrored and not. Swapping two channels
+in the pre-tint fails three tests; leaving the copy ungraded fails two.
+
+Applies on top of 0048, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -351,7 +351,21 @@
+ /// The whole texture, as `Draw::Tex` samples it.
+ pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+ 
+-/// `blit`, sampling only the `uv` window of the texture -- `Draw::Part`, which
++/// `tex` with its colour channels tinted by `rgb` as `modulate` would, and
++/// its alpha untouched: what `blit_part_tinted` draws from instead of
++/// multiplying every texel by the tint again. Blue light tints everything
++/// drawn over a game, and the in-game menu's labels went 20 to 100 ns a
++/// pixel on those multiplies, 7.9 ms of a menu frame.
++pub fn tinted(tex: &Image, rgb: [f32; 3]) -> Image {
++    let mut out = Image::new(tex.w, tex.h);
++    for (o, t) in out.px.chunks_exact_mut(4).zip(tex.px.chunks_exact(4)) {
++        let m = modulate([t[0], t[1], t[2], t[3]], [rgb[0], rgb[1], rgb[2], 1.0]);
++        o.copy_from_slice(&[m[0], m[1], m[2], t[3]]);
++    }
++    out
++}
++
++/// `blit_part`, sampling only the `uv` window of the texture -- `Draw::Part`, which
+ /// the shelf uses to show the middle of a texture wider than the canvas.
+ #[allow(clippy::too_many_arguments)]
+ pub fn blit_part(
+@@ -365,6 +379,25 @@
+     uv: [f32; 4],
+     scratch: &mut Scratch,
+ ) {
++    blit_part_tinted(dst, tex, None, x, y, w, h, colour, uv, scratch);
++}
++
++/// `blit_part` with `pre`, `tinted(tex, colour's rgb)`, standing in for the
++/// per-texel tint: each texel is `pre`'s colour and `modulate`'s alpha, the
++/// bytes `modulate` makes, since it treats the channels apart.
++#[allow(clippy::too_many_arguments)]
++pub fn blit_part_tinted(
++    dst: &mut Image,
++    tex: &Image,
++    pre: Option<&Image>,
++    x: f32,
++    y: f32,
++    w: f32,
++    h: f32,
++    colour: [f32; 4],
++    uv: [f32; 4],
++    scratch: &mut Scratch,
++) {
+     let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
+         return;
+     };
+@@ -416,6 +449,8 @@
+     let mut opaque = false;
+     // One table per draw rather than four float multiplies per pixel.
+     let faded = (!plain && white(colour)).then(|| alpha_table(colour));
++    let pre = pre.filter(|p| (p.w, p.h) == (tex.w, tex.h) && !white(colour));
++    let pre_alpha = pre.map(|_| alpha_table(colour));
+     // Near-opaque counts as opaque only for an untinted draw. With a colour
+     // the row has been modulated, and the gather path still blends such
+     // pixels, so taking the shortcut here as well would make one path
+@@ -435,6 +470,16 @@
+         let Some(trow) = tex.px.get(src_row..src_row + row_bytes) else {
+             continue;
+         };
++        let prow = pre.and_then(|p| p.px.get(src_row..src_row + row_bytes));
++        // `modulate(*s, colour)` for the texel at `c`, from `pre` when there
++        // is one.
++        let tint = |c: u32, s: &[u8; 4]| match (prow, &pre_alpha) {
++            (Some(p), Some(t)) => {
++                let c = c as usize;
++                [p[c], p[c + 1], p[c + 2], t[s[3] as usize]]
++            }
++            _ => modulate(*s, colour),
++        };
+ 
+         if straight {
+             let from = col[0] as usize;
+@@ -518,7 +563,7 @@
+                     blend(d, [s[0], s[1], s[2], t[s[3] as usize]]);
+                     continue;
+                 }
+-                blend(d, modulate(*s, colour));
++                blend(d, tint(c, s));
+             }
+             continue;
+         }
+@@ -530,7 +575,7 @@
+                 let s = match (plain, &faded) {
+                     (true, _) => *s,
+                     (false, Some(t)) => [s[0], s[1], s[2], t[s[3] as usize]],
+-                    (false, None) => modulate(*s, colour),
++                    (false, None) => tint(c, s),
+                 };
+                 e.copy_from_slice(&s);
+             }
+@@ -879,6 +924,50 @@
+         }
+     }
+ 
++    /// Blue light tints every sprite over a game. Drawing from the pre-tinted
++    /// copy has to put down exactly what tinting each texel does, at every
++    /// scale and clip, faded or not, and whatever alpha the texels carry.
++    #[test]
++    fn a_pre_tinted_blit_matches_tinting_every_texel() {
++        let tex = texture(13, 7);
++        let rects = [
++            (0.0, 0.0, 13.0, 7.0),
++            (3.0, 2.0, 13.0, 7.0),
++            (-4.0, -2.0, 13.0, 7.0),
++            (0.0, 0.0, 39.0, 21.0),
++            (2.5, 1.5, 40.0, 30.0),
++            (0.0, 0.0, 6.0, 3.0),
++            (3.0, 2.0, 7.5, 3.5),
++            (0.3, 0.7, 48.0, 36.0),
++        ];
++        let tints = [[0.93, 0.81, 0.62], [0.5, 0.75, 0.25], [1.0, 0.9, 0.7]];
++        let mut scratch = Scratch::default();
++        for (x, y, w, h) in rects {
++            for rgb in tints {
++                let pre = super::tinted(&tex, rgb);
++                for alpha in [1.0, 0.999, 0.6, 0.1] {
++                    let colour = [rgb[0], rgb[1], rgb[2], alpha];
++                    let mut want = canvas(48, 36);
++                    let mut got = canvas(48, 36);
++                    super::blit(&mut want, &tex, x, y, w, h, colour, &mut scratch);
++                    super::blit_part_tinted(
++                        &mut got,
++                        &tex,
++                        Some(&pre),
++                        x,
++                        y,
++                        w,
++                        h,
++                        colour,
++                        super::WHOLE,
++                        &mut scratch,
++                    );
++                    assert_eq!(got.px, want.px, "rect {:?} colour {colour:?}", (x, y, w, h));
++                }
++            }
++        }
++    }
++
+     /// The wallpaper's case: a fully opaque texture drawn at 1:1, which has to
+     /// take the straight path -- the whole saving -- and agree with the
+     /// reference while doing it, whole and clipped.
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -67,6 +67,10 @@
+ 
+ struct Tex {
+     img: Image,
++    /// `img` with the last tint it was drawn with already applied, and that
++    /// tint, storage order: see `raster::tinted`. Rebuilt when the tint or the
++    /// texture changes, which for blue light is when the step moves.
++    tinted: Option<([u32; 3], Image)>,
+ }
+ 
+ /// Where the game pass writes: the canvas, or the panel directly.
+@@ -608,6 +612,20 @@
+ /// The canvas rect a list of sprites can touch, as `[x0, y0, x1)` bounds, a
+ /// pixel wider all round for rounding. A turned sprite is bounded by its
+ /// diagonal, whichever way it faces.
++/// Build the texture's pre-tinted copy for `colour`'s rgb if the tint
++/// changed, and hand it back -- None for an untinted draw, which the blit
++/// never tints.
++fn tinted_for(t: &mut Tex, colour: [f32; 4]) -> (&Image, Option<&Image>) {
++    let rgb = [colour[0], colour[1], colour[2]];
++    let tinted = rgb != [1.0; 3];
++    let key = rgb.map(f32::to_bits);
++    if tinted && t.tinted.as_ref().is_none_or(|(k, _)| *k != key) {
++        t.tinted = Some((key, raster::tinted(&t.img, rgb)));
++    }
++    let pre = t.tinted.as_ref().filter(|_| tinted).map(|(_, img)| img);
++    (&t.img, pre)
++}
++
+ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
+     let mut b: Option<(f32, f32, f32, f32)> = None;
+     for item in items {
+@@ -1279,7 +1297,7 @@
+ 
+     fn put_image(&mut self, id: TexId, img: Image) {
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+-            *slot = Some(Tex { img });
++            *slot = Some(Tex { img, tinted: None });
+         }
+     }
+ 
+@@ -1372,15 +1390,20 @@
+                     tex,
+                     alpha,
+                 } => {
+-                    if let Some(t) = self.textures.get(tex.raw()).and_then(|t| t.as_ref()) {
+-                        raster::blit(
++                    let colour =
++                        raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]);
++                    if let Some(t) = self.textures.get_mut(tex.raw()).and_then(|t| t.as_mut()) {
++                        let (img, pre) = tinted_for(t, colour);
++                        raster::blit_part_tinted(
+                             &mut self.canvas,
+-                            &t.img,
++                            img,
++                            pre,
+                             x,
+                             y,
+                             w,
+                             h,
+-                            raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]),
++                            colour,
++                            raster::WHOLE,
+                             &mut self.scratch,
+                         );
+                     }
+@@ -1394,15 +1417,19 @@
+                     alpha,
+                     uv,
+                 } => {
+-                    if let Some(t) = self.textures.get(tex.raw()).and_then(|t| t.as_ref()) {
+-                        raster::blit_part(
++                    let colour =
++                        raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]);
++                    if let Some(t) = self.textures.get_mut(tex.raw()).and_then(|t| t.as_mut()) {
++                        let (img, pre) = tinted_for(t, colour);
++                        raster::blit_part_tinted(
+                             &mut self.canvas,
+-                            &t.img,
++                            img,
++                            pre,
+                             x,
+                             y,
+                             w,
+                             h,
+-                            raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]),
++                            colour,
+                             uv,
+                             &mut self.scratch,
+                         );
+@@ -1456,6 +1483,7 @@
+     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
+         let tex = Tex {
+             img: Image::from_rgba(w, h, rgba),
++            tinted: None,
+         };
+         // An emptied slot is reused before the table grows: `free_texture`
+         // leaves holes, and a shelf that is rebuilt after a game would
+@@ -1506,6 +1534,7 @@
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+             *slot = Some(Tex {
+                 img: Image::from_rgba(w, h, rgba),
++                tinted: None,
+             });
+         }
+     }
+@@ -1949,6 +1978,7 @@
+             return;
+         }
+         let n = (x_end - x_start) as usize * 4;
++        let mut line = vec![0u8; if half { n } else { 0 }];
+         for cy in by0..by1 {
+             let py = y + cy;
+             if py < 0 || py >= ph {
+@@ -1973,9 +2003,12 @@
+                 continue;
+             };
+             if half {
+-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
++                // Reversed into RAM, then one copy to the uncached panel, as
++                // `output_frame` does.
++                for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
+                     d.copy_from_slice(s);
+                 }
++                dst.copy_from_slice(&line);
+             } else {
+                 dst.copy_from_slice(src);
+             }
+@@ -2213,6 +2246,11 @@
+         let span = (x_end - x_start) as usize;
+ 
+         if one_to_one {
++            // A row of RAM for anything that is not a straight copy.
++            let mut graded = match (half, identity) {
++                (false, true) => Vec::new(),
++                _ => vec![0u8; span * 4],
++            };
+             for py in y_start..y_end {
+                 let si = ((py - y) as usize * cw as usize + (x_start - x) as usize) * 4;
+                 let Some(src) = self.canvas.px.get(si..si + span * 4) else {
+@@ -2235,32 +2273,42 @@
+                     continue;
+                 };
+                 match (half, identity) {
+-                    // Reverse the row, four bytes at a time. Iterators here so
+-                    // the bounds checks fall away.
++                    // Reverse the row into RAM, then one copy to the panel:
++                    // the panel is uncached, and a burst there beats a store
++                    // a pixel. Iterators so the bounds checks fall away.
+                     (true, true) => {
+-                        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
++                        let line = &mut graded[..span * 4];
++                        for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
+                             d.copy_from_slice(s);
+                         }
++                        dst.copy_from_slice(line);
+                     }
+                     (false, true) => dst.copy_from_slice(src),
+-                    // The same two walks, with the gain folded in. Written
+-                    // rather than read back: the destination is the panel, and
+-                    // reading that costs orders of magnitude more than RAM.
+-                    (true, false) => {
+-                        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
+-                            d[0] = lut[0][s[0] as usize];
+-                            d[1] = lut[1][s[1] as usize];
+-                            d[2] = lut[2][s[2] as usize];
+-                            d[3] = s[3];
+-                        }
+-                    }
+-                    (false, false) => {
+-                        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+-                            d[0] = lut[0][s[0] as usize];
+-                            d[1] = lut[1][s[1] as usize];
+-                            d[2] = lut[2][s[2] as usize];
+-                            d[3] = s[3];
++                    // The same two walks, with the gain folded in, graded into
++                    // a row of RAM and that row copied to the panel whole.
++                    // Grading straight into the panel wrote it a byte at a
++                    // time, and the panel is uncached: with blue light on the
++                    // shelf's copy took 9.4 ms a frame against 2.7 without.
++                    (_, false) => {
++                        let line = &mut graded[..span * 4];
++                        let grade = |d: &mut [u8], s: &[u8]| {
++                            d.copy_from_slice(&[
++                                lut[0][s[0] as usize],
++                                lut[1][s[1] as usize],
++                                lut[2][s[2] as usize],
++                                s[3],
++                            ]);
++                        };
++                        if half {
++                            for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4).rev()) {
++                                grade(d, s);
++                            }
++                        } else {
++                            for (d, s) in line.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
++                                grade(d, s);
++                            }
+                         }
++                        dst.copy_from_slice(line);
+                     }
+                 }
+             }
+@@ -3512,6 +3560,56 @@
+             let want = reference(mount, 40, 1);
+             let n = differ(&r.panel, &want);
+             assert_eq!(n, 0, "{n} pixels differ once the game moved");
++        }
++    }
++
++    /// The shelf with blue light on goes out through the graded copy: every
++    /// panel pixel is its canvas pixel through the gain table, mirrored on an
++    /// upside-down panel. Graded into a row of RAM and copied whole now, so
++    /// pin the bytes.
++    #[test]
++    fn the_graded_copy_out_is_the_canvas_through_the_gain_table() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let mut r = Rig::new(mount);
++            r.c.set_blue_light(7);
++            let (pw, ph) = (out_w() as f32, out_h() as f32);
++            let items = vec![
++                Draw::Rect {
++                    x: 0.0,
++                    y: 0.0,
++                    w: pw,
++                    h: ph,
++                    colour: [0.3, 0.6, 0.9, 1.0],
++                },
++                Draw::Tex {
++                    x: 101.0,
++                    y: 77.0,
++                    w: 60.0,
++                    h: 20.0,
++                    tex: r.text,
++                    alpha: 1.0,
++                },
++            ];
++            r.present(&items);
++            assert!(!r.c.direct_game, "the shelf took the direct path");
++            let lut = gain_table(r.c.gain).expect("blue light had no gain");
++            let (w, h) = (out_w() as usize, out_h() as usize);
++            for y in 0..h {
++                for x in 0..w {
++                    let s = &r.c.canvas.px[(y * w + x) * 4..][..4];
++                    let (px, py) = match mount {
++                        Mount::Half => (w - 1 - x, h - 1 - y),
++                        _ => (x, y),
++                    };
++                    let d = &r.panel[(py * w + px) * 4..][..4];
++                    let want = [
++                        lut[0][s[0] as usize],
++                        lut[1][s[1] as usize],
++                        lut[2][s[2] as usize],
++                    ];
++                    assert_eq!(d[..3], want, "pixel ({x}, {y})");
++                }
++            }
+         }
+     }
+ 
