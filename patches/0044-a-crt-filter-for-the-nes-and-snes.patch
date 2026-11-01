@@ -1,0 +1,1064 @@
+a crt filter for the nes and snes
+
+0027 hid the shader row for both consoles, because every shader slot had
+imitated an LCD and a television never had one. Played on a 3.5" panel at
+2x or 2.5x, the picture looks like a scaled-up bitmap instead. This adds
+one filter that suits a television, CRT, and makes it the default for the
+NES and the SNES. This is a UX change on purpose, and it touches slot-ui
+for the same reason 0027 did.
+
+The filter. Each source row gets a dark band across its lower half, the
+gap between scanlines, at 60% brightness, and an aperture grille gives
+every panel column one phosphor at full strength and the other two at
+85%. A 1.2 gain pays back most of what those take away, and saturates on
+white rather than dimming it. At 2x every second panel row is a gap. At
+2.5x (the picture stretched to the panel's height) source rows land on
+2, 3, 2, 3 panel rows. Sampling the band at a row's centre would give
+some source rows no dark line at all, so the band is averaged over each
+panel row's extent, and every source row keeps one.
+
+The cost. Like Lcd3x, the mask is separable: the gap depends only on the
+row and the grille only on the column. So it goes into the game pass's
+existing tables. The grille is the column table's factors, at most 1.0,
+which keeps s * k inside a u16. The gap and the gain are the row factor,
+whose kernel already saturates. The inner loop and the NEON kernel do not
+change, so CRT costs the same per pixel as Off: one table rebuild when
+the picture moves, and one crt_row() per panel row.
+
+Settings. shader_nes and shader_snes are kept in slot.state and offer Off
+and CRT (`Shader::TV`). A card that names an LCD shader for either falls
+back to CRT. They get the same menu as the Game Boy family: Settings >
+Screen gains NES and Super NES pages, each holding a Shader row
+(`ScreenNes`/`NesShader`, `ScreenSnes`/`SnesShader`), and in game the
+Shader row maps to the console's own row as it does for the GBA. The
+shader shortcut steps it too, with a "Shader: CRT" toast. Colour
+correction stays hidden. The pages are "NES" and "Super NES" rather than
+`Platform::name`: "Nintendo Entertainment System" sets 668px wide on the
+752px panel, against 442 for the widest label today. The Screen page now
+has six rows, which is QUICK_VISIBLE, so it still fits without scrolling.
+
+The GL path has the same mask as a `u_mode > 4.5` branch of GAME_FRAG,
+for the desktop build.
+
+Tested: crt_tests compares the software pass against crt_row and
+crt_column evaluated in floats per pixel, at 2x and stretched (worst
+difference 2), and checks that a dark line survives 2.5x. in_game_menu
+steps the NES row in game and checks that the SNES keeps its own value;
+quick_menu walks Settings > Screen to both new pages and steps each.
+durability round-trips the new keys and rejects lcd3x on a console. The
+failures in app, e2e, eject, layout, play and render_link_screen are the
+same set on the tree before this patch. Not yet run on the handheld.
+
+Applies on top of 0043, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/lcd3x.rs b/crates/slot-gfx/src/lcd3x.rs
+index 2b5d1ea..f9601d3 100644
+--- a/crates/slot-gfx/src/lcd3x.rs
++++ b/crates/slot-gfx/src/lcd3x.rs
+@@ -16,6 +16,7 @@ pub enum ScreenEffect {
+     Grid,
+     Dot,
+     Simpletex,
++    Crt,
+ }
+ 
+ impl ScreenEffect {
+@@ -24,6 +25,43 @@ impl ScreenEffect {
+     }
+ }
+ 
++// The CRT, for the NES and SNES: a dark band across the lower half of each
++// source row, which is the gap between scanlines, and an aperture grille of
++// one panel column per phosphor. Both halves are separable -- the gap depends
++// on the row only, the grille on the column only -- which is what lets the
++// software backend fold them into its row and column tables, so the effect
++// costs nothing per pixel there. The gain pays back most of what the two
++// take, and saturates on white rather than dimming it.
++pub const CRT_GAP: f32 = 0.5;
++pub const CRT_GAP_DEPTH: f32 = 0.4;
++pub const CRT_MASK_DIM: f32 = 0.85;
++pub const CRT_GAIN: f32 = 1.2;
++
++/// How much of source rows `0..y` lies in a scanline gap.
++fn crt_gap_area(y: f32) -> f32 {
++    y.floor() * (1.0 - CRT_GAP) + (y.fract() - CRT_GAP).max(0.0)
++}
++
++/// The row factor for a panel row covering source rows `y0..y1`. Averaged over
++/// the row rather than sampled, so that a non-integer scale -- 2.5x when the
++/// picture is stretched to the panel's height -- still gives every source
++/// row one dark line instead of a beat of two and none.
++pub fn crt_row(y0: f32, y1: f32) -> f32 {
++    let cover = if y1 > y0 {
++        (crt_gap_area(y1) - crt_gap_area(y0)) / (y1 - y0)
++    } else {
++        (y0.fract() >= CRT_GAP) as u8 as f32
++    };
++    CRT_GAIN * (1.0 - CRT_GAP_DEPTH * cover)
++}
++
++/// The column factors, RGB, for panel column `x`.
++pub fn crt_column(x: i32) -> [f32; 3] {
++    let mut k = [CRT_MASK_DIM; 3];
++    k[x.rem_euclid(3) as usize] = 1.0;
++    k
++}
++
+ pub fn lcd3x_mask() -> [[[f32; 3]; 3]; 3] {
+     let mut mask = [[[0.0f32; 3]; 3]; 3];
+     for (oy, row) in mask.iter_mut().enumerate() {
+diff --git a/crates/slot-gfx/src/lib.rs b/crates/slot-gfx/src/lib.rs
+index 6b60f93..91f72f7 100644
+--- a/crates/slot-gfx/src/lib.rs
++++ b/crates/slot-gfx/src/lib.rs
+@@ -45,7 +45,7 @@ pub use headless::HeadlessSurface;
+ #[cfg(all(feature = "host", not(feature = "software")))]
+ pub use host::HostSurface;
+ pub use layout::Canvas;
+-pub use lcd3x::{lcd3x_factors, lcd3x_mask, ScreenEffect};
++pub use lcd3x::{crt_column, crt_row, lcd3x_factors, lcd3x_mask, ScreenEffect};
+ pub use pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
+ pub use power::{screen_brightness, screen_rect_above, screen_scale, screen_width, PICTURE};
+ #[cfg(feature = "software")]
+diff --git a/crates/slot-gfx/src/shaders.rs b/crates/slot-gfx/src/shaders.rs
+index b545a69..f03f83e 100644
+--- a/crates/slot-gfx/src/shaders.rs
++++ b/crates/slot-gfx/src/shaders.rs
+@@ -69,6 +69,9 @@ const vec3 luma_coeff = vec3(0.2126, 0.7152, 0.0722);
+ vec2 grid_band(vec2 x) {
+     return floor(x) / 3.0 + min(fract(x), vec2(1.0 / 3.0));
+ }
++float crt_gap(float y) {
++    return floor(y) * 0.5 + max(fract(y) - 0.5, 0.0);
++}
+ float dot_weight(vec2 f, vec2 o, float bloom) {
+     return exp(-4.0 * length(f - (o + vec2(0.5))) * bloom);
+ }
+@@ -78,6 +81,14 @@ void main() {
+     vec3 c = texture2D(u_game, uv).rgb;
+     bool inside = all(greaterThanEqual(uv, u_pic.xy)) && all(lessThan(uv, u_pic.zw));
+     if (!inside) {
++    } else if (u_mode > 4.5) {
++        // lcd3x::crt_row and crt_column; the software backend's tables.
++        float hp = 0.5 * u_uv.w * u_src.y / (u_rect.w * u_fbo.y);
++        float y = uv.y * u_src.y;
++        float cover = (crt_gap(y + hp) - crt_gap(y - hp)) / (2.0 * hp);
++        float col = mod(floor(gl_FragCoord.x), 3.0);
++        vec3 grille = mix(vec3(0.85), vec3(1.0), vec3(equal(vec3(col), vec3(0.0, 1.0, 2.0))));
++        c *= 1.2 * (1.0 - 0.4 * cover) * grille;
+     } else if (u_mode > 3.5) {
+         c = pow(c, vec3(1.05));
+         vec2 d = abs(f - 0.5);
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+index 0112694..c5c227f 100644
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -9,6 +9,8 @@
+ //!   - `Draw` coordinates, blending and texture modulation (see `raster.rs`)
+ //!   - the game pass's nearest sampling, `u_bright` and the Lcd3x mask, which is
+ //!     the same `lcd3x_factors` the shader's `u_mode > 0.5` branch computes
++//!   - the CRT mask, `lcd3x::crt_row` and `crt_column`, which is separable
++//!     like Lcd3x and goes through the same tables
+ //!   - the blue-light gain, applied on output as `BLIT_FRAG` does
+ //!
+ //! What is deliberately not, and why:
+@@ -31,7 +33,7 @@ use std::f32::consts::PI;
+ 
+ use crate::draw::{Draw, TexId};
+ use crate::grade::blue_light_gain;
+-use crate::lcd3x::ScreenEffect;
++use crate::lcd3x::{crt_column, crt_row, ScreenEffect};
+ use crate::pipeline::{SCALE, SRC_H, SRC_W, WHOLE_TEXTURE};
+ use crate::power::{screen_brightness, screen_rect};
+ use crate::surface::{blit_rect, out_h, out_w, GfxError, Surface};
+@@ -170,7 +172,7 @@ struct ColKey {
+     rw: u32,
+     src: [u32; 4],
+     pic: [u32; 4],
+-    lcd: bool,
++    effect: ScreenEffect,
+     img_w: u32,
+     /// Built right-to-left, for writing straight at an upside-down panel.
+     mirror: bool,
+@@ -186,7 +188,7 @@ fn build_col(
+     sw: f32,
+     src: [f32; 4],
+     pic: [f32; 4],
+-    lcd: bool,
++    effect: ScreenEffect,
+     img_w: u32,
+     mirror: bool,
+     grade: [u16; 3],
+@@ -201,7 +203,7 @@ fn build_col(
+         let texel = ((u * sw) as i32).clamp(0, img_w as i32 - 1) as u32;
+         let inside = u >= pic[0] && u < pic[2];
+         let mut k = [256u16; 3];
+-        if lcd && inside {
++        if effect == ScreenEffect::Lcd3x && inside {
+             let fx = (u * sw).fract();
+             for (c, k) in k.iter_mut().enumerate() {
+                 // The canvas is in panel order, so byte 0 is blue.
+@@ -210,6 +212,14 @@ fn build_col(
+                 *k = (v * 256.0).round().clamp(0.0, 65535.0) as u16;
+             }
+         }
++        if effect == ScreenEffect::Crt && inside {
++            // Never above 1.0, which keeps s * k inside a u16; the CRT's gain
++            // rides in the row factor instead, where the kernel saturates.
++            let grille = crt_column(px);
++            for (c, k) in k.iter_mut().enumerate() {
++                *k = (grille[2 - c] * 256.0).round() as u16;
++            }
++        }
+         // The gain, folded into the mask that was going to be applied anyway.
+         // Grading the output cost a whole pass over the panel; grading here
+         // costs nothing per pixel, because this multiply already existed.
+@@ -466,7 +476,8 @@ impl Game {
+         //
+         // The mask is separable, so the split is exact rather than an
+         // approximation: lcd3x_factors is yfactor(y) * xfactor(x) per channel.
+-        let lcd = self.effect == ScreenEffect::Lcd3x;
++        let effect = self.effect;
++        let lcd = effect == ScreenEffect::Lcd3x;
+         let bright = screen_brightness(self.power);
+         let width = (x1 - x0) as usize;
+ 
+@@ -484,7 +495,7 @@ impl Game {
+             rw: rw.to_bits(),
+             src: bits(src),
+             pic: bits(self.pic),
+-            lcd,
++            effect,
+             img_w: img.w,
+         };
+         if self.col_key != Some(key) {
+@@ -499,7 +510,7 @@ impl Game {
+                 sw,
+                 src,
+                 self.pic,
+-                lcd,
++                effect,
+                 img.w,
+                 mirror,
+                 grade,
+@@ -532,6 +543,11 @@ impl Game {
+             let yk = if lcd && row_inside {
+                 let fy = (v * sh).fract();
+                 (BRIGHTEN_SCANLINES + (2.0 * PI * fy).sin()) / (BRIGHTEN_SCANLINES + 1.0) * bright
++            } else if effect == ScreenEffect::Crt && row_inside {
++                // The panel row's extent in source rows, so the gap is
++                // averaged over it; see `crt_row`.
++                let at = |py: f32| (src[1] + (py - ry) / rh * src[3]) * sh;
++                crt_row(at(py as f32), at(py as f32 + 1.0)) * bright
+             } else {
+                 bright
+             };
+@@ -3399,3 +3415,110 @@ mod still_game_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod crt_tests {
++    use super::{Game, Image};
++    use crate::lcd3x::{crt_column, crt_row, ScreenEffect, CRT_GAIN, CRT_GAP_DEPTH};
++    use crate::surface::{out_h, out_w};
++    use crate::WHOLE_TEXTURE;
++
++    const W: u32 = 256;
++    const H: u32 = 224;
++
++    /// A NES/SNES frame, every texel a different colour, at `base` on the canvas.
++    fn console(base: [f32; 2]) -> Game {
++        let mut g = Game::new();
++        let mut frame = Vec::with_capacity((W * H * 4) as usize);
++        for y in 0..H {
++            for x in 0..W {
++                frame.extend([
++                    (x % 251) as u8,
++                    (y % 211) as u8,
++                    ((x + 2 * y) % 199) as u8,
++                    0,
++                ]);
++            }
++        }
++        g.upload(&frame, (W, H));
++        g.src = WHOLE_TEXTURE;
++        g.pic = WHOLE_TEXTURE;
++        g.base = base;
++        g.effect = ScreenEffect::Crt;
++        g
++    }
++
++    /// The tables against `crt_row` and `crt_column` evaluated per pixel, at the
++    /// actual 2x and at the stretch that fills the panel's height.
++    fn matches_the_mask_in_floats(base: [f32; 2]) {
++        let mut g = console(base);
++        let mut canvas = Image::new(out_w(), out_h());
++        assert_eq!(g.draw(&mut canvas, None), 2);
++        let (rx, ry, rw, rh) = g.rect();
++        let (x0, y0) = (rx.round() as i32, ry.round() as i32);
++        let (x1, y1) = ((rx + rw).round() as i32, (ry + rh).round() as i32);
++        let mut worst = 0i32;
++        for py in y0..y1 {
++            let at = |y: f32| (y - ry) / rh * H as f32;
++            let yk = crt_row(at(py as f32), at(py as f32 + 1.0));
++            let sy = ((at(py as f32 + 0.5)) as u32).min(H - 1);
++            for px in x0..x1 {
++                let sx = (((px as f32 + 0.5 - rx) / rw * W as f32) as u32).min(W - 1);
++                let xk = crt_column(px);
++                for c in 0..3usize {
++                    let s = g.frame.px[((sy * W + sx) * 4) as usize + c] as f32;
++                    let want = (s * xk[2 - c] * yk).clamp(0.0, 255.0) as i32;
++                    let got =
++                        canvas.px[((py as u32 * out_w() + px as u32) * 4) as usize + c] as i32;
++                    worst = worst.max((got - want).abs());
++                }
++            }
++        }
++        assert!(worst <= 2, "the tables differ from the mask by {worst}");
++    }
++
++    #[test]
++    fn the_tables_match_the_mask_at_2x() {
++        matches_the_mask_in_floats([512.0, 448.0]);
++    }
++
++    #[test]
++    fn the_tables_match_the_mask_stretched() {
++        matches_the_mask_in_floats([640.0, 560.0]);
++    }
++
++    /// At 2x the gap is exactly the second panel row of every source row.
++    #[test]
++    fn at_2x_every_other_row_is_the_gap() {
++        for sy in 0..H {
++            let y = sy as f32;
++            assert_eq!(crt_row(y, y + 0.5), CRT_GAIN);
++            assert_eq!(crt_row(y + 0.5, y + 1.0), CRT_GAIN * (1.0 - CRT_GAP_DEPTH));
++        }
++    }
++
++    /// At 2.5x the rows fall 2, 3, 2, 3 per source row; averaging over each row
++    /// rather than sampling its centre is what keeps a dark line in every one.
++    #[test]
++    fn stretched_every_source_row_keeps_a_dark_line() {
++        let step = 1.0 / 2.5;
++        let mut darkest = vec![f32::MAX; H as usize];
++        for py in 0..(H as f32 * 2.5) as u32 {
++            let y = py as f32 * step;
++            let k = crt_row(y, y + step);
++            let sy = ((y + step / 2.0) as usize).min(H as usize - 1);
++            darkest[sy] = darkest[sy].min(k);
++        }
++        let lit = CRT_GAIN * (1.0 - CRT_GAP_DEPTH / 2.0);
++        assert!(darkest.iter().all(|&k| k < lit), "{darkest:?}");
++    }
++
++    /// The grille never asks for more than 1.0 per column, so s * k stays a u16.
++    #[test]
++    fn the_grille_fits_the_column_table() {
++        for x in -3..6 {
++            assert!(crt_column(x).iter().all(|&k| k <= 1.0));
++            assert_eq!(crt_column(x).iter().filter(|&&k| k == 1.0).count(), 1);
++        }
++    }
++}
+diff --git a/crates/slot-store/src/slot_state.rs b/crates/slot-store/src/slot_state.rs
+index 30ce1d2..e6f3a03 100644
+--- a/crates/slot-store/src/slot_state.rs
++++ b/crates/slot-store/src/slot_state.rs
+@@ -213,6 +213,8 @@ pub struct SlotState {
+     pub shader_gba: Shader,
+     pub shader_gb: Shader,
+     pub shader_gbc: Shader,
++    pub shader_nes: Shader,
++    pub shader_snes: Shader,
+     pub auto_load: bool,
+     pub eject_save: bool,
+     pub turbo: bool,
+@@ -293,11 +295,14 @@ pub enum Shader {
+     Grid,
+     Dot,
+     Simpletex,
++    Crt,
+ }
+ 
+ impl Shader {
+     pub const GBA: [Shader; 4] = [Shader::Off, Shader::Lcd3x, Shader::Grid, Shader::Dot];
+     pub const GB: [Shader; 4] = [Shader::Off, Shader::Lcd3x, Shader::Grid, Shader::Simpletex];
++    /// The NES and SNES: a television, so a CRT or nothing.
++    pub const TV: [Shader; 2] = [Shader::Off, Shader::Crt];
+ 
+     pub fn name(self) -> &'static str {
+         match self {
+@@ -306,6 +311,7 @@ impl Shader {
+             Shader::Grid => "grid",
+             Shader::Dot => "dot",
+             Shader::Simpletex => "simpletex",
++            Shader::Crt => "crt",
+         }
+     }
+ 
+@@ -316,6 +322,7 @@ impl Shader {
+             Shader::Grid,
+             Shader::Dot,
+             Shader::Simpletex,
++            Shader::Crt,
+         ]
+         .into_iter()
+         .find(|s| s.name() == name)
+@@ -354,6 +361,8 @@ impl Default for SlotState {
+             shader_gba: Shader::Grid,
+             shader_gb: Shader::Simpletex,
+             shader_gbc: Shader::Simpletex,
++            shader_nes: Shader::Crt,
++            shader_snes: Shader::Crt,
+             auto_load: true,
+             eject_save: true,
+             turbo: true,
+@@ -457,6 +466,8 @@ pub fn write_slot_state(root: &Path, s: &SlotState) -> std::io::Result<()> {
+         s.colour_correction_gbc as u8
+     ));
+     text.push_str(&format!("shader_gbc={}\n", s.shader_gbc.name()));
++    text.push_str(&format!("shader_nes={}\n", s.shader_nes.name()));
++    text.push_str(&format!("shader_snes={}\n", s.shader_snes.name()));
+     text.push_str(&format!("wallpaper_tint={}\n", s.wallpaper_tint.key()));
+     text.push_str(&format!("show_recents={}\n", s.show_recents as u8));
+     text.push_str(&format!("show_titles={}\n", s.show_titles as u8));
+@@ -503,6 +514,8 @@ fn parse(text: &str) -> Option<SlotState> {
+     let mut shader_gba = None;
+     let mut shader_gb = None;
+     let mut shader_gbc = None;
++    let mut shader_nes = None;
++    let mut shader_snes = None;
+     let mut auto_load = None;
+     let mut eject_save = None;
+     let mut turbo = None;
+@@ -564,6 +577,8 @@ fn parse(text: &str) -> Option<SlotState> {
+             "shelf_cart" => shelf_cart = recent_value(value),
+             "shader_gb" => shader_gb = Shader::parse(value).filter(|s| Shader::GB.contains(s)),
+             "shader_gbc" => shader_gbc = Shader::parse(value).filter(|s| Shader::GB.contains(s)),
++            "shader_nes" => shader_nes = Shader::parse(value).filter(|s| Shader::TV.contains(s)),
++            "shader_snes" => shader_snes = Shader::parse(value).filter(|s| Shader::TV.contains(s)),
+             _ => {}
+         }
+     }
+@@ -596,6 +611,8 @@ fn parse(text: &str) -> Option<SlotState> {
+         shader_gba: shader_gba.unwrap_or(fallback.shader_gba),
+         shader_gb: shader_gb.unwrap_or(fallback.shader_gb),
+         shader_gbc: shader_gbc.or(shader_gb).unwrap_or(fallback.shader_gbc),
++        shader_nes: shader_nes.unwrap_or(fallback.shader_nes),
++        shader_snes: shader_snes.unwrap_or(fallback.shader_snes),
+         auto_load: auto_load.unwrap_or(fallback.auto_load),
+         eject_save: eject_save.unwrap_or(fallback.eject_save),
+         turbo: turbo.unwrap_or(fallback.turbo),
+diff --git a/crates/slot-store/tests/durability.rs b/crates/slot-store/tests/durability.rs
+index fb236da..19c0c58 100644
+--- a/crates/slot-store/tests/durability.rs
++++ b/crates/slot-store/tests/durability.rs
+@@ -233,6 +233,8 @@ fn a_card_from_before_the_settings_keeps_all_its_values() {
+             shader_gba: Shader::Grid,
+             shader_gb: Shader::Simpletex,
+             shader_gbc: Shader::Simpletex,
++            shader_nes: Shader::Crt,
++            shader_snes: Shader::Crt,
+             auto_load: true,
+             eject_save: true,
+             turbo: true,
+@@ -278,6 +280,7 @@ fn the_quick_menu_settings_round_trip_as_their_own_lines() {
+         wallpaper_tint: WallpaperTint::Medium,
+         colour_correction_gbc: true,
+         shader_gbc: Shader::Grid,
++        shader_nes: Shader::Off,
+         bezel_gba: BezelPick::None,
+         bezel_gb: BezelPick::Default,
+         bezel_gbc: BezelPick::File("Pocket.png".into()),
+@@ -312,6 +315,8 @@ fn the_quick_menu_settings_round_trip_as_their_own_lines() {
+         "bezel_gbc=Pocket.png",
+         "colour_correction_gbc=1",
+         "shader_gbc=grid",
++        "shader_nes=off",
++        "shader_snes=crt",
+         "shelf=gba",
+         "shelf_cart=gba/Drill Dozer",
+     ] {
+@@ -607,3 +612,15 @@ fn lid_power_off_minutes_round_trip_and_drop_a_value_the_menu_does_not_offer() {
+     std::fs::write(&path, text).unwrap();
+     assert_eq!(read_slot_state(d.path()).lid_off_min, None);
+ }
++
++#[test]
++fn a_console_takes_no_lcd_shader_from_a_hand_edited_card() {
++    let d = tmp_root();
++    write_slot_state(d.path(), &SlotState::default()).unwrap();
++    let path = d.path().join("Config/slot.state");
++    let text = std::fs::read_to_string(&path).unwrap();
++    let text = text.replace("shader_nes=crt", "shader_nes=lcd3x");
++    std::fs::write(&path, text.replace("shader_snes=crt", "shader_snes=off")).unwrap();
++    let s = read_slot_state(d.path());
++    assert_eq!((s.shader_nes, s.shader_snes), (Shader::Crt, Shader::Off));
++}
+diff --git a/crates/slot-ui/src/quick_menu.rs b/crates/slot-ui/src/quick_menu.rs
+index c5e910f..be8f52f 100644
+--- a/crates/slot-ui/src/quick_menu.rs
++++ b/crates/slot-ui/src/quick_menu.rs
+@@ -91,10 +91,14 @@ pub enum QuickRow {
+     PlayBrightness,
+     PlayBlueLight,
+     AutoLoad,
++    ScreenNes,
++    ScreenSnes,
++    NesShader,
++    SnesShader,
+ }
+ 
+ impl QuickRow {
+-    pub const ALL: [QuickRow; 80] = [
++    pub const ALL: [QuickRow; 84] = [
+         QuickRow::FastForward,
+         QuickRow::FastForwardSound,
+         QuickRow::Screen,
+@@ -175,6 +179,10 @@ impl QuickRow {
+         QuickRow::PlayBrightness,
+         QuickRow::PlayBlueLight,
+         QuickRow::AutoLoad,
++        QuickRow::ScreenNes,
++        QuickRow::ScreenSnes,
++        QuickRow::NesShader,
++        QuickRow::SnesShader,
+     ];
+ 
+     pub const MAIN: [QuickRow; 5] = [
+@@ -238,11 +246,13 @@ impl QuickRow {
+         QuickRow::ScRewind,
+     ];
+ 
+-    pub const SCREEN: [QuickRow; 4] = [
++    pub const SCREEN: [QuickRow; 6] = [
+         QuickRow::ScreenGeneral,
+         QuickRow::ScreenGba,
+         QuickRow::ScreenGbc,
+         QuickRow::ScreenGb,
++        QuickRow::ScreenNes,
++        QuickRow::ScreenSnes,
+     ];
+ 
+     pub const SCREEN_GENERAL: [QuickRow; 2] = [QuickRow::Brightness, QuickRow::BlueLight];
+@@ -266,6 +276,10 @@ impl QuickRow {
+         QuickRow::GbBezel,
+     ];
+ 
++    pub const SCREEN_NES: [QuickRow; 1] = [QuickRow::NesShader];
++
++    pub const SCREEN_SNES: [QuickRow; 1] = [QuickRow::SnesShader];
++
+     pub const GAME: [QuickRow; 8] = [
+         QuickRow::FastForward,
+         QuickRow::FastForwardSound,
+@@ -308,7 +322,9 @@ impl QuickRow {
+             QuickRow::ScreenGeneral
+             | QuickRow::ScreenGba
+             | QuickRow::ScreenGbc
+-            | QuickRow::ScreenGb => &QuickRow::SCREEN,
++            | QuickRow::ScreenGb
++            | QuickRow::ScreenNes
++            | QuickRow::ScreenSnes => &QuickRow::SCREEN,
+             QuickRow::Brightness | QuickRow::BlueLight => &QuickRow::SCREEN_GENERAL,
+             QuickRow::PlayBrightness | QuickRow::PlayBlueLight => &QuickRow::PLAY_SCREEN,
+             QuickRow::GbaShader | QuickRow::GbaColourCorrection | QuickRow::GbaBezel => {
+@@ -321,6 +337,8 @@ impl QuickRow {
+             | QuickRow::GbColourCorrection
+             | QuickRow::GbPalette
+             | QuickRow::GbBezel => &QuickRow::SCREEN_GB,
++            QuickRow::NesShader => &QuickRow::SCREEN_NES,
++            QuickRow::SnesShader => &QuickRow::SCREEN_SNES,
+             QuickRow::FastForward
+             | QuickRow::FastForwardSound
+             | QuickRow::Rewind
+@@ -362,6 +380,8 @@ impl QuickRow {
+             QuickRow::GbaShader => Some(QuickRow::ScreenGba),
+             QuickRow::GbcShader => Some(QuickRow::ScreenGbc),
+             QuickRow::GbShader => Some(QuickRow::ScreenGb),
++            QuickRow::NesShader => Some(QuickRow::ScreenNes),
++            QuickRow::SnesShader => Some(QuickRow::ScreenSnes),
+             QuickRow::FastForward => Some(QuickRow::Game),
+             QuickRow::PlayScreen => Some(QuickRow::Settings),
+             QuickRow::Shader => Some(QuickRow::PlayScreen),
+@@ -410,6 +430,8 @@ impl QuickRow {
+             QuickRow::ScreenGba => Some(QuickRow::SCREEN_GBA[0]),
+             QuickRow::ScreenGbc => Some(QuickRow::SCREEN_GBC[0]),
+             QuickRow::ScreenGb => Some(QuickRow::SCREEN_GB[0]),
++            QuickRow::ScreenNes => Some(QuickRow::SCREEN_NES[0]),
++            QuickRow::ScreenSnes => Some(QuickRow::SCREEN_SNES[0]),
+             _ => None,
+         }
+     }
+@@ -444,6 +466,8 @@ impl QuickRow {
+             QuickRow::GbaShader => "Shader",
+             QuickRow::GbShader => "Shader",
+             QuickRow::GbcShader => "Shader",
++            QuickRow::NesShader => "Shader",
++            QuickRow::SnesShader => "Shader",
+             QuickRow::GbaColourCorrection => "Color Correction",
+             QuickRow::GbColourCorrection => "Color Correction",
+             QuickRow::GbcColourCorrection => "Color Correction",
+@@ -505,6 +529,8 @@ impl QuickRow {
+             QuickRow::ScreenGba => "Game Boy Advance",
+             QuickRow::ScreenGbc => "Game Boy Color",
+             QuickRow::ScreenGb => "Game Boy",
++            QuickRow::ScreenNes => "NES",
++            QuickRow::ScreenSnes => "Super NES",
+             QuickRow::GbBezel => "Bezel",
+             QuickRow::GbcBezel => "Bezel",
+             QuickRow::GbaBezel => "Bezel",
+@@ -534,6 +560,8 @@ impl QuickRow {
+                 | QuickRow::ScreenGba
+                 | QuickRow::ScreenGbc
+                 | QuickRow::ScreenGb
++                | QuickRow::ScreenNes
++                | QuickRow::ScreenSnes
+                 | QuickRow::ScreenGeneral
+         )
+     }
+@@ -636,10 +664,11 @@ pub enum QuickValue {
+     Level7,
+     Level8,
+     Level9,
++    Crt,
+ }
+ 
+ impl QuickValue {
+-    pub const ALL: [QuickValue; 33] = [
++    pub const ALL: [QuickValue; 34] = [
+         QuickValue::Speed2,
+         QuickValue::Speed3,
+         QuickValue::Speed4,
+@@ -673,6 +702,7 @@ impl QuickValue {
+         QuickValue::Level7,
+         QuickValue::Level8,
+         QuickValue::Level9,
++        QuickValue::Crt,
+     ];
+ 
+     pub const LEVELS: [QuickValue; 10] = [
+@@ -713,6 +743,7 @@ impl QuickValue {
+             QuickValue::Grid => "Grid",
+             QuickValue::Dot => "Dot",
+             QuickValue::Simpletex => "Simpletex",
++            QuickValue::Crt => "CRT",
+             QuickValue::Dark => "Dark",
+             QuickValue::Light => "Light",
+             QuickValue::Show => "Show",
+diff --git a/crates/slot-ui/src/toast.rs b/crates/slot-ui/src/toast.rs
+index 81c5756..ee54397 100644
+--- a/crates/slot-ui/src/toast.rs
++++ b/crates/slot-ui/src/toast.rs
+@@ -22,6 +22,7 @@ pub enum Toast {
+     ShaderGrid,
+     ShaderDot,
+     ShaderSimpletex,
++    ShaderCrt,
+     CardUnwritable,
+     CardRepair,
+     CardRepairCharge,
+@@ -32,7 +33,7 @@ pub enum Toast {
+ }
+ 
+ impl Toast {
+-    const FIXED: [Toast; 19] = [
++    const FIXED: [Toast; 20] = [
+         Toast::StateSaved,
+         Toast::StateLoaded,
+         Toast::NeedsGpsp,
+@@ -52,6 +53,7 @@ impl Toast {
+         Toast::CardRepairCharge,
+         Toast::CardRepaired,
+         Toast::CardRepairFailed,
++        Toast::ShaderCrt,
+     ];
+ 
+     pub fn all() -> Vec<Toast> {
+@@ -131,6 +133,7 @@ impl Toast {
+             Toast::ShaderGrid => "Shader: Grid",
+             Toast::ShaderDot => "Shader: Dot",
+             Toast::ShaderSimpletex => "Shader: Simpletex",
++            Toast::ShaderCrt => "Shader: CRT",
+             Toast::CardUnwritable => "Can't write to SD card",
+             Toast::CardRepair | Toast::CardRepairCharge => "Can't write to SD card",
+             Toast::CardRepaired => "SD card repaired",
+diff --git a/crates/slot-ui/tests/quick_menu.rs b/crates/slot-ui/tests/quick_menu.rs
+index 426d905..8b2b760 100644
+--- a/crates/slot-ui/tests/quick_menu.rs
++++ b/crates/slot-ui/tests/quick_menu.rs
+@@ -104,7 +104,14 @@ fn the_rows_run_in_the_order_the_user_chose() {
+     );
+     assert_eq!(
+         QuickRow::SCREEN.map(QuickRow::label),
+-        ["General", "Game Boy Advance", "Game Boy Color", "Game Boy"]
++        [
++            "General",
++            "Game Boy Advance",
++            "Game Boy Color",
++            "Game Boy",
++            "NES",
++            "Super NES",
++        ]
+     );
+     assert_eq!(
+         QuickRow::SCREEN_GENERAL.map(QuickRow::label),
+@@ -122,6 +129,8 @@ fn the_rows_run_in_the_order_the_user_chose() {
+         QuickRow::SCREEN_GB.map(QuickRow::label),
+         ["Shader", "Color Correction", "Palette", "Bezel"]
+     );
++    assert_eq!(QuickRow::SCREEN_NES.map(QuickRow::label), ["Shader"]);
++    assert_eq!(QuickRow::SCREEN_SNES.map(QuickRow::label), ["Shader"]);
+     assert_eq!(
+         QuickRow::GAME.map(QuickRow::label),
+         [
+@@ -158,7 +167,9 @@ fn the_rows_run_in_the_order_the_user_chose() {
+             QuickRow::Controls,
+             QuickRow::ControlsShelf,
+             QuickRow::ControlsInGame,
+-            QuickRow::ScreenGeneral
++            QuickRow::ScreenGeneral,
++            QuickRow::ScreenNes,
++            QuickRow::ScreenSnes,
+         ]
+     );
+     for page in [
+@@ -234,6 +245,7 @@ fn the_values_read_as_the_menu_prints_them() {
+             "7",
+             "8",
+             "9",
++            "CRT",
+         ]
+     );
+     assert_eq!(QuickValue::flag(true), QuickValue::On);
+@@ -497,6 +509,8 @@ fn screen_opens_a_page_per_console_and_each_backs_out_to_its_console() {
+         (QuickRow::ScreenGba, &QuickRow::SCREEN_GBA[..]),
+         (QuickRow::ScreenGbc, &QuickRow::SCREEN_GBC[..]),
+         (QuickRow::ScreenGb, &QuickRow::SCREEN_GB[..]),
++        (QuickRow::ScreenNes, &QuickRow::SCREEN_NES[..]),
++        (QuickRow::ScreenSnes, &QuickRow::SCREEN_SNES[..]),
+     ] {
+         assert_eq!(console.parent(), Some(QuickRow::Screen));
+         assert_eq!(console.child(), Some(page[0]));
+diff --git a/crates/slot-ui/tests/toast.rs b/crates/slot-ui/tests/toast.rs
+index e4d5e67..4bb6f58 100644
+--- a/crates/slot-ui/tests/toast.rs
++++ b/crates/slot-ui/tests/toast.rs
+@@ -28,7 +28,7 @@ fn a_cart_gpsp_cannot_link_says_there_is_no_link() {
+ fn the_banner_says_what_happened_and_never_what_is_on_screen() {
+     let all = Toast::all();
+     assert_eq!(
+-        all[..19],
++        all[..20],
+         [
+             Toast::StateSaved,
+             Toast::StateLoaded,
+@@ -49,18 +49,19 @@ fn the_banner_says_what_happened_and_never_what_is_on_screen() {
+             Toast::CardRepairCharge,
+             Toast::CardRepaired,
+             Toast::CardRepairFailed,
++            Toast::ShaderCrt,
+         ],
+         "a banner was added or dropped: every face is uploaded by its place in this list"
+     );
+     let palettes = GbColors::all().count();
+     assert_eq!(palettes, 49);
+     assert_eq!(
+-        all[19..19 + palettes],
++        all[20..20 + palettes],
+         GbColors::all().map(Toast::Palette).collect::<Vec<_>>()[..],
+         "the palette banners do not follow the fixed ones in palette order"
+     );
+     assert_eq!(
+-        all[19 + palettes..],
++        all[20 + palettes..],
+         QuickRow::ALL
+             .into_iter()
+             .filter(|r| r.binds())
+diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
+index 5abaa75..f3f9545 100644
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -911,9 +911,10 @@ impl App {
+         let no_bezel =
+             console || (self.playing_platform() == Platform::Gba && !self.framed_panel());
+         let mut hidden = Vec::new();
+-        // A television had no LCD to imitate or correct, and no shell to frame it.
++        // A television had no LCD to correct and no shell to frame it. Its
++        // shader is the CRT one, so that row stays.
+         if console {
+-            hidden.extend([QuickRow::Shader, QuickRow::ColourCorrection]);
++            hidden.push(QuickRow::ColourCorrection);
+         }
+         // The SNES's X and Y are the turbo bindings, under labels that would say otherwise.
+         if self.playing_platform() == Platform::Snes {
+@@ -953,6 +954,8 @@ impl App {
+             (QuickRow::Shader, Platform::Gba) => QuickRow::GbaShader,
+             (QuickRow::Shader, Platform::Gb) => QuickRow::GbShader,
+             (QuickRow::Shader, Platform::Gbc) => QuickRow::GbcShader,
++            (QuickRow::Shader, Platform::Nes) => QuickRow::NesShader,
++            (QuickRow::Shader, Platform::Snes) => QuickRow::SnesShader,
+             (QuickRow::ColourCorrection, Platform::Gba) => QuickRow::GbaColourCorrection,
+             (QuickRow::ColourCorrection, Platform::Gb) => QuickRow::GbColourCorrection,
+             (QuickRow::ColourCorrection, Platform::Gbc) => QuickRow::GbcColourCorrection,
+@@ -970,8 +973,8 @@ impl App {
+             QuickRow::Shader
+             | QuickRow::ColourCorrection
+             | QuickRow::PlayBrightness
+-            // A NES or SNES game has no shader or colour correction of its own,
+-            // so the row maps to itself; asking again would never return.
++            // A NES or SNES game has no colour correction of its own, so the
++            // row maps to itself; asking again would never return.
+             | QuickRow::PlayBlueLight => match self.playing_row(row) {
+                 same if same == row => None,
+                 mapped => self.quick_value(mapped),
+@@ -994,6 +997,8 @@ impl App {
+             QuickRow::GbaShader => Some(shader_value(self.state.shader_gba)),
+             QuickRow::GbShader => Some(shader_value(self.state.shader_gb)),
+             QuickRow::GbcShader => Some(shader_value(self.state.shader_gbc)),
++            QuickRow::NesShader => Some(shader_value(self.state.shader_nes)),
++            QuickRow::SnesShader => Some(shader_value(self.state.shader_snes)),
+             QuickRow::Rumble => Some(QuickValue::flag(self.state.rumble)),
+             QuickRow::LeftStick => Some(QuickValue::flag(self.state.left_stick_dpad)),
+             QuickRow::AutoLoad => Some(QuickValue::flag(self.state.auto_load)),
+@@ -1040,6 +1045,8 @@ impl App {
+             | QuickRow::ScreenGba
+             | QuickRow::ScreenGbc
+             | QuickRow::ScreenGb
++            | QuickRow::ScreenNes
++            | QuickRow::ScreenSnes
+             | QuickRow::GbBezel
+             | QuickRow::GbcBezel
+             | QuickRow::GbaBezel
+@@ -2193,7 +2200,8 @@ impl App {
+             Platform::Gba => self.state.shader_gba,
+             Platform::Gb => self.state.shader_gb,
+             Platform::Gbc => self.state.shader_gbc,
+-            Platform::Nes | Platform::Snes => Shader::Off,
++            Platform::Nes => self.state.shader_nes,
++            Platform::Snes => self.state.shader_snes,
+         }
+     }
+ 
+@@ -2712,6 +2720,8 @@ impl App {
+             | QuickRow::ScreenGba
+             | QuickRow::ScreenGbc
+             | QuickRow::ScreenGb
++            | QuickRow::ScreenNes
++            | QuickRow::ScreenSnes
+             | QuickRow::Shortcuts
+             | QuickRow::General
+             | QuickRow::Controls
+@@ -2738,6 +2748,8 @@ impl App {
+             | QuickRow::GbaShader
+             | QuickRow::GbShader
+             | QuickRow::GbcShader
++            | QuickRow::NesShader
++            | QuickRow::SnesShader
+             | QuickRow::GbPalette
+             | QuickRow::Rumble
+             | QuickRow::LeftStick
+@@ -2907,6 +2919,8 @@ impl App {
+                 }
+                 s.shader_gbc = to;
+             }
++            QuickRow::NesShader => s.shader_nes = s.shader_nes.step(&Shader::TV, right),
++            QuickRow::SnesShader => s.shader_snes = s.shader_snes.step(&Shader::TV, right),
+             QuickRow::Rumble => s.rumble = !s.rumble,
+             QuickRow::LeftStick => s.left_stick_dpad = !s.left_stick_dpad,
+             QuickRow::AutoLoad => s.auto_load = !s.auto_load,
+@@ -2940,6 +2954,8 @@ impl App {
+             | QuickRow::ScreenGba
+             | QuickRow::ScreenGbc
+             | QuickRow::ScreenGb
++            | QuickRow::ScreenNes
++            | QuickRow::ScreenSnes
+             | QuickRow::GbBezel
+             | QuickRow::GbcBezel
+             | QuickRow::GbaBezel
+@@ -2996,7 +3012,8 @@ impl App {
+             Platform::Gba => (&mut self.state.shader_gba, &Shader::GBA[..]),
+             Platform::Gb => (&mut self.state.shader_gb, &Shader::GB[..]),
+             Platform::Gbc => (&mut self.state.shader_gbc, &Shader::GB[..]),
+-            Platform::Nes | Platform::Snes => return,
++            Platform::Nes => (&mut self.state.shader_nes, &Shader::TV[..]),
++            Platform::Snes => (&mut self.state.shader_snes, &Shader::TV[..]),
+         };
+         *shader = shader.step(choices, right);
+         let said = match *shader {
+@@ -3005,6 +3022,7 @@ impl App {
+             Shader::Grid => Toast::ShaderGrid,
+             Shader::Dot => Toast::ShaderDot,
+             Shader::Simpletex => Toast::ShaderSimpletex,
++            Shader::Crt => Toast::ShaderCrt,
+         };
+         self.persist();
+         self.hud.toast(said, self.now());
+@@ -5668,6 +5686,7 @@ fn shader_value(shader: Shader) -> QuickValue {
+         Shader::Grid => QuickValue::Grid,
+         Shader::Dot => QuickValue::Dot,
+         Shader::Simpletex => QuickValue::Simpletex,
++        Shader::Crt => QuickValue::Crt,
+     }
+ }
+ 
+diff --git a/crates/slot/src/frontend.rs b/crates/slot/src/frontend.rs
+index 4d69292..0b1e34f 100644
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -571,6 +571,7 @@ impl Frontend {
+             slot_store::Shader::Grid => ScreenEffect::Grid,
+             slot_store::Shader::Dot => ScreenEffect::Dot,
+             slot_store::Shader::Simpletex => ScreenEffect::Simpletex,
++            slot_store::Shader::Crt => ScreenEffect::Crt,
+         });
+         compositor.set_shake(self.session.app().screen_shake());
+         compositor.set_screen_power(self.session.app().screen_power());
+diff --git a/crates/slot/tests/in_game_menu.rs b/crates/slot/tests/in_game_menu.rs
+index b1af5d4..b9c29da 100644
+--- a/crates/slot/tests/in_game_menu.rs
++++ b/crates/slot/tests/in_game_menu.rs
+@@ -4,7 +4,9 @@ use common::{app_playing_in, tmp_root_with_carts};
+ use slot::app::{App, Phase};
+ use slot_input::{Action, Btn};
+ use slot_store::{Platform, Shader, StateRing};
+-use slot_ui::{out_h, out_w, Draw, QuickMenuFaces, QuickRow, TexId, HINT_EDGE, MOUTH_H};
++use slot_ui::{
++    out_h, out_w, Draw, QuickMenuFaces, QuickRow, QuickValue, TexId, HINT_EDGE, MOUTH_H,
++};
+ use tempfile::TempDir;
+ 
+ fn playing() -> (TempDir, App) {
+@@ -112,31 +114,38 @@ fn shader_edits_the_running_platforms_shader() {
+     );
+ }
+ 
++fn console_playing(platform: Platform, ext: &str) -> (TempDir, App) {
++    let d = tmp_root_with_carts(&[]);
++    let dir = d.path().join("Games").join(platform.dir_name());
++    std::fs::create_dir_all(&dir).unwrap();
++    std::fs::write(dir.join(format!("Console.{ext}")), [0u8; 0x8000]).unwrap();
++    slot_store::write_slot_state(
++        d.path(),
++        &slot_store::SlotState {
++            cart: Some("Console".into()),
++            cart_platform: Some(platform),
++            clock_set: true,
++            ..Default::default()
++        },
++    )
++    .unwrap();
++    let mut a = App::boot(d.path());
++    a.on_core_ready();
++    for _ in 0..120 {
++        a.update(1.0 / 60.0);
++    }
++    assert_eq!(a.playing_platform(), platform);
++    (d, a)
++}
++
+ #[test]
+ fn a_console_game_draws_its_menu_without_asking_for_an_lcd_row_forever() {
+     for (platform, ext) in [(Platform::Nes, "nes"), (Platform::Snes, "sfc")] {
+-        let d = tmp_root_with_carts(&[]);
+-        let dir = d.path().join("Games").join(platform.dir_name());
+-        std::fs::create_dir_all(&dir).unwrap();
+-        std::fs::write(dir.join(format!("Console.{ext}")), [0u8; 0x8000]).unwrap();
+-        slot_store::write_slot_state(
+-            d.path(),
+-            &slot_store::SlotState {
+-                cart: Some("Console".into()),
+-                cart_platform: Some(platform),
+-                clock_set: true,
+-                ..Default::default()
+-            },
+-        )
+-        .unwrap();
+-        let mut a = App::boot(d.path());
+-        a.on_core_ready();
+-        for _ in 0..120 {
+-            a.update(1.0 / 60.0);
+-        }
+-        assert_eq!(a.playing_platform(), platform);
+-        assert_eq!(a.quick_value(QuickRow::Shader), None);
++        let (_d, mut a) = console_playing(platform, ext);
++        assert_eq!(a.quick_value(QuickRow::Shader), Some(QuickValue::Crt));
+         assert_eq!(a.quick_value(QuickRow::ColourCorrection), None);
++        assert!(!a.in_game_hidden().contains(&QuickRow::Shader));
++        assert!(a.in_game_hidden().contains(&QuickRow::ColourCorrection));
+         a.apply(Action::QuickMenu);
+         for _ in 0..30 {
+             a.update(1.0 / 60.0);
+@@ -147,6 +156,20 @@ fn a_console_game_draws_its_menu_without_asking_for_an_lcd_row_forever() {
+     }
+ }
+ 
++#[test]
++fn a_console_shader_steps_between_crt_and_off_for_that_console_alone() {
++    let (d, mut a) = console_playing(Platform::Nes, "nes");
++    assert_eq!(a.screen_shader(), Shader::Crt);
++    go_to(&mut a, QuickRow::Shader);
++    press(&mut a, Btn::Right);
++    assert_eq!(a.screen_shader(), Shader::Off);
++    assert_eq!(a.quick_value(QuickRow::Shader), Some(QuickValue::Off));
++    let s = slot_store::read_slot_state(d.path());
++    assert_eq!((s.shader_nes, s.shader_snes), (Shader::Off, Shader::Crt));
++    press(&mut a, Btn::Right);
++    assert_eq!(a.screen_shader(), Shader::Crt);
++}
++
+ #[test]
+ fn colour_correction_toggles_the_running_platform_and_asks_the_core() {
+     let (_d, mut a) = playing();
+diff --git a/crates/slot/tests/quick_menu.rs b/crates/slot/tests/quick_menu.rs
+index af33030..71e7ea1 100644
+--- a/crates/slot/tests/quick_menu.rs
++++ b/crates/slot/tests/quick_menu.rs
+@@ -373,6 +373,8 @@ fn screen_opens_a_page_of_its_own_and_b_comes_back_to_it() {
+         QuickRow::ScreenGba,
+         QuickRow::ScreenGbc,
+         QuickRow::ScreenGb,
++        QuickRow::ScreenNes,
++        QuickRow::ScreenSnes,
+         QuickRow::ScreenGeneral,
+         QuickRow::ScreenGba,
+         QuickRow::ScreenGbc,
+@@ -1339,3 +1341,34 @@ fn lid_power_off_steps_through_its_minutes_wraps_and_saves() {
+     press(&mut a, Btn::Left);
+     assert_eq!(a.lid_off_min(), 1);
+ }
++
++#[test]
++fn the_nes_and_snes_pages_each_keep_their_own_shader() {
++    let (d, mut a, _) = on_carousel();
++    open_at(&mut a, QuickRow::Screen);
++    press(&mut a, Btn::A);
++    for _ in 0..4 {
++        press(&mut a, Btn::Down);
++    }
++    assert_eq!(a.quick_menu(), Some(QuickRow::ScreenNes));
++    press(&mut a, Btn::A);
++    assert_eq!(a.quick_menu(), Some(QuickRow::NesShader));
++    assert_eq!(a.quick_value(QuickRow::NesShader), Some(QuickValue::Crt));
++    press(&mut a, Btn::Left);
++    assert_eq!(a.quick_value(QuickRow::NesShader), Some(QuickValue::Off));
++    let s = read_slot_state(d.path());
++    assert_eq!((s.shader_nes, s.shader_snes), (Shader::Off, Shader::Crt));
++    press(&mut a, Btn::B);
++    assert_eq!(a.quick_menu(), Some(QuickRow::ScreenNes));
++    press(&mut a, Btn::Down);
++    press(&mut a, Btn::A);
++    assert_eq!(a.quick_menu(), Some(QuickRow::SnesShader));
++    press(&mut a, Btn::Right);
++    let s = read_slot_state(d.path());
++    assert_eq!((s.shader_nes, s.shader_snes), (Shader::Off, Shader::Off));
++    assert_eq!(
++        s.shader_gba,
++        Shader::Grid,
++        "a console page moved a Game Boy shader"
++    );
++}
