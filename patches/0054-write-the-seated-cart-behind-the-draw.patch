@@ -25,7 +25,7 @@ for the settings. The slot crate's integration tests otherwise fail as
 they did before this patch -- 25 of 986 on main, core picker and 4:3
 layout expectations the port changed long ago -- and none newly.
 
-Applies on top of 0052, upstream 91499a9.
+Applies on top of 0053, upstream 91499a9.
 
 diff --git a/crates/slot/src/app.rs b/crates/slot/src/app.rs
 --- a/crates/slot/src/app.rs
