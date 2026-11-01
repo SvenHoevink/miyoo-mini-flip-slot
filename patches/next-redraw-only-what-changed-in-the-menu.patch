@@ -1,0 +1,483 @@
+redraw only what changed in the menu
+
+The in-game menu was still at 30 fps on 0049, with blue light on: 16.8-18.4
+ms of overlay on every frame it changed. Two things were left.
+
+Every change -- the cursor moving a row -- recomposed and copied out the
+whole rect of the overlay, and with a scrim over nearly all of the canvas
+that is nearly all of the canvas: 1.5 MB copied from the kept picture into
+the canvas, read again to reverse it, and written to the panel, for two
+highlight rows. On the Flip's memory that is most of the frame. Over a
+still game every page already holds the last overlay, so a change now
+marks only what changed: the sprites in one list and not the other, and
+the rows a scrim gained or lost, which for a scrim that kept its colour is
+only where its edges moved. Of the overlay's sprites, only those reaching
+into those rows are drawn. With the game moving, or after a repaint,
+nothing changes from before.
+
+0049's pre-tinted copies did not hold: the labels still drew at 79-104 ns
+a pixel, the copies rebuilt as the textures were. A tinted blit now builds
+a 256-entry table a channel per draw instead -- `modulate`'s bytes, with
+nothing kept that can go stale -- and the copies are gone.
+
+Host, release, blue light on, menu cursor moving every 4th frame: 0.107
+ms a frame before, 0.050 after. The host's memory hides most of what the
+first change saves; not yet measured on the Flip.
+
+Tests: the scrim's edge sliding over a still game with a label riding on
+it, against the canvas path every frame, both ways up; a cursor move marks
+under 100 rows changed; a tinted blit matches the reference at every scale
+and clip under three tints. Leaving out the scrim's moved rows fails three
+tests, leaving out sprites that went fails three, and a table built from
+the wrong channel fails four.
+
+Applies on top of 0049, upstream 91499a9.
+
+diff --git a/crates/slot-gfx/src/soft/raster.rs b/crates/slot-gfx/src/soft/raster.rs
+--- a/crates/slot-gfx/src/soft/raster.rs
++++ b/crates/slot-gfx/src/soft/raster.rs
+@@ -165,6 +165,17 @@
+     let mut t = [0u8; 256];
+     for (i, v) in t.iter_mut().enumerate() {
+         *v = (i as f32 * colour[3]).clamp(0.0, 255.0) as u8;
++    }
++    t
++}
++
++/// `modulate` for every byte of every channel, built once per draw.
++fn channel_tables(colour: [f32; 4]) -> [[u8; 256]; 4] {
++    let mut t = [[0u8; 256]; 4];
++    for (c, table) in t.iter_mut().enumerate() {
++        for (v, out) in table.iter_mut().enumerate() {
++            *out = (v as f32 * colour[c]).clamp(0.0, 255.0) as u8;
++        }
+     }
+     t
+ }
+@@ -351,21 +362,7 @@
+ /// The whole texture, as `Draw::Tex` samples it.
+ pub const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+ 
+-/// `tex` with its colour channels tinted by `rgb` as `modulate` would, and
+-/// its alpha untouched: what `blit_part_tinted` draws from instead of
+-/// multiplying every texel by the tint again. Blue light tints everything
+-/// drawn over a game, and the in-game menu's labels went 20 to 100 ns a
+-/// pixel on those multiplies, 7.9 ms of a menu frame.
+-pub fn tinted(tex: &Image, rgb: [f32; 3]) -> Image {
+-    let mut out = Image::new(tex.w, tex.h);
+-    for (o, t) in out.px.chunks_exact_mut(4).zip(tex.px.chunks_exact(4)) {
+-        let m = modulate([t[0], t[1], t[2], t[3]], [rgb[0], rgb[1], rgb[2], 1.0]);
+-        o.copy_from_slice(&[m[0], m[1], m[2], t[3]]);
+-    }
+-    out
+-}
+-
+-/// `blit_part`, sampling only the `uv` window of the texture -- `Draw::Part`, which
++/// `blit`, sampling only the `uv` window of the texture -- `Draw::Part`, which
+ /// the shelf uses to show the middle of a texture wider than the canvas.
+ #[allow(clippy::too_many_arguments)]
+ pub fn blit_part(
+@@ -379,25 +376,6 @@
+     uv: [f32; 4],
+     scratch: &mut Scratch,
+ ) {
+-    blit_part_tinted(dst, tex, None, x, y, w, h, colour, uv, scratch);
+-}
+-
+-/// `blit_part` with `pre`, `tinted(tex, colour's rgb)`, standing in for the
+-/// per-texel tint: each texel is `pre`'s colour and `modulate`'s alpha, the
+-/// bytes `modulate` makes, since it treats the channels apart.
+-#[allow(clippy::too_many_arguments)]
+-pub fn blit_part_tinted(
+-    dst: &mut Image,
+-    tex: &Image,
+-    pre: Option<&Image>,
+-    x: f32,
+-    y: f32,
+-    w: f32,
+-    h: f32,
+-    colour: [f32; 4],
+-    uv: [f32; 4],
+-    scratch: &mut Scratch,
+-) {
+     let Some((x0, y0, x1, y1)) = clip(dst, x, y, w, h) else {
+         return;
+     };
+@@ -449,8 +427,11 @@
+     let mut opaque = false;
+     // One table per draw rather than four float multiplies per pixel.
+     let faded = (!plain && white(colour)).then(|| alpha_table(colour));
+-    let pre = pre.filter(|p| (p.w, p.h) == (tex.w, tex.h) && !white(colour));
+-    let pre_alpha = pre.map(|_| alpha_table(colour));
++    // A tinted draw -- everything over a game with blue light on -- through
++    // a table a channel, built per draw: `modulate`'s bytes without its four
++    // float multiplies a texel, which cost the in-game menu's labels 80-100
++    // ns a pixel against 20-28 untinted.
++    let tables = (!plain && faded.is_none()).then(|| channel_tables(colour));
+     // Near-opaque counts as opaque only for an untinted draw. With a colour
+     // the row has been modulated, and the gather path still blends such
+     // pixels, so taking the shortcut here as well would make one path
+@@ -470,15 +451,15 @@
+         let Some(trow) = tex.px.get(src_row..src_row + row_bytes) else {
+             continue;
+         };
+-        let prow = pre.and_then(|p| p.px.get(src_row..src_row + row_bytes));
+-        // `modulate(*s, colour)` for the texel at `c`, from `pre` when there
+-        // is one.
+-        let tint = |c: u32, s: &[u8; 4]| match (prow, &pre_alpha) {
+-            (Some(p), Some(t)) => {
+-                let c = c as usize;
+-                [p[c], p[c + 1], p[c + 2], t[s[3] as usize]]
+-            }
+-            _ => modulate(*s, colour),
++        // `modulate(*s, colour)`, from the tables when there are some.
++        let tint = |s: &[u8; 4]| match &tables {
++            Some(t) => [
++                t[0][s[0] as usize],
++                t[1][s[1] as usize],
++                t[2][s[2] as usize],
++                t[3][s[3] as usize],
++            ],
++            None => modulate(*s, colour),
+         };
+ 
+         if straight {
+@@ -563,7 +544,7 @@
+                     blend(d, [s[0], s[1], s[2], t[s[3] as usize]]);
+                     continue;
+                 }
+-                blend(d, tint(c, s));
++                blend(d, tint(s));
+             }
+             continue;
+         }
+@@ -575,7 +556,7 @@
+                 let s = match (plain, &faded) {
+                     (true, _) => *s,
+                     (false, Some(t)) => [s[0], s[1], s[2], t[s[3] as usize]],
+-                    (false, None) => tint(c, s),
++                    (false, None) => tint(s),
+                 };
+                 e.copy_from_slice(&s);
+             }
+@@ -924,11 +905,12 @@
+         }
+     }
+ 
+-    /// Blue light tints every sprite over a game. Drawing from the pre-tinted
+-    /// copy has to put down exactly what tinting each texel does, at every
+-    /// scale and clip, faded or not, and whatever alpha the texels carry.
++    /// Blue light tints every sprite over a game, through a table a channel
++    /// now rather than `modulate` per texel. The table holds `modulate`'s
++    /// bytes, so nothing may change: checked against the reference at every
++    /// scale and clip, faded and not, whatever alpha the texels carry.
+     #[test]
+-    fn a_pre_tinted_blit_matches_tinting_every_texel() {
++    fn a_tinted_blit_matches_the_reference_under_blue_light_tints() {
+         let tex = texture(13, 7);
+         let rects = [
+             (0.0, 0.0, 13.0, 7.0),
+@@ -944,24 +926,12 @@
+         let mut scratch = Scratch::default();
+         for (x, y, w, h) in rects {
+             for rgb in tints {
+-                let pre = super::tinted(&tex, rgb);
+                 for alpha in [1.0, 0.999, 0.6, 0.1] {
+                     let colour = [rgb[0], rgb[1], rgb[2], alpha];
+                     let mut want = canvas(48, 36);
+                     let mut got = canvas(48, 36);
+-                    super::blit(&mut want, &tex, x, y, w, h, colour, &mut scratch);
+-                    super::blit_part_tinted(
+-                        &mut got,
+-                        &tex,
+-                        Some(&pre),
+-                        x,
+-                        y,
+-                        w,
+-                        h,
+-                        colour,
+-                        super::WHOLE,
+-                        &mut scratch,
+-                    );
++                    reference(&mut want, &tex, x, y, w, h, colour);
++                    super::blit(&mut got, &tex, x, y, w, h, colour, &mut scratch);
+                     assert_eq!(got.px, want.px, "rect {:?} colour {colour:?}", (x, y, w, h));
+                 }
+             }
+diff --git a/crates/slot-gfx/src/soft/mod.rs b/crates/slot-gfx/src/soft/mod.rs
+--- a/crates/slot-gfx/src/soft/mod.rs
++++ b/crates/slot-gfx/src/soft/mod.rs
+@@ -67,10 +67,6 @@
+ 
+ struct Tex {
+     img: Image,
+-    /// `img` with the last tint it was drawn with already applied, and that
+-    /// tint, storage order: see `raster::tinted`. Rebuilt when the tint or the
+-    /// texture changes, which for blue light is when the step moves.
+-    tinted: Option<([u32; 3], Image)>,
+ }
+ 
+ /// Where the game pass writes: the canvas, or the panel directly.
+@@ -612,20 +608,6 @@
+ /// The canvas rect a list of sprites can touch, as `[x0, y0, x1)` bounds, a
+ /// pixel wider all round for rounding. A turned sprite is bounded by its
+ /// diagonal, whichever way it faces.
+-/// Build the texture's pre-tinted copy for `colour`'s rgb if the tint
+-/// changed, and hand it back -- None for an untinted draw, which the blit
+-/// never tints.
+-fn tinted_for(t: &mut Tex, colour: [f32; 4]) -> (&Image, Option<&Image>) {
+-    let rgb = [colour[0], colour[1], colour[2]];
+-    let tinted = rgb != [1.0; 3];
+-    let key = rgb.map(f32::to_bits);
+-    if tinted && t.tinted.as_ref().is_none_or(|(k, _)| *k != key) {
+-        t.tinted = Some((key, raster::tinted(&t.img, rgb)));
+-    }
+-    let pre = t.tinted.as_ref().filter(|_| tinted).map(|(_, img)| img);
+-    (&t.img, pre)
+-}
+-
+ fn overlay_bounds(items: &[Draw], cw: i32, ch: i32) -> Option<(i32, i32, i32, i32)> {
+     let mut b: Option<(f32, f32, f32, f32)> = None;
+     for item in items {
+@@ -1297,7 +1279,7 @@
+ 
+     fn put_image(&mut self, id: TexId, img: Image) {
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+-            *slot = Some(Tex { img, tinted: None });
++            *slot = Some(Tex { img });
+         }
+     }
+ 
+@@ -1392,12 +1374,10 @@
+                 } => {
+                     let colour =
+                         raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]);
+-                    if let Some(t) = self.textures.get_mut(tex.raw()).and_then(|t| t.as_mut()) {
+-                        let (img, pre) = tinted_for(t, colour);
+-                        raster::blit_part_tinted(
++                    if let Some(t) = self.textures.get(tex.raw()).and_then(|t| t.as_ref()) {
++                        raster::blit_part(
+                             &mut self.canvas,
+-                            img,
+-                            pre,
++                            &t.img,
+                             x,
+                             y,
+                             w,
+@@ -1419,12 +1399,10 @@
+                 } => {
+                     let colour =
+                         raster::to_storage([self.tint[0], self.tint[1], self.tint[2], alpha]);
+-                    if let Some(t) = self.textures.get_mut(tex.raw()).and_then(|t| t.as_mut()) {
+-                        let (img, pre) = tinted_for(t, colour);
+-                        raster::blit_part_tinted(
++                    if let Some(t) = self.textures.get(tex.raw()).and_then(|t| t.as_ref()) {
++                        raster::blit_part(
+                             &mut self.canvas,
+-                            img,
+-                            pre,
++                            &t.img,
+                             x,
+                             y,
+                             w,
+@@ -1483,7 +1461,6 @@
+     pub fn create_texture(&mut self, w: u32, h: u32, rgba: &[u8]) -> TexId {
+         let tex = Tex {
+             img: Image::from_rgba(w, h, rgba),
+-            tinted: None,
+         };
+         // An emptied slot is reused before the table grows: `free_texture`
+         // leaves holes, and a shelf that is rebuilt after a game would
+@@ -1534,7 +1511,6 @@
+         if let Some(slot) = self.textures.get_mut(id.raw()) {
+             *slot = Some(Tex {
+                 img: Image::from_rgba(w, h, rgba),
+-                tinted: None,
+             });
+         }
+     }
+@@ -1767,8 +1743,15 @@
+         let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
+         let now = overlay_bounds(&self.overlay, cw, ch);
+         if repainted || self.overlay != self.overlay_shown {
+-            let was = overlay_bounds(&self.overlay_shown, cw, ch);
+-            self.overlay_stale = union(self.overlay_stale, was);
++            // Over a still game, every page already holds the last overlay
++            // over it, so only what changed needs writing again: the cursor
++            // moving was the whole scrim's rect, recomposed and copied out
++            // for two highlight rows.
++            let changed = match repainted || game_drawn {
++                true => union(overlay_bounds(&self.overlay_shown, cw, ch), now),
++                false => self.overlay_change(),
++            };
++            self.overlay_stale = union(self.overlay_stale, changed);
+             self.overlay_shown.clone_from(&self.overlay);
+             self.overlay_left = PAGES;
+         }
+@@ -1776,7 +1759,7 @@
+         let over_game = now.is_some_and(|b| b.0 < g.2 && g.0 < b.2 && b.1 < g.3 && g.1 < b.3);
+         if self.overlay_left > 0 {
+             self.overlay_left -= 1;
+-            let area = union(self.overlay_stale, now);
++            let area = self.overlay_stale;
+             if self.overlay_left == 0 {
+                 self.overlay_stale = None;
+             }
+@@ -1788,6 +1771,34 @@
+         }
+     }
+ 
++    /// The canvas the overlay changed in since it was last shown: the sprites
++    /// that are in one and not the other, and the rows a scrim gained or lost.
++    /// A scrim that kept its colour changed only where its edges moved.
++    fn overlay_change(&self) -> Option<(i32, i32, i32, i32)> {
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
++        let (was, now) = (&self.overlay_shown, &self.overlay);
++        let (sw, sn) = (self.scrim_in(was), self.scrim_in(now));
++        let rows = |y0: i32, y1: i32| (y0 < y1).then_some((0, y0, cw, y1));
++        let scrim = match (sw, sn) {
++            (Some((a0, a1, ca)), Some((b0, b1, cb))) if ca == cb => {
++                union(rows(a0.min(b0), a0.max(b0)), rows(a1.min(b1), a1.max(b1)))
++            }
++            (a, b) => union(
++                a.and_then(|a| rows(a.0, a.1)),
++                b.and_then(|b| rows(b.0, b.1)),
++            ),
++        };
++        let (rw, rn) = (
++            &was[usize::from(sw.is_some())..],
++            &now[usize::from(sn.is_some())..],
++        );
++        let gone = rw.iter().filter(|d| !rn.contains(d));
++        let came = rn.iter().filter(|d| !rw.contains(d));
++        gone.chain(came).fold(scrim, |acc, d| {
++            union(acc, overlay_bounds(std::slice::from_ref(d), cw, ch))
++        })
++    }
++
+     /// The game's rect on the canvas, out to whole pixels.
+     fn game_bounds(&self) -> (i32, i32, i32, i32) {
+         let (gx, gy, gw, gh) = self.game.rect();
+@@ -1851,9 +1862,20 @@
+         skip: usize,
+     ) {
+         self.tint = self.gain;
+-        let overlay = std::mem::take(&mut self.overlay);
+-        self.draw_sprites(&overlay[skip.min(overlay.len())..]);
+-        self.overlay = overlay;
++        // Only the sprites that reach into `area`: nothing else of the canvas
++        // goes out. A cursor move left the menu's footer, 3 ms tinted, drawn
++        // every frame for rows that were not copied.
++        let (cw, ch) = (self.canvas.w as i32, self.canvas.h as i32);
++        let (ax0, ay0, ax1, ay1) = area;
++        let touching: Vec<Draw> = self.overlay[skip.min(self.overlay.len())..]
++            .iter()
++            .filter(|d| {
++                overlay_bounds(std::slice::from_ref(d), cw, ch)
++                    .is_some_and(|(x0, y0, x1, y1)| x0 < ax1 && ax0 < x1 && y0 < ay1 && ay0 < y1)
++            })
++            .copied()
++            .collect();
++        self.draw_sprites(&touching);
+         self.tint = [1.0; 3];
+         self.overlay_copy_out(target, at, half, area);
+     }
+@@ -1862,7 +1884,11 @@
+     /// whole canvas width. Its rows, as `fill_rect` clips them, and its colour
+     /// as `draw_sprites` would hand it over.
+     fn scrim(&self) -> Option<(i32, i32, [f32; 4])> {
+-        let Some(&Draw::Rect { x, y, w, h, colour }) = self.overlay.first() else {
++        self.scrim_in(&self.overlay)
++    }
++
++    fn scrim_in(&self, items: &[Draw]) -> Option<(i32, i32, [f32; 4])> {
++        let Some(&Draw::Rect { x, y, w, h, colour }) = items.first() else {
+             return None;
+         };
+         let cw = self.canvas.w as i32;
+@@ -3609,10 +3635,85 @@
+                     ];
+                     assert_eq!(d[..3], want, "pixel ({x}, {y})");
+                 }
++            }
++        }
++    }
++
++    /// The menu with its scrim ending at `bottom`, as it does while the
++    /// footer slides in, and a label that moves with it.
++    fn sliding(text: TexId, row: u32, bottom: f32) -> Vec<Draw> {
++        let mut items = menu(text, row);
++        if let Draw::Rect { y, h, .. } = &mut items[1] {
++            *h = bottom - *y;
++        }
++        items.push(Draw::Tex {
++            x: 300.0,
++            y: bottom + 4.0,
++            w: 60.0,
++            h: 20.0,
++            tex: text,
++            alpha: 1.0,
++        });
++        items
++    }
++
++    /// The canvas path's panel for `items` over pattern `seed`.
++    fn reference_of(mount: Mount, seed: u32, items: Vec<Draw>) -> Vec<u8> {
++        let mut r = Rig::new(mount);
++        r.frame = pattern(seed);
++        r.present(&via_canvas(items));
++        std::mem::take(&mut r.panel)
++    }
++
++    /// Over a still game only what changed is written again. While the
++    /// scrim's edge slides, that is the rows it moved across and the label
++    /// riding on it; the panel still has to be the canvas path's, every
++    /// frame, both ways up.
++    #[test]
++    fn a_sliding_scrim_rewrites_only_what_moved_and_lands_right() {
++        for mount in [Mount::Normal, Mount::Half] {
++            let mut r = Rig::new(mount);
++            for _ in 0..2 * PAGES {
++                r.present(&[Draw::Game]);
+             }
++            for _ in 0..2 * PAGES {
++                let items = sliding(r.text, 0, 400.0);
++                r.present(&items);
++            }
++            for (i, bottom) in [410.0, 423.5, 440.0, 455.0, 455.0, 430.0]
++                .into_iter()
++                .enumerate()
++            {
++                let items = sliding(r.text, 1, bottom);
++                r.present(&items);
++                let want = reference_of(mount, 0, sliding(r.text, 1, bottom));
++                let n = differ(&r.panel, &want);
++                assert_eq!(
++                    n, 0,
++                    "frame {i}: {n} pixels differ with the scrim at {bottom}"
++                );
++            }
+         }
+     }
+ 
++    /// A cursor move over a still game marks the highlight's old and new rows
++    /// changed, not the scrim's whole rect.
++    #[test]
++    fn a_cursor_move_marks_only_the_highlight_changed() {
++        let mut r = Rig::new(Mount::Half);
++        for _ in 0..2 * PAGES {
++            r.present(&[Draw::Game]);
++        }
++        for _ in 0..2 * PAGES {
++            let items = menu(r.text, 0);
++            r.present(&items);
++        }
++        let items = menu(r.text, 1);
++        r.present(&items);
++        let (_, y0, _, y1) = r.c.overlay_stale.expect("the move marked nothing");
++        assert!(y1 - y0 < 100, "a cursor move rewrote rows {y0}..{y1}");
++    }
++
+     /// The menu's first frame on a fresh compositor, composed from scratch:
+     /// nothing kept, the scrim blended.
+     fn composed_once(mount: Mount, blue: u8, seed: u32, row: u32) -> Vec<u8> {
